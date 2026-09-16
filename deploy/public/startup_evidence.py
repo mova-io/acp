@@ -351,7 +351,23 @@ def main(argv=None):
                 rows.append({'app': name, 'ok': False, 'reason': exc.reason})
             except Exception:
                 rows.append({'app': name, 'ok': False, 'reason': 'startup_evidence_unavailable'})
+    attempt_ok = all(row['ok'] for row in rows)
     output = Path(args.output)
+    # A staging recovery/completion pass invokes this program again for a
+    # subset of roles. Keep the first failed receipt for every role so a later
+    # transport failure cannot erase the failure that triggered recovery.
+    try:
+        prior = json.loads(output.read_text())
+        prior_rows = prior.get('roles', []) if prior.get('image') == args.image else []
+    except (FileNotFoundError, json.JSONDecodeError, AttributeError):
+        prior_rows = []
+    merged = {row.get('app'): row for row in prior_rows
+              if isinstance(row, dict) and isinstance(row.get('app'), str)}
+    for row in rows:
+        existing = merged.get(row['app'])
+        if existing is None or existing.get('ok') is not False:
+            merged[row['app']] = row
+    rows = list(merged.values())
     output.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(dir=output.parent, prefix='.startup-')
     try:
@@ -360,9 +376,9 @@ def main(argv=None):
         os.replace(temporary, output)
     finally:
         Path(temporary).unlink(missing_ok=True)
-    ok = all(row['ok'] for row in rows)
-    print(json.dumps({'event': 'deployment.startup', 'ok': ok, 'roles': len(rows)}), flush=True)
-    return 0 if ok else 1
+    print(json.dumps({'event': 'deployment.startup', 'ok': attempt_ok,
+                      'roles': len(args.apps)}), flush=True)
+    return 0 if attempt_ok else 1
 
 
 if __name__ == '__main__':

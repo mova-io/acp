@@ -517,6 +517,35 @@ def test_main_artifact_records_only_allowlisted_missing_evidence_reason(monkeypa
         {'app': 'worker-staging', 'ok': False, 'reason': 'console_logs_incomplete'}]
 
 
+def test_later_role_attempt_cannot_overwrite_first_failed_receipt(monkeypatch, tmp_path):
+    output = tmp_path / 'startup.json'
+    output.write_text(json.dumps({'image': 'image', 'roles': [
+        {'app': 'assess-staging', 'ok': False, 'reason': 'console_logs_incomplete'}]}))
+
+    def collect(_subscription, _group, name, _image):
+        if name == 'release-staging':
+            raise evidence.EvidenceUnavailable('azure_read_unavailable')
+        return {'app': name, 'ok': True, 'revision': 'new'}
+
+    monkeypatch.setattr(evidence, 'collect', collect)
+    assert evidence.main(['--subscription', 'sub', '--group', 'group', '--image', 'image',
+                          '--output', str(output), 'assess-staging', 'release-staging']) == 1
+    roles = {row['app']: row for row in json.loads(output.read_text())['roles']}
+    assert roles['assess-staging']['reason'] == 'console_logs_incomplete'
+    assert roles['release-staging']['reason'] == 'azure_read_unavailable'
+
+
+def test_retained_prior_failure_does_not_fail_a_later_successful_attempt(monkeypatch, tmp_path):
+    output = tmp_path / 'startup.json'
+    output.write_text(json.dumps({'image': 'image', 'roles': [
+        {'app': 'assess-staging', 'ok': False, 'reason': 'console_logs_incomplete'}]}))
+    monkeypatch.setattr(evidence, 'collect', lambda *_args, **_kwargs: {
+        'app': 'assess-staging', 'ok': True, 'revision': 'new'})
+    assert evidence.main(['--subscription', 'sub', '--group', 'group', '--image', 'image',
+                          '--output', str(output), 'assess-staging']) == 0
+    assert json.loads(output.read_text())['roles'][0]['reason'] == 'console_logs_incomplete'
+
+
 def _revision_app(revision, image):
     result = app()
     result['properties']['latestRevisionName'] = revision
