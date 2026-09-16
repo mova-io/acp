@@ -5326,6 +5326,50 @@ _SCAN_ACTIONS = {
 }
 
 
+def _gate_source_lifecycle(items: list[dict], source: str, user: str | None,
+                           scope: dict) -> list[dict]:
+    """Exclude durable terminal sources before any content read, preserving the estate."""
+    provider = str(source or '').strip().lower()
+    if provider not in {'drive', 'sharepoint', 'onedrive'}:
+        scope['lifecycle_gate'] = {'listed': len(items), 'excluded': 0,
+                                   'unknown': len(items), 'state': 'unsupported_provider'}
+        return items
+    import core
+    from lifecycle_identity import source_identity, TERMINAL
+    inventory = [dict(it, file=it['name'], drive_file_id=it.get('id'),
+                      drive_id=it.get('driveId') or it.get('drive_id')) for it in items]
+    lookup = getattr(core.store, 'get_source_lifecycle_states', None)
+    if not callable(lookup):
+        # This build requires the durable lookup seam. Never silently bypass a broken gate.
+        raise RuntimeError('source lifecycle lookup unavailable before content access')
+    result = lookup(user, provider, inventory)
+    states = result['states']
+    unavailable = set(result['unavailable'])
+    kept, evidence = [], []
+    unknown = 0
+    for index, (item, row) in enumerate(zip(items, inventory)):
+        identity = source_identity(user, provider, row)
+        previous = states.get(identity) if identity is not None else None
+        status = previous.get('lifecycle_status') if previous else None
+        terminal = status in TERMINAL
+        identity_state = ('missing_identity' if identity is None or index in unavailable else
+                          'ledger_absent' if previous is None else 'matched')
+        if identity_state != 'matched':
+            unknown += 1
+        reason = None
+        if terminal:
+            reason = f"excluded from Assess: durable source lifecycle status '{status}'"
+            if previous.get('reason'):
+                reason += ' — ' + str(previous['reason'])
+        else:
+            kept.append(item)
+        evidence.append({'file': item['name'], 'identity_state': identity_state,
+                         'lifecycle_status': status, 'exclusion_reason': reason})
+    scope['lifecycle_gate'] = {'listed': len(items), 'excluded': len(items) - len(kept),
+                               'unknown': unknown, 'state': 'checked', 'files': evidence}
+    return kept
+
+
 def run_scan(source: str = "local", progress=_noop, drive_token: str | None = None,
              folder: str | None = None, sp_token: str | None = None,
              ai_enabled: bool = True, scan_id: str | None = None,
@@ -5405,6 +5449,10 @@ def run_scan(source: str = "local", progress=_noop, drive_token: str | None = No
                      exclude_remediated=exclude_remediated, scope_out=scope,
                      scope_files=_scope_for_listing(user), inventory_out=inventory_out,
                      drive_delta=drive_delta, sp_delta=sp_delta)
+        # Preserve the full listing even when terminal state excludes content access.
+        # save_scan persists it as inventory; only the assessment population is reduced.
+        inventory_items = list(items)
+        items = _gate_source_lifecycle(items, source, user, scope)
         # Freeze per-file rules with the same listing, before any assessment starts.
         import core as _scope_core
         scope["scope_rules"] = [
@@ -5504,7 +5552,9 @@ def run_scan(source: str = "local", progress=_noop, drive_token: str | None = No
             for item in items:
                 with selection(selected_for_file(scopes_by_file[item["name"]], item["name"])):
                     rule_allowlists[item["name"]] = allowed_rules()
-        if rule_allowlists is not None:
+        if not items:
+            office = {}
+        elif rule_allowlists is not None:
             office = _analyse_office(tmp, rule_allowlists=rule_allowlists)
         else:
             office = _analyse_office(tmp)
@@ -5656,7 +5706,7 @@ def run_scan(source: str = "local", progress=_noop, drive_token: str | None = No
             # for why this matters) — the same raw `_list()` items ADR 0020's deferred discovery
             # path already turns into scan_inventory rows in handlers._scan_discover's `norm`.
             # Not part of the report's public shape: popped before anything else reads `report`.
-            "_inventory_items": items,
+            "_inventory_items": inventory_items,
             "rubric": {"name": rb.name, "version": rb.version, "hash": rb.hash},
             "summary": summary,
             "started_at": started,
