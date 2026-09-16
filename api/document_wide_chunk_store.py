@@ -39,12 +39,16 @@ class ChunkPlanStore:
         self.store, self.db = store, store._db
 
     def _authority(self, cur, owner, run_id, scan_id, snapshot):
-        self.db.execute(cur, """SELECT e.owner_email,e.scan_id,e.input_snapshot_id,e.stage,p.scan_id AS policy_scan
+        self.db.execute(cur, """SELECT e.owner_email,e.scan_id,e.input_snapshot_id,e.stage,
+          e.is_current,e.cancel_requested_at,e.state,p.scan_id AS policy_scan
           FROM stage_executions e JOIN ai_spending_run_policies p
             ON p.owner_id=e.owner_email AND p.run_id=e.execution_id
           WHERE e.execution_id=%s""", (run_id,))
         row = self.db.fetchone(cur)
-        if not row or (row['owner_email'], row['scan_id'], row['policy_scan'], row['input_snapshot_id'], row['stage']) != (owner, scan_id, scan_id, snapshot, 'remediate'):
+        if (not row or
+            (row['owner_email'], row['scan_id'], row['policy_scan'], row['input_snapshot_id'], row['stage']) != (owner, scan_id, scan_id, snapshot, 'remediate') or
+            row['is_current'] != 1 or row.get('cancel_requested_at') or
+            row['state'] not in ('accepted','queued','processing')):
             raise ValueError('chunk plan owner/run/scan authority mismatch')
 
     def create(self, plan: dict, chunks: list[dict]):
@@ -88,17 +92,24 @@ class ChunkPlanStore:
     def complete_receipts(self, owner, run_id, plan_id, *, source_sha256,
                           assessment_snapshot_id, remediation_source_revision):
         """Read publish authority only for an exact current and complete validated set."""
-        with self.db.cursor() as cur:
+        with self.store.transaction(), self.db.cursor() as cur:
             self.db.execute(cur, "SELECT * FROM document_wide_chunk_plans WHERE owner_id=%s AND run_id=%s AND plan_id=%s",
                             (owner,run_id,plan_id))
             plan = self.db.fetchone(cur)
             if not plan or plan['state'] != 'complete' or (plan['source_sha256'],plan['assessment_snapshot_id'],plan['remediation_source_revision']) != (source_sha256,assessment_snapshot_id,remediation_source_revision):
                 return None
+            try:
+                self._authority(cur, owner, run_id, plan['scan_id'], plan['assessment_snapshot_id'])
+            except ValueError:
+                return None
             self.db.execute(cur, """SELECT * FROM document_wide_chunks WHERE owner_id=%s AND run_id=%s AND plan_id=%s ORDER BY ordinal""",
                             (owner,run_id,plan_id))
             rows = self.db.fetchall(cur)
-        eligible = set(json.loads(plan['eligible_finding_ids_json']))
-        covered = [fid for row in rows for fid in json.loads(row['finding_ids_json'])]
-        if not rows or any(row['state'] != 'validated' or not row['receipt_json'] for row in rows) or len(covered) != len(set(covered)) or set(covered) != eligible:
-            return None
-        return [json.loads(row['receipt_json']) for row in rows]
+            if (self.store.remediation_source_revision(plan['scan_id']) != plan['remediation_source_revision'] or
+                    (self.store.get_file_record(plan['scan_id'], plan['file']) or {}).get('corrected_sha256') != plan['source_sha256']):
+                return None
+            eligible = set(json.loads(plan['eligible_finding_ids_json']))
+            covered = [fid for row in rows for fid in json.loads(row['finding_ids_json'])]
+            if not rows or any(row['state'] != 'validated' or not row['receipt_json'] for row in rows) or len(covered) != len(set(covered)) or set(covered) != eligible:
+                return None
+            return [json.loads(row['receipt_json']) for row in rows]
