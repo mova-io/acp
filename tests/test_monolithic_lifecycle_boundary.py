@@ -154,7 +154,8 @@ def test_restored_retained_state_is_not_terminal(scan_boundary, status):
 
 
 @pytest.mark.parametrize('provider', ['drive', 'sharepoint', 'onedrive'])
-def test_real_ledger_gates_before_content_and_saved_inventory_keeps_terminal_row(scan_boundary, isolated_store, monkeypatch, provider):
+@pytest.mark.parametrize('legacy', [False, True])
+def test_real_ledger_gates_before_content_and_saved_inventory_keeps_terminal_row(scan_boundary, isolated_store, monkeypatch, provider, legacy):
     core, _, items, _, calls = scan_boundary
     st = isolated_store
     monkeypatch.setattr(core, 'store', st)
@@ -162,11 +163,19 @@ def test_real_ledger_gates_before_content_and_saved_inventory_keeps_terminal_row
     st.add_inventory('prior', [{'file': 'old-name.html', 'drive_file_id': 'terminal-id',
                                'drive_account_id': 'Account-A' if provider == 'drive' else None,
                                'drive_id': 'Account-A' if provider != 'drive' else None}])
-    st.set_lifecycle_status('prior', 'old-name.html', 'Archived', reason='verified action')
+    if legacy:
+        with st._db.cursor() as cur:
+            st._db.execute(cur, "UPDATE scan_inventory SET lifecycle_status='Archived' WHERE scan_id='prior'")
+    else:
+        st.set_lifecycle_status('prior', 'old-name.html', 'Archived', reason='verified action')
     items.extend([item('new-name.html', 'terminal-id', provider), item('active.html', 'active-id', provider)])
     report = scanner.run_scan(provider, user='owner@example.test', ai_enabled=False)
     assert calls['cache'] == calls['download'] == calls['analysis'] == ['active.html']
     evidence = report['scope']['lifecycle_gate']
+    if legacy:
+        with st._db.cursor() as cur:
+            st._db.execute(cur, 'SELECT COUNT(*) AS count FROM source_lifecycle_state')
+            assert st._db.fetchone(cur)['count'] == 0  # The pre-content gate is read-only.
     sid = st.save_scan(report)
     assert st.get_lifecycle_status(sid, 'new-name.html')['lifecycle_status'] == 'Archived'
     assert evidence['listed'] == 2 and evidence['excluded'] == 1

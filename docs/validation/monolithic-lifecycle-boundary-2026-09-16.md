@@ -4,6 +4,8 @@ Current main `5dd70c60` routes the durable `scheduled_sweep` handler through `co
 
 The shared scanner now reads the exact source lifecycle lookup before cache/download/analysis. It excludes `Archived`, `Already archived`, and `Deleted`; retained restoration states are not terminal. It preserves the complete listing in `_inventory_items`, assessed-subset summary counts, and `scope.lifecycle_gate` listing/exclusion/unknown counts with per-file reasons. Lookup failures stop content access. Missing identity and absent history are explicitly unknown, never inferred from names or presented as Active.
 
+The read-only lookup also includes exact-identity legacy terminal inventory when no ledger state exists; retained restoration state takes precedence. Real Store fixtures verify the first legacy rescan performs no pre-content ledger writes and retains the terminal row after saving.
+
 This depends on PR #2086's `get_source_lifecycle_states(owner, provider, inventory_items)` and `lifecycle_identity.source_identity`. Tenant and provider normalize; provider account/drive and item identifiers remain opaque. The gate does not add a terminal override or widen privileges.
 
 Shared coverage includes scheduled singleton and owner-scoped occurrences, synchronous/threaded legacy scan routes, and the legacy queued `scan` handler. Metadata-only deferred discovery and later assessment use their existing lifecycle paths. Tests exercise the actual scheduled handler and scanner without network calls, plus source-provider/namespace isolation and retained inventory.
