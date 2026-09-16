@@ -2525,7 +2525,11 @@ class _PgAdapter:
     # v53 retains numeric-only GPU timing in nullable ai_calls.timing.
     # v54 binds local request telemetry to its authenticated execution without paid attempts.
     # v55 preserves tenant/provider/account/item lifecycle state across scan history pruning.
-    _SCHEMA_VERSION = 56
+    # v57 re-identifies the complete v56 union after production received a different DDL set
+    # under version 56. Keeping the same number makes the deployment preflight correctly refuse
+    # the checksum collision but leaves no additive migration path. Advancing the marker lets the
+    # idempotent union DDL fill the missing columns and records one unambiguous schema identity.
+    _SCHEMA_VERSION = 57
     _SCHEMA_CHECKSUM_AT_VERSION = "4a3338134fdc573bcaa2062935c2711d"
     # Namespaced so it cannot collide with an advisory lock taken anywhere else. Session-scoped
     # (pg_advisory_lock, not _xact) because the migration spans several transactions.
