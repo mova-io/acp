@@ -329,6 +329,23 @@ def test_blue_green_domain_follows_the_api_apps_exact_environment():
     assert CODE.count('ENV_DOMAIN="$(app_environment_domain)"') == 2
 
 
+def test_green_revision_suffix_is_bound_to_the_exact_image():
+    """A failed zero-traffic green can retain its immutable revision. A retry must reuse the
+    suffix only for the exact same image and create a distinct suffix for a newly tagged build."""
+    assert "green_revision_suffix()" in CODE
+    assert CODE.count('SUFFIX="$(green_revision_suffix)"') == 2
+
+    helper = re.search(r"green_revision_suffix\(\) \{.*?^\}", CODE, re.MULTILINE | re.DOTALL).group()
+    def suffix(image):
+        script = f"set -euo pipefail\ndie() {{ exit 97; }}\nIMG={image!r}\n{helper}\ngreen_revision_suffix\n"
+        return subprocess.run(["bash"], input=script, text=True, capture_output=True, check=True).stdout
+
+    first = suffix("registry/acp-app:c03ffc8-1789567001")
+    assert first == suffix("registry/acp-app:c03ffc8-1789567001")
+    assert first != suffix("registry/acp-app:c03ffc8-1789567002")
+    assert re.fullmatch(r"[a-z][a-z0-9-]{0,63}", first)
+
+
 def test_the_script_still_parses():
     assert subprocess.run(["bash", "-n", str(REDEPLOY)]).returncode == 0
 

@@ -93,6 +93,16 @@ app_environment_domain() {
   printf '%s' "$domain"
 }
 
+# CalVer can repeat, and even the same commit can be retried after leaving a 0%-traffic green.
+# ACA revision names are immutable, so bind the suffix to the immutable image tag this run built:
+# the same image maps to the same revision, while every newly tagged build maps to a new one.
+green_revision_suffix() {
+  local image_tag="${IMG##*:}"
+  [[ "$image_tag" =~ ^[a-z0-9][a-z0-9.-]{0,62}$ ]] \
+    || die "image tag cannot form a safe Container Apps revision suffix"
+  printf 'g%s' "${image_tag//./-}"
+}
+
 # Names are an isolation boundary. Staging once passed retired ACP_WORKER while this script read
 # the three lane variables, so all three silently fell back to PRODUCTION names. Refuse that
 # class of mistake before subscription reads, builds, queue probes, or Container App mutations.
@@ -414,7 +424,7 @@ if [ "$DRY" = 1 ]; then
     BLUE="$(az containerapp ingress traffic show "${AZ[@]}" -g "$RG" -n "$APP" \
               --query "[?weight>\`0\`] | [0].revisionName" -o tsv 2>/dev/null || true)"
     [ -n "$BLUE" ] || BLUE="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" --query properties.latestRevisionName -o tsv)"
-    SUFFIX="g$(printf '%s' "$BUILD_VERSION" | tr -cd '0-9')"
+    SUFFIX="$(green_revision_suffix)"
     say "DRY RUN — blue-green plan"
     echo "  revision mode  : $MODE$([ "$MODE" != Multiple ] && echo '  -> would switch to Multiple')"
     echo "  blue (keeps traffic until promotion): $BLUE"
@@ -580,7 +590,7 @@ if [ "$BG" = 1 ]; then
 
   # Green at 0%. In Multiple mode weights are explicit, so a new revision takes no traffic until
   # told to — there is no "hold it back" flag to forget.
-  SUFFIX="g$(printf '%s' "$BUILD_VERSION" | tr -cd '0-9')"
+  SUFFIX="$(green_revision_suffix)"
   GREEN="$APP--$SUFFIX"
   say "deploying green ($GREEN) at 0% traffic"
   _aca_retry python3 "$SRC_ROOT/deploy/public/update_api_image.py" \
