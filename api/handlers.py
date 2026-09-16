@@ -185,6 +185,7 @@ def _enqueue_analysis(scan_id: str, source: str, items: list[dict], *, ai: bool,
                 "items": [{"file": it["file"], "drive_file_id": it.get("drive_file_id"),
                            "mime": it.get("mime"), "path": it.get("path"),
                            "checksum": it.get("checksum"), "drive_id": it.get("drive_id"),
+                           "drive_account_id": it.get("drive_account_id"),
                            "source_modified": it.get("source_modified"),
                            "size_kb": it.get("size_kb"),
                            "shadow_candidate": name_counts[_logical_name(it["file"])] > 1,
@@ -196,6 +197,7 @@ def _enqueue_analysis(scan_id: str, source: str, items: list[dict], *, ai: bool,
                 "scan_id": scan_id, "source": source, "file": it["file"],
                 "drive_file_id": it.get("drive_file_id"), "mime": it.get("mime"), "path": it.get("path"),
                 "checksum": it.get("checksum"), "drive_id": it.get("drive_id"),
+                "drive_account_id": it.get("drive_account_id"),
                 "source_modified": it.get("source_modified"),
                 "size_kb": it.get("size_kb"),
                 "shadow_candidate": name_counts[_logical_name(it["file"])] > 1,
@@ -3884,6 +3886,7 @@ def _scan_assess(payload: dict, job: dict) -> None:
                       "mime": src_mime if src_mime in _EXPORT_MAP else None,
                       "path": r.get("path"), "checksum": r.get("checksum"),
                       "drive_id": r.get("drive_id"),
+                      "drive_account_id": r.get("drive_account_id"),
                       "size_kb": r.get("size_kb"),
                       "source_modified": r.get("source_modified")})
     # ── PERSIST THE EXCLUSION ONTO THE RUN ───────────────────────────────────────────────────
@@ -4120,6 +4123,42 @@ def _escalate_low_confidence_findings(fdict: dict, filepath, *,
         swallowed("_escalate_low_confidence_findings failed", scan_id)
 
 
+def _queued_terminal_exclusion(scan_id, item, source, user):
+    """Check current lifecycle before reusing findings or reading source bytes."""
+    from lifecycle_identity import source_identity, TERMINAL
+    provider = str(source or '').strip().lower()
+    if provider not in ('drive', 'sharepoint', 'onedrive'):
+        return None
+    reader = getattr(core.store, 'queued_source_lifecycle_context', None)
+    if not callable(reader):
+        return None  # Storeless import paths have no durable context.
+    context = reader(scan_id, item['file'])
+    if not context:
+        raise RuntimeError('queued analysis has no authoritative scan context')
+    owner = context.get('owner_email')
+    if (str(owner or '').strip().lower() != str(user or '').strip().lower()
+            or str(context.get('source') or '').strip().lower() != provider):
+        raise RuntimeError('queued analysis source ownership changed')
+    current = context.get('inventory')
+    frozen = source_identity(owner, provider, item)
+    if frozen and not current:
+        raise RuntimeError('queued analysis source binding is absent')
+    if current:
+        actual = source_identity(owner, provider, current)
+        if ((frozen and actual != frozen)
+                or item.get('drive_file_id') != current.get('drive_file_id')):
+            raise RuntimeError('queued analysis source binding changed')
+    previous = None
+    if frozen:
+        previous = core.store.get_source_lifecycle_states(owner, provider, [item])['states'].get(frozen)
+    # A retained restoration takes precedence over an older inventory projection.
+    status = previous.get('lifecycle_status') if previous else (current or {}).get('lifecycle_status')
+    if status not in TERMINAL:
+        return None
+    return {'status': status, 'identity_state': 'matched' if frozen else 'missing_identity',
+            'reason': (previous or {}).get('reason') or (current or {}).get('lifecycle_reason')}
+
+
 def _analyse_and_persist_one_impl(scan_id, item, source, pii, svc, toks, now, _lf, user=None,
                                   rubric_hash=None, incremental=True, job=None) -> None:
     """Download + analyse + assess + persist ONE file and emit its Discover span on that
@@ -4130,6 +4169,19 @@ def _analyse_and_persist_one_impl(scan_id, item, source, pii, svc, toks, now, _l
     import time as _time
     import stage_timing as _st
     name = item["file"]
+    exclusion = _queued_terminal_exclusion(scan_id, item, source, user)
+    if exclusion:
+        written = core.store.save_file_result(scan_id, {
+            "file": name, "engine": "lifecycle", "status": "skipped", "score": None,
+            "compliant": False, "skipped_rules": 0, "succeeded": False,
+            "drive_file_id": item.get("drive_file_id"), "issues": [], "errors": [],
+            "lifecycle_exclusion": exclusion,
+        }, now, job=job)
+        if written:
+            import json
+            core.store.log_decision("system", "analysis.lifecycle_skipped", scan_id=scan_id, file=name,
+                                    detail=json.dumps(exclusion, sort_keys=True))
+        return
     checksum = item.get("checksum")
     drive_file_id = item.get("drive_file_id")
     dedup_of = None
