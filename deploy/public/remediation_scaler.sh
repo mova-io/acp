@@ -16,9 +16,18 @@ _prepare_remediation_worker_patch() {
 _update_lane_worker() {
   local app="$1"
   if [ "$app" != "$REMEDIATE_WORKER" ]; then
+    # Existing Release apps predate the six-connection sizing in release_worker.py. Normalize
+    # every image rollout as well as first creation; otherwise the creation-only fix leaves the
+    # deployed worker pinned at three connections indefinitely.
+    local release_capacity=()
+    if [ -n "${RELEASE_WORKER:-}" ] && [ "$app" = "$RELEASE_WORKER" ]; then
+      release_capacity=("ACP_WORKERS=3" "ACP_DB_MAX_CONN=6")
+    fi
     _aca_retry az containerapp update "${AZ[@]}" -g "$RG" -n "$app" --image "$IMG" \
       --termination-grace-period "$WORKER_TERMINATION_GRACE_SECONDS" \
-      --set-env-vars "ACP_SHUTDOWN_DRAIN_SECONDS=$WORKER_DRAIN_SECONDS" "ACP_DEDICATED_RELEASE_WORKERS=${DEDICATED_RELEASE:-0}" --no-wait -o none
+      --set-env-vars "ACP_SHUTDOWN_DRAIN_SECONDS=$WORKER_DRAIN_SECONDS" \
+        "ACP_DEDICATED_RELEASE_WORKERS=${DEDICATED_RELEASE:-0}" "${release_capacity[@]}" \
+        --no-wait -o none
     return
   fi
   # One PATCH preserves the full scale configuration and worker settings.

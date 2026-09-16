@@ -113,6 +113,22 @@ def test_request_context_defaults_background_work_to_ordinary_gate(monkeypatch):
         adapter._putconn(conn)
 
 
+def test_release_pool_admits_three_handlers_and_both_heartbeat_writers(monkeypatch):
+    """The dedicated Release shape needs five ordinary permits plus the mutation reserve."""
+    adapter = _adapter(monkeypatch, capacity=6)
+    ordinary = [adapter._getconn(timeout=0.2) for _ in range(5)]
+    token = store.DB_MUTATION_REQUEST.set(True)
+    try:
+        reserve = adapter._getconn(timeout=0.2)
+    finally:
+        store.DB_MUTATION_REQUEST.reset(token)
+
+    assert len(adapter._get_pool().used) == 6
+    adapter._putconn(reserve)
+    for conn in ordinary:
+        adapter._putconn(conn)
+
+
 def test_overlapping_mutations_borrow_idle_ordinary_capacity(monkeypatch):
     """The reserve is a guaranteed floor, not a one-request mutation ceiling.
 
@@ -215,6 +231,30 @@ def test_real_postgres_pool_keeps_critical_mutation_capacity_isolated():
     with critical.cursor() as cur:
         cur.execute("SELECT 1")
         assert cur.fetchone()[0] == 1
+
+    adapter._putconn(critical)
+    for conn in ordinary:
+        adapter._putconn(conn)
+    adapter._get_pool().closeall()
+
+
+@pytest.mark.skipif(not os.environ.get("DATABASE_URL"),
+                    reason="needs the Postgres integration service")
+def test_real_release_pool_runs_five_ordinary_clients_and_keeps_the_reserve():
+    """Reproduce the Release worker's three handlers plus its two DB heartbeat writers."""
+    adapter = store._PgAdapter(os.environ["DATABASE_URL"])
+    adapter._MAX_CONN = 6
+    ordinary = [adapter._getconn(timeout=0.5) for _ in range(5)]
+    token = store.DB_MUTATION_REQUEST.set(True)
+    try:
+        critical = adapter._getconn(timeout=0.5)
+    finally:
+        store.DB_MUTATION_REQUEST.reset(token)
+
+    for conn in [*ordinary, critical]:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            assert cur.fetchone()[0] == 1
 
     adapter._putconn(critical)
     for conn in ordinary:

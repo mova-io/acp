@@ -68,7 +68,7 @@ def test_private_bounded_release_template_preserves_dependencies():
     env = {e['name']: e for e in container['env']}
     assert env['DATABASE_URL']['secretRef'] == 'database'
     assert env['ACP_WORKERS']['value'] == '3'
-    assert env['ACP_DB_MAX_CONN']['value'] == '3'
+    assert env['ACP_DB_MAX_CONN']['value'] == '6'
     query = template['scale']['rules'][0]['custom']['metadata']['query']
     assert 'publish_file' in query and 'remediate_file' not in query
     assert 'run_after' in query and 'attempts < max_attempts' in query
@@ -181,3 +181,9 @@ def test_rollout_preflight_requires_three_live_release_slots():
     script = (ROOT / 'deploy/public/redeploy.sh').read_text()
     assert 'int(r.get("pool_size") or 0) < 3' in script
     assert 'live three-slot heartbeat' in script
+
+
+def test_redeploy_normalizes_existing_release_worker_capacity():
+    script = (ROOT / 'deploy/public/remediation_scaler.sh').read_text()
+    assert 'if [ -n "${RELEASE_WORKER:-}" ] && [ "$app" = "$RELEASE_WORKER" ]' in script
+    assert 'release_capacity=("ACP_WORKERS=3" "ACP_DB_MAX_CONN=6")' in script
