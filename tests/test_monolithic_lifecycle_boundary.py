@@ -111,7 +111,8 @@ def test_lookup_failure_stops_before_cache_or_download(scan_boundary, monkeypatc
     assert calls['cache'] == calls['download'] == calls['analysis'] == []
 
 
-def test_durable_scheduled_sweep_reaches_shared_pre_content_gate(scan_boundary, monkeypatch):
+@pytest.mark.parametrize('owner_occurrence', [False, True])
+def test_durable_scheduled_sweep_reaches_shared_pre_content_gate(scan_boundary, monkeypatch, owner_occurrence):
     import handlers
     core, st, items, ledger, calls = scan_boundary
     items.append(item('archived.html', 'id'))
@@ -124,7 +125,16 @@ def test_durable_scheduled_sweep_reaches_shared_pre_content_gate(scan_boundary, 
     monkeypatch.setattr(st, 'save_scan', lambda report: saved.append(report) or 'scheduled-id', raising=False)
     monkeypatch.setattr(st, 'record_sweep_outcome', lambda **kwargs: outcomes.append(kwargs), raising=False)
     monkeypatch.setattr(core, 'finalize_scan', lambda *args: None)
-    handlers._scheduled_sweep({}, {})
+    payload = {}
+    if owner_occurrence:
+        from datetime import date
+        from scan_schedule import occurrence_key
+        cfg = st.get_schedule()
+        monkeypatch.setattr(st, 'get_user_scan_schedule', lambda owner: cfg, raising=False)
+        monkeypatch.setattr(core, '_scheduled_scan_admission', lambda payload: {'admit': True})
+        payload = {'owner_email': 'owner@example.test', 'local_date': '2026-09-15',
+                   'occurrence_key': occurrence_key(cfg, date(2026, 9, 15))}
+    handlers._scheduled_sweep(payload, {})
     assert calls['cache'] == calls['download'] == calls['analysis'] == []
     assert len(saved) == 1 and saved[0]['scope']['lifecycle_gate']['excluded'] == 1
     assert saved[0]['_inventory_items'][0]['id'] == 'id'
@@ -141,3 +151,27 @@ def test_restored_retained_state_is_not_terminal(scan_boundary, status):
     evidence = report['scope']['lifecycle_gate']
     assert evidence['excluded'] == 0 and evidence['unknown'] == 0
     assert evidence['files'][0]['lifecycle_status'] == status
+
+
+@pytest.mark.parametrize('provider', ['drive', 'sharepoint', 'onedrive'])
+def test_real_ledger_gates_before_content_and_saved_inventory_keeps_terminal_row(scan_boundary, isolated_store, monkeypatch, provider):
+    core, _, items, _, calls = scan_boundary
+    st = isolated_store
+    monkeypatch.setattr(core, 'store', st)
+    st.init_scan_run('prior', provider, 1, '2026-09-15', 'default', 'r', owner='owner@example.test')
+    st.add_inventory('prior', [{'file': 'old-name.html', 'drive_file_id': 'terminal-id',
+                               'drive_account_id': 'Account-A' if provider == 'drive' else None,
+                               'drive_id': 'Account-A' if provider != 'drive' else None}])
+    st.set_lifecycle_status('prior', 'old-name.html', 'Archived', reason='verified action')
+    items.extend([item('new-name.html', 'terminal-id', provider), item('active.html', 'active-id', provider)])
+    report = scanner.run_scan(provider, user='owner@example.test', ai_enabled=False)
+    assert calls['cache'] == calls['download'] == calls['analysis'] == ['active.html']
+    evidence = report['scope']['lifecycle_gate']
+    sid = st.save_scan(report)
+    assert st.get_lifecycle_status(sid, 'new-name.html')['lifecycle_status'] == 'Archived'
+    assert evidence['listed'] == 2 and evidence['excluded'] == 1
+    with st._db.cursor() as cur:
+        st._db.execute(cur, 'SELECT file FROM scan_inventory WHERE scan_id=%s ORDER BY file', (sid,))
+        assert [row['file'] for row in st._db.fetchall(cur)] == ['active.html', 'new-name.html']
+        st._db.execute(cur, 'SELECT file FROM file_records WHERE scan_id=%s', (sid,))
+        assert [row['file'] for row in st._db.fetchall(cur)] == ['active.html']
