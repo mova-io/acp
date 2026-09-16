@@ -161,6 +161,8 @@ def public(row, store=None):
             status = 'failed' if package['status'] in {'dead', 'cancelled'} else 'publishing'
     from release_batch_progress import read_authorization
     batch_progress = read_authorization(store, row) if store is not None else {'available': False, 'scope': 'automatic'}
+    reconnect_attention = row['status'] in ACTIVE and any(
+        entry.get('requires_reconnect') for entry in details.values())
     return dict(id=row['id'], status=status, package=package, batch_progress=batch_progress, run_id=row['run_id'], files=list(files),
                 request_id=row['request_id'], source_revision=row['intent']['source_revision'],
                 destination_label=destination_label(row['intent']['destination']), destination=row['intent']['destination'],
@@ -171,8 +173,11 @@ def public(row, store=None):
                 requires_reconnect=any(e.get('requires_reconnect') for e in details.values()),
                 can_resume=row['intent']['destination']['provider'] in {'drive', 'sharepoint'} and row['status'] in ACTIVE and any(
                     e.get('state') == 'blocked' and e.get('artifact_digest') and e.get('failure_category') not in {'admitted_copy_changed', 'delivery_record_missing'} for e in details.values()),
-                needs_attention=stalled_files > 0,
-                attention_reason=row['progress'].get('_delivery_watch', {}).get('reason') if stalled_files else None,
+                needs_attention=stalled_files > 0 or reconnect_attention,
+                attention_reason=(row['progress'].get('_delivery_watch', {}).get('reason')
+                                  if stalled_files else
+                                  'Reconnect the delivery provider, then resume this saved release.'
+                                  if reconnect_attention else None),
                 last_progress_at=row['progress'].get('_delivery_watch', {}).get('last_progress_at'))
 
 
@@ -783,6 +788,15 @@ def advance(store, payload, job):
                 # Freeze reports and enqueue delivery in the same transaction as completion.
                 queue_release_reports(store, row['scan_id'], row['owner_email'], release['id'])
         progress = {**row['progress'], '_delivery_watch': delivery_watch(row['progress'], pending_jobs)}
+        reconnect_blocked = any(
+            entry.get('state') == 'blocked' and entry.get('requires_reconnect')
+            for entry in progress.get('files', {}).values())
+        if reconnect_blocked:
+            progress['_delivery_watch'] = {
+                **progress['_delivery_watch'],
+                'needs_attention': True,
+                'reason': 'Reconnect the delivery provider, then resume this saved release.',
+            }
         wake_requested = progress.pop('_wake_requested', False)
         if terminal and row['intent']['destination']['provider'] == 'local' and not progress.get('_package_job_id'):
             published = {f: e['artifact_digest'] for f, e in progress.get('files', {}).items() if e.get('state') == 'published'}
@@ -809,8 +823,10 @@ def advance(store, payload, job):
                     job_states.append(item['status'])
         paused = _permanent_delivery_pause(row, job_states)
         stalled = progress['_delivery_watch']['needs_attention']
-        persistence.save(store,row,status='completed' if completed else 'failed' if terminal or expired else 'blocked' if stalled or paused or 'blocked' in states else 'waiting',
-                         progress=progress,schedule=not terminal and not expired and not paused,delay=0 if wake_requested else (STALLED_CHECK_SECONDS if stalled else 20))
+        persistence.save(store,row,status='completed' if completed else 'failed' if terminal or expired else 'blocked' if reconnect_blocked or stalled or paused or 'blocked' in states else 'waiting',
+                         progress=progress,
+                         schedule=not terminal and not expired and not paused and not reconnect_blocked,
+                         delay=0 if wake_requested else (STALLED_CHECK_SECONDS if stalled else 20))
 
 
 def validate_publish_request(store, sid, owner, files, body):

@@ -62,6 +62,12 @@ def count_jobs(f):
         return f.store._db.fetchone(cur)['n']
 
 
+def count_release_continuations(f):
+    with f.store._db.cursor() as cur:
+        f.store._db.execute(cur, "SELECT COUNT(*) AS n FROM jobs WHERE type='release_continue'")
+        return f.store._db.fetchone(cur)['n']
+
+
 def test_preview_is_read_only_and_owner_scoped(prepared):
     before=count_jobs(prepared)
     preview=flow.preview(prepared.store,SID,OWNER,[FILE])
@@ -584,8 +590,17 @@ def test_missing_microsoft_preflight_exposes_reconnect_and_resumes_same_permissi
     assert row['status'] == 'blocked'
     assert not row['progress']['files'][FILE].get('artifact_digest')
     assert not prepared.calls
+    assert count_release_continuations(prepared) == 1
+    assert view['needs_attention'] is True
+    assert 'reconnect' in view['attention_reason'].lower()
     assert prepared.store.active_workflows(OWNER)[0]['stage'] == 'publish'
+    # Replaying the already-claimed tick remains harmless and cannot create a polling chain.
+    row = tick(prepared, row)
+    assert count_release_continuations(prepared) == 1
+    assert not prepared.calls
     monkeypatch.setattr(flow, 'delivery_preflight', lambda row: {'ready': True, 'credential_valid': True})
+    row = flow.resume(prepared.store, identity, OWNER, SID)
+    assert count_release_continuations(prepared) == 2
     row = tick(prepared, row)
     assert row['id'] == identity
     assert row['progress']['files'][FILE]['artifact_digest'] == DIGEST
