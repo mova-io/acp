@@ -30,6 +30,20 @@ class StartupFailure(RuntimeError):
         super().__init__(reason)
 
 
+class EvidenceUnavailable(RuntimeError):
+    """A retryable, sanitized description of the missing observation."""
+
+    REASONS = {'target_not_visible', 'replica_evidence_incomplete',
+               'system_logs_incomplete', 'console_logs_incomplete',
+               'azure_read_unavailable'}
+
+    def __init__(self, reason):
+        if reason not in self.REASONS:
+            raise ValueError('invalid evidence reason')
+        self.reason = reason
+        super().__init__(reason)
+
+
 def read(subscription, *args, lines=False, deadline=None):
     """Retry Azure's eventually consistent read endpoints within a small budget."""
     for attempt in range(3):
@@ -178,13 +192,14 @@ def _post_ready_containers(replicas):
     return not incomplete
 
 
-def _logs_complete(receipt_row):
+def _logs_complete(receipt_row, *, require_startup_phase=True):
     events = receipt_row.get('events', [])
     return (any(event.get('reason') == 'ContainerStarted' for event in events)
             and any(event.get('reason') == 'schema.boot'
                     and event.get('state') == 'completed' for event in events)
-            and any(event.get('reason') == 'startup.phase'
-                    and event.get('state') == 'completed' for event in events))
+            and (not require_startup_phase
+                 or any(event.get('reason') == 'startup.phase'
+                        and event.get('state') == 'completed' for event in events)))
 
 
 def _revision_image(document, name):
@@ -198,9 +213,32 @@ def _revision_image(document, name):
         raise RuntimeError('revision image unavailable') from None
 
 
+def _requires_startup_phase(document, name):
+    """Workers run acp-worker and do not emit the API startup.phase contract."""
+    try:
+        containers = document['properties']['template']['containers']
+        selected = [container for container in containers if container.get('name') == name]
+        if len(selected) != 1:
+            raise ValueError()
+        container = selected[0]
+        command = container.get('command', [])
+        env = container.get('env', [])
+        if not isinstance(command, list) or not isinstance(env, list):
+            raise ValueError()
+        worker_command = 'acp-worker' in command
+        worker_role = any(entry.get('name') == 'ACP_WORKER_ROLE'
+                          and (entry.get('value') or entry.get('secretRef'))
+                          for entry in env if isinstance(entry, dict))
+        return not (worker_command and worker_role)
+    except (KeyError, TypeError, ValueError):
+        raise RuntimeError('revision startup contract unavailable') from None
+
+
 def collect(subscription, group, name, image, *, timeout=OBSERVATION_SECONDS):
     deadline = time.monotonic() + timeout
     revision = None
+    require_startup_phase = True
+    unavailable_reason = 'target_not_visible'
     while True:
         try:
             app = read(subscription, 'containerapp', 'show', '-g', group, '-n', name,
@@ -213,12 +251,13 @@ def collect(subscription, group, name, image, *, timeout=OBSERVATION_SECONDS):
             if revision is None:
                 if current_image == image:
                     revision = current
+                    require_startup_phase = _requires_startup_phase(revision_document, name)
                 else:
                     # The update was accepted but Azure still exposes the prior
                     # latest revision. It is not the observation target yet.
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        raise RuntimeError('startup evidence unavailable within observation budget')
+                        raise EvidenceUnavailable('target_not_visible')
                     time.sleep(min(5, remaining))
                     continue
             elif current != revision:
@@ -230,6 +269,8 @@ def collect(subscription, group, name, image, *, timeout=OBSERVATION_SECONDS):
             post_ready = app['properties'].get('latestReadyRevisionName') == revision
             containers_complete = _post_ready_containers(replicas) if post_ready else False
             ready = post_ready and containers_complete
+            if post_ready and not containers_complete:
+                unavailable_reason = 'replica_evidence_incomplete'
             if ready:
                 system = read(subscription, 'containerapp', 'logs', 'show', '-g', group,
                               '-n', name, '--type', 'system', '--tail', '300',
@@ -237,6 +278,9 @@ def collect(subscription, group, name, image, *, timeout=OBSERVATION_SECONDS):
                 system_failure = _system_failure(sanitized_events(system, [], revision))
                 if system_failure:
                     raise StartupFailure(system_failure)
+                if not any(event.get('reason') == 'ContainerStarted'
+                           for event in sanitized_events(system, [], revision)):
+                    unavailable_reason = 'system_logs_incomplete'
                 console = read(subscription, 'containerapp', 'logs', 'show', '-g', group,
                                '-n', name, '--revision', revision, '--tail', '100',
                                '--format', 'json', lines=True, deadline=deadline)
@@ -262,18 +306,23 @@ def collect(subscription, group, name, image, *, timeout=OBSERVATION_SECONDS):
                 if persisted is not None and persisted.get('state') == 'failed':
                     raise StartupFailure('durable_failure')
                 result = receipt(final, replicas, system, console, image, persisted)
-                if result['ok'] and _logs_complete(result):
+                if result['ok'] and _logs_complete(
+                        result, require_startup_phase=require_startup_phase):
                     return result
+                if result['ok']:
+                    unavailable_reason = 'console_logs_incomplete'
         except StartupFailure:
+            raise
+        except EvidenceUnavailable:
             raise
         except Exception:
             # Azure log/control-plane reads and an absent durable receipt can
             # lag a ready revision. Retry the complete snapshot under one
             # deadline; no partial observation authorizes success.
-            pass
+            unavailable_reason = 'azure_read_unavailable'
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise RuntimeError('startup evidence unavailable within observation budget')
+            raise EvidenceUnavailable(unavailable_reason)
         time.sleep(min(5, remaining))
 
 
@@ -293,6 +342,8 @@ def main(argv=None):
             try:
                 rows.append(future.result())
             except StartupFailure as exc:
+                rows.append({'app': name, 'ok': False, 'reason': exc.reason})
+            except EvidenceUnavailable as exc:
                 rows.append({'app': name, 'ok': False, 'reason': exc.reason})
             except Exception:
                 rows.append({'app': name, 'ok': False, 'reason': 'startup_evidence_unavailable'})

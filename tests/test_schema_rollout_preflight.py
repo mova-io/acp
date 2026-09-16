@@ -232,6 +232,57 @@ def test_complete_post_ready_snapshot_retries_when_logs_arrive_late(monkeypatch)
     assert result['ok'] is True and system_reads == 2
 
 
+def test_worker_contract_accepts_task_bootstrap_without_api_startup_phase(monkeypatch):
+    row = app('discovery-worker-staging')
+    container = next(c for c in row['properties']['template']['containers']
+                     if c['name'] == row['name'])
+    container['command'] = ['acp-worker']
+    container['env'].append({'name': 'ACP_WORKER_ROLE', 'value': 'discovery'})
+    replicas, system, console = _complete_startup_reads(row)
+    console = [event for event in console if 'startup.phase' not in event['Log']]
+
+    def read(_subscription, *args, **_kwargs):
+        if args[1:3] == ('revision', 'show') or args[1] == 'show':
+            return row
+        if args[1:3] == ('replica', 'list'):
+            return replicas
+        if '--type' in args:
+            return system
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: None)
+    assert evidence.collect('sub', 'group', row['name'], 'old', timeout=20)['ok'] is True
+
+
+def test_api_contract_still_requires_startup_phase(monkeypatch):
+    row = app()
+    replicas, system, console = _complete_startup_reads(row)
+    console = [event for event in console if 'startup.phase' not in event['Log']]
+    clock = [0.0]
+
+    def read(_subscription, *args, **_kwargs):
+        if args[1:3] == ('revision', 'show') or args[1] == 'show':
+            return row
+        if args[1:3] == ('replica', 'list'):
+            return replicas
+        if '--type' in args:
+            return system
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: None)
+    monkeypatch.setattr(evidence.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(evidence.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    with pytest.raises(evidence.EvidenceUnavailable) as caught:
+        evidence.collect('sub', 'group', row['name'], 'old', timeout=6)
+    assert caught.value.reason == 'console_logs_incomplete'
+
+
 def test_permanently_missing_post_ready_logs_exhaust_one_deadline(monkeypatch):
     row = app()
     replicas, _, console = _complete_startup_reads(row)
@@ -254,8 +305,9 @@ def test_permanently_missing_post_ready_logs_exhaust_one_deadline(monkeypatch):
     monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: None)
     monkeypatch.setattr(evidence.time, 'monotonic', lambda: clock[0])
     monkeypatch.setattr(evidence.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
-    with pytest.raises(RuntimeError, match='within observation budget'):
+    with pytest.raises(evidence.EvidenceUnavailable) as caught:
         evidence.collect('sub', 'group', 'api-staging', 'old', timeout=6)
+    assert caught.value.reason == 'azure_read_unavailable'
     assert clock[0] == 6
 
 
@@ -429,6 +481,17 @@ def test_main_artifact_records_only_allowlisted_fatal_reason(monkeypatch, tmp_pa
     assert 'exception' not in output.read_text().lower()
 
 
+def test_main_artifact_records_only_allowlisted_missing_evidence_reason(monkeypatch, tmp_path):
+    output = tmp_path / 'startup.json'
+    monkeypatch.setattr(evidence, 'collect',
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                            evidence.EvidenceUnavailable('console_logs_incomplete')))
+    assert evidence.main(['--subscription', 'sub', '--group', 'group', '--image', 'image',
+                          '--output', str(output), 'worker-staging']) == 1
+    assert json.loads(output.read_text())['roles'] == [
+        {'app': 'worker-staging', 'ok': False, 'reason': 'console_logs_incomplete'}]
+
+
 def _revision_app(revision, image):
     result = app()
     result['properties']['latestRevisionName'] = revision
@@ -479,8 +542,9 @@ def test_prior_image_visibility_exhausts_deadline_without_false_revision_latch(m
     monkeypatch.setattr(evidence, 'read', read)
     monkeypatch.setattr(evidence.time, 'monotonic', lambda: clock[0])
     monkeypatch.setattr(evidence.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
-    with pytest.raises(RuntimeError, match='within observation budget'):
+    with pytest.raises(evidence.EvidenceUnavailable) as caught:
         evidence.collect('sub', 'group', 'api-staging', 'target-image', timeout=6)
+    assert caught.value.reason == 'target_not_visible'
     assert clock[0] == 6
 
 

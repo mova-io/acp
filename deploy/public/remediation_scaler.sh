@@ -31,7 +31,8 @@ _update_lane_worker() {
     if [ "${STAGING_WORKERS_QUIESCED:-0}" = 1 ]; then
       restore_scale=(--min-replicas "$(_staging_old_min "$app")")
     fi
-    if [ -n "${RELEASE_WORKER:-}" ] && [ "$app" = "$RELEASE_WORKER" ]; then
+    if [ "${DEPLOY_TARGET_ENV:-production}" != staging ] && \
+        [ -n "${RELEASE_WORKER:-}" ] && [ "$app" = "$RELEASE_WORKER" ]; then
       release_capacity=("ACP_WORKERS=3" "ACP_DB_MAX_CONN=6")
     fi
     _aca_retry az containerapp update "${AZ[@]}" -g "$RG" -n "$app" --image "$IMG" \
