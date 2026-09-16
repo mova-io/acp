@@ -70,7 +70,7 @@ def test_real_shell_guard_skips_without_reaching_ci_or_build(history,tmp_path):
     for tool in tools.iterdir():tool.chmod(0o755)
     output=tmp_path/'output'
     env=dict(os.environ,PATH=str(tools)+os.pathsep+os.environ['PATH'],SRC_ROOT=repo,PIN=old,DEPLOY_TARGET_ENV='staging',ACP_STAGING_DEPLOY_MODE='automatic',GITHUB_OUTPUT=str(output),ACP_PIN=old)
-    result=subprocess.run(['bash','-c','set -euo pipefail\nAZ=(--subscription fixture);RG=fixture;APP=fixture-staging\nsay(){ echo "$*"; };die(){ exit 1; }\n'+block+'echo CI_OR_BUILD_REACHED'],env=env,text=True,capture_output=True)
+    result=subprocess.run(['bash','-c','set -euo pipefail\nAZ=(--subscription fixture);RG=fixture;APP=fixture-staging;STAGING_DEPLOY_MODE="$ACP_STAGING_DEPLOY_MODE";STAGING_GITHUB_OUTPUT="$GITHUB_OUTPUT"\nsay(){ echo "$*"; };die(){ exit 1; }\n'+block+'echo CI_OR_BUILD_REACHED'],env=env,text=True,capture_output=True)
     assert result.returncode==0,result.stderr
     assert 'CI_OR_BUILD_REACHED' not in result.stdout
     assert output.read_text()=='staging_deployed=false\n'
