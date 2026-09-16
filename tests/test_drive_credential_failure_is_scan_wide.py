@@ -171,6 +171,8 @@ def _fan_out(store, monkeypatch, files, downloader):
 
     store.init_scan_run("s-fan", "drive", len(files), "2026-07-31T15:00:00Z", "default", "rh",
                         owner="auditor@example.com", status="running")
+    store.add_inventory("s-fan", [{"file": f, "drive_file_id": f"id-{f}",
+                                   "drive_account_id": "offline-account"} for f in files])
     monkeypatch.setattr(handlers.core, "store", store)
     monkeypatch.setattr(scanner, "_download", _dl)
     monkeypatch.setattr(scanner, "cache_source_bytes", lambda *a, **k: None)
@@ -191,8 +193,9 @@ def _fan_out(store, monkeypatch, files, downloader):
     now = dt.datetime.now(dt.timezone.utc).isoformat()
     for f in files:
         handlers._analyse_and_persist_one(
-            "s-fan", {"file": f, "drive_file_id": f"id-{f}"}, "drive", False, object(), {},
-            now, MagicMock(), user=None, rubric_hash="rh", incremental=False)
+            "s-fan", {"file": f, "drive_file_id": f"id-{f}", "drive_account_id": "offline-account"},
+            "drive", False, object(), {}, now, MagicMock(), user="auditor@example.com",
+            rubric_hash="rh", incremental=False)
     return attempted
 
 
