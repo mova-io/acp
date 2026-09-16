@@ -159,8 +159,9 @@ def test_earliest_store_programming_failure_is_not_retried(monkeypatch, tmp_path
     assert len(attempts) == 1
 
 
+@pytest.mark.parametrize('logging_fails', [False, True])
 def test_diagnostic_replay_database_failure_cannot_crash_healthy_startup(
-        monkeypatch, tmp_path):
+        monkeypatch, tmp_path, caplog, logging_fails):
     path = tmp_path / 'startup-failure.json'
     path.write_text(json.dumps({
         'revision': 'api--test', 'phase': 'store',
@@ -180,8 +181,15 @@ def test_diagnostic_replay_database_failure_cannot_crash_healthy_startup(
     monkeypatch.setattr(capacity_reconcile, 'start', lambda *_args: None)
     monkeypatch.setattr(app_module, '_announce_isolation_mode', lambda: None)
     monkeypatch.setenv('CONTAINER_APP_REVISION', 'api--test')
+    if logging_fails:
+        monkeypatch.setattr('swallowed.logger.warning',
+                            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                                RuntimeError('logger unavailable')))
 
     app_module._start_job_workers()
 
     assert counts == {'scheduler': 1, 'workers': 1}
     assert path.exists()  # Retained for the next process; never silently discarded.
+    if not logging_fails:
+        assert 'replaying sanitized startup failure receipt failed' in caplog.text
+        assert 'diagnostic replay unavailable' not in caplog.text

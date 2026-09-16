@@ -431,7 +431,8 @@ def _start_job_workers():
         path.unlink(missing_ok=True)
     except Exception:  # noqa: BLE001 — diagnostic replay cannot take healthy startup down.
         # Failure evidence must never replace a successful store startup.
-        pass
+        swallowed("app.startup: replaying sanitized startup failure receipt failed",
+                  include_exception=False)
     _announce_isolation_mode()
     # Tracing first, so the scheduler and worker spans below are captured from the first tick
     # rather than from whenever the first HTTP request happened to arrive. A no-op without
