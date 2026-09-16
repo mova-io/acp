@@ -320,6 +320,15 @@ def test_the_blue_green_path_is_untouched_by_the_restore():
     assert CODE.index("ROLLBACK") < CODE.index('for a in "$APP" "${LANE_WORKERS[@]}"; do\n  MODE=')
 
 
+def test_blue_green_domain_follows_the_api_apps_exact_environment():
+    """Resource groups can contain both staging/GPU and production ACA environments. A list's
+    first item is unrelated to the API app and can send the green smoke test across environments."""
+    assert "properties.managedEnvironmentId" in CODE
+    assert 'containerapp env show "${AZ[@]}" --ids "$environment_id"' in CODE
+    assert "containerapp env list" not in CODE
+    assert CODE.count('ENV_DOMAIN="$(app_environment_domain)"') == 2
+
+
 def test_the_script_still_parses():
     assert subprocess.run(["bash", "-n", str(REDEPLOY)]).returncode == 0
 
