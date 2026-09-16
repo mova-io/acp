@@ -888,7 +888,8 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
         <AutomaticPublicationStatus authorization={currentAutomaticAuthorization} pending={automaticStatusPending} error={automaticStatusError} compact destinationLabel={releaseDestination?.name || releaseProvider} />
         <ReleaseOutcomeSummary scanId={run?.id} authorization={automaticCoveredFiles.length ? currentAutomaticAuthorization : null}
           pending={automaticStatusPending} error={automaticStatusError} files={releaseFiles} results={releaseResults}
-          snapshot={remediationSnapshot} folders={releaseFolders.length ? releaseFolders : releaseFolder?.url ? [releaseFolder] : []} />
+          snapshot={remediationSnapshot} folders={releaseFolders.length ? releaseFolders : releaseFolder?.url ? [releaseFolder] : []}
+          onRetry={() => setAutomaticStatusRefresh(value => value + 1)} />
         <p className="muted">Manage remaining work in Remediate.</p>
         <p hidden aria-label="Release status overview" className="release-clarity-counts">
           <span><b>{publishableReady.length}</b> Ready</span>
