@@ -47,6 +47,29 @@ def _schedule(store, row, delay):
         run_after=(datetime.now(timezone.utc)+timedelta(seconds=delay)).isoformat())
 
 
+def _expire_active_for_run(store, owner, scan, run):
+    """Release stale active-index slots during a new explicit authorization."""
+    with store._db.cursor() as cur:
+        store._db.execute(cur, "SELECT id,intent FROM automatic_release_authorizations "
+            "WHERE owner_email=%s AND scan_id=%s AND run_id=%s "
+            "AND status IN ('active','waiting','processing','blocked')", (owner, scan, run))
+        rows = store._db.fetchall(cur)
+        now = datetime.now(timezone.utc)
+        expired = []
+        for row in rows:
+            try:
+                intent = json.loads(row['intent']) if isinstance(row['intent'], str) else row['intent']
+                if now >= datetime.fromisoformat(intent['expires_at']):
+                    expired.append(row['id'])
+            except (KeyError, TypeError, ValueError):
+                continue
+        for authorization_id in expired:
+            store._db.execute(cur, "UPDATE automatic_release_authorizations "
+                "SET status='failed',revision=revision+1,updated_at=%s WHERE id=%s "
+                "AND status IN ('active','waiting','processing','blocked')",
+                (store._now(), authorization_id))
+
+
 def create(store, owner, scan, run, request_id, intent):
     if any(not isinstance(v,str) or not v.strip() or len(v)>512 for v in (owner,scan,run,request_id)):
         raise ValueError('Bounded owner, scan, run and request identities are required')
@@ -64,6 +87,7 @@ def create(store, owner, scan, run, request_id, intent):
             store._db.execute(cur, 'SELECT execution_id FROM stage_executions WHERE execution_id=%s AND owner_email=%s AND scan_id=%s AND stage=%s', (run,owner,scan,'remediate'))
             if not store._db.fetchone(cur):
                 raise ValueError('Remediation run not found in this owner scope')
+        _expire_active_for_run(store, owner, scan, run)
         existing=get(store,identity,owner)
         if existing:
             if existing['fingerprint'] != fingerprint or existing['intent'] != intent or existing['run_id'] != run:

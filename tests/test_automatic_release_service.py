@@ -608,6 +608,32 @@ def test_missing_microsoft_preflight_exposes_reconnect_and_resumes_same_permissi
     assert len(prepared.calls) == 1
 
 
+def test_expired_reconnect_pause_is_not_resumable_or_an_active_slot(prepared, monkeypatch):
+    monkeypatch.setattr(flow, 'delivery_preflight', lambda row: {
+        'ready': False, 'credential_valid': False,
+        'message': 'Reconnect Microsoft to check this folder.'})
+    row = tick(prepared, authorize(prepared))
+    intent = {**row['intent'], 'expires_at': '2020-01-01T00:00:00+00:00'}
+    with prepared.store._db.cursor() as cur:
+        prepared.store._db.execute(cur,
+            'UPDATE automatic_release_authorizations SET intent=%s WHERE id=%s',
+            (json.dumps(intent), row['id']))
+    expired = persistence.get(prepared.store, row['id'], OWNER)
+    view = flow.public(expired, prepared.store)
+    assert view['status'] == 'failed'
+    assert view['requires_reconnect'] is False
+    assert view['needs_attention'] is False
+    with pytest.raises(ValueError, match='expired'):
+        flow.resume(prepared.store, row['id'], OWNER, SID)
+    assert count_release_continuations(prepared) == 1
+
+    replacement = flow.authorize(prepared.store, SID, OWNER, prepared.run, [FILE],
+        expired['intent']['destination'], 'replacement-request')
+    assert replacement['id'] != row['id']
+    assert persistence.get(prepared.store, row['id'], OWNER)['status'] == 'failed'
+    assert count_release_continuations(prepared) == 2
+
+
 def test_reconnected_but_unwritable_folder_is_not_reported_as_missing_access(prepared, monkeypatch):
     monkeypatch.setattr(flow, 'delivery_preflight', lambda row: {
         'ready': False, 'credential_valid': False, 'message': 'Reconnect Microsoft.'})
