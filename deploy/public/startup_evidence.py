@@ -336,6 +336,7 @@ def main(argv=None):
     parser.add_argument('--group', required=True)
     parser.add_argument('--image', required=True)
     parser.add_argument('--output', required=True)
+    parser.add_argument('--known-app', action='append', default=[])
     parser.add_argument('apps', nargs='+')
     args = parser.parse_args(argv)
     rows = []
@@ -356,13 +357,28 @@ def main(argv=None):
     # A staging recovery/completion pass invokes this program again for a
     # subset of roles. Keep the first failed receipt for every role so a later
     # transport failure cannot erase the failure that triggered recovery.
+    known_apps = set(args.known_app or args.apps)
+    allowed_reasons = StartupFailure.REASONS | EvidenceUnavailable.REASONS
+
+    def retained_row(row):
+        if not isinstance(row, dict) or row.get('app') not in known_apps:
+            return None
+        if row.get('ok') is False and row.get('reason') in allowed_reasons:
+            return {'app': row['app'], 'ok': False, 'reason': row['reason']}
+        if row.get('ok') is True and isinstance(row.get('revision'), str):
+            # Historical successes are informational. Retain only identity and
+            # result; the current invocation writes the detailed sanitized
+            # receipt for every role it actually observed.
+            return {'app': row['app'], 'revision': row['revision'], 'ok': True}
+        return None
+
     try:
         prior = json.loads(output.read_text())
         prior_rows = prior.get('roles', []) if prior.get('image') == args.image else []
     except (FileNotFoundError, json.JSONDecodeError, AttributeError):
         prior_rows = []
-    merged = {row.get('app'): row for row in prior_rows
-              if isinstance(row, dict) and isinstance(row.get('app'), str)}
+    retained = [retained_row(row) for row in prior_rows]
+    merged = {row['app']: row for row in retained if row is not None}
     for row in rows:
         existing = merged.get(row['app'])
         if existing is None or existing.get('ok') is not False:

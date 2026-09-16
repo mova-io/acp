@@ -529,7 +529,8 @@ def test_later_role_attempt_cannot_overwrite_first_failed_receipt(monkeypatch, t
 
     monkeypatch.setattr(evidence, 'collect', collect)
     assert evidence.main(['--subscription', 'sub', '--group', 'group', '--image', 'image',
-                          '--output', str(output), 'assess-staging', 'release-staging']) == 1
+                          '--output', str(output), '--known-app', 'assess-staging',
+                          '--known-app', 'release-staging', 'assess-staging', 'release-staging']) == 1
     roles = {row['app']: row for row in json.loads(output.read_text())['roles']}
     assert roles['assess-staging']['reason'] == 'console_logs_incomplete'
     assert roles['release-staging']['reason'] == 'azure_read_unavailable'
@@ -542,8 +543,31 @@ def test_retained_prior_failure_does_not_fail_a_later_successful_attempt(monkeyp
     monkeypatch.setattr(evidence, 'collect', lambda *_args, **_kwargs: {
         'app': 'assess-staging', 'ok': True, 'revision': 'new'})
     assert evidence.main(['--subscription', 'sub', '--group', 'group', '--image', 'image',
-                          '--output', str(output), 'assess-staging']) == 0
+                          '--output', str(output), '--known-app', 'assess-staging',
+                          'assess-staging']) == 0
     assert json.loads(output.read_text())['roles'][0]['reason'] == 'console_logs_incomplete'
+
+
+def test_malformed_or_unsanitized_prior_rows_cannot_survive_merge(monkeypatch, tmp_path):
+    output = tmp_path / 'startup.json'
+    output.write_text(json.dumps({'image': 'image', 'roles': [
+        {'app': 'assess-staging', 'ok': False, 'reason': 'raw credential=secret',
+         'exception': 'credential=secret'},
+        {'app': 'unknown-staging', 'ok': False, 'reason': 'container_restart'},
+        {'app': 'release-staging', 'ok': False, 'reason': 'container_restart',
+         'raw': 'credential=secret'}]}))
+    monkeypatch.setattr(evidence, 'collect', lambda *_args, **_kwargs: {
+        'app': 'assess-staging', 'ok': True, 'revision': 'new'})
+    assert evidence.main(['--subscription', 'sub', '--group', 'group', '--image', 'image',
+                          '--output', str(output), '--known-app', 'assess-staging',
+                          '--known-app', 'release-staging', 'assess-staging']) == 0
+    saved = output.read_text()
+    roles = {row['app']: row for row in json.loads(saved)['roles']}
+    assert roles == {
+        'assess-staging': {'app': 'assess-staging', 'ok': True, 'revision': 'new'},
+        'release-staging': {'app': 'release-staging', 'ok': False,
+                            'reason': 'container_restart'}}
+    assert 'credential' not in saved and 'exception' not in saved and 'raw' not in saved
 
 
 def _revision_app(revision, image):

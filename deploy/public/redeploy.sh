@@ -593,9 +593,13 @@ _schema_preflight() {
 
 STARTUP_EVIDENCE_PATH="${ACP_STARTUP_EVIDENCE_PATH:-$(mktemp -t acp-startup-evidence-XXXX)}"
 _verify_startup() {
+  local known_args=() name
+  for name in "$APP" "${LANE_WORKERS[@]}"; do
+    known_args+=(--known-app "$name")
+  done
   python3 "$SRC_ROOT/deploy/public/startup_evidence.py" \
     --subscription "$SUB" --group "$RG" --image "$IMG" \
-    --output "$STARTUP_EVIDENCE_PATH" "$@" \
+    --output "$STARTUP_EVIDENCE_PATH" "${known_args[@]}" "$@" \
     || die "new revision startup failed or restarted; inspect the sanitized startup receipt"
 }
 
