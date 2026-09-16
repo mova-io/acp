@@ -501,6 +501,23 @@ else
   say "WARNING: ACP_DEPLOY_WITH_ACTIVE_JOBS=1 — worker cutover may interrupt ${ACTIVE_JOBS:-unknown} active job(s)"
 fi
 
+# Schema-changing releases elect one bounded migrator before any app/worker image
+# mutation. A held reader or active queue refuses this attempt; no customer work
+# is cancelled, and the existing deployment continues on its prior images.
+say "preparing the exact pinned schema before worker cutover"
+python3 "$SRC_ROOT/deploy/public/schema_preflight.py" \
+  --subscription "$SUB" --group "$RG" --environment "$DEPLOY_TARGET_ENV" \
+  --api-path "$PWD/api" "$APP" "${LANE_WORKERS[@]}" \
+  || die "schema preflight failed; no API or worker image update started"
+
+STARTUP_EVIDENCE_PATH="${ACP_STARTUP_EVIDENCE_PATH:-$(mktemp -t acp-startup-evidence-XXXX)}"
+_verify_startup() {
+  python3 "$SRC_ROOT/deploy/public/startup_evidence.py" \
+    --subscription "$SUB" --group "$RG" --image "$IMG" \
+    --output "$STARTUP_EVIDENCE_PATH" "$@" \
+    || die "new revision startup failed or restarted; inspect the sanitized startup receipt"
+}
+
 # ── 8-BG. blue-green (ACP_BLUE_GREEN=1) ────────────────────────────────────────────────────
 #
 # WHAT IS AND IS NOT PROTECTED — read this before trusting the word "blue-green".
@@ -551,8 +568,9 @@ if [ "$BG" = 1 ]; then
   SUFFIX="g$(printf '%s' "$BUILD_VERSION" | tr -cd '0-9')"
   GREEN="$APP--$SUFFIX"
   say "deploying green ($GREEN) at 0% traffic"
-  _aca_retry az containerapp update "${AZ[@]}" -g "$RG" -n "$APP" --image "$IMG" --revision-suffix "$SUFFIX" \
-    --set-env-vars "${API_ENV_VARS[@]}" -o none
+  _aca_retry python3 "$SRC_ROOT/deploy/public/update_api_image.py" \
+    --subscription "$SUB" --group "$RG" --app "$APP" --image "$IMG" \
+    --revision-suffix "$SUFFIX" --env "${API_ENV_VARS[@]}"
 
   GREEN_FQDN="$GREEN.$ENV_DOMAIN"
   printf '  waiting for green '
@@ -581,6 +599,7 @@ if [ "$BG" = 1 ]; then
     || die "green /readyz failed. NOT promoting; blue still has all traffic."
   echo "  readyz:  ok"
 
+  _verify_startup "$APP"
   say "promoting green to 100%"
   az containerapp ingress traffic set "${AZ[@]}" -g "$RG" -n "$APP" \
     --revision-weight "$GREEN=100" "$BLUE=0" >/dev/null
@@ -628,6 +647,7 @@ if [ "$BG" = 1 ]; then
 
   Run ALL FOUR. New workers under an old app are the mixed-version state promotion exists to close.
 ROLLBACK
+  _verify_startup "$APP" "${LANE_WORKERS[@]}"
   exit 0
 fi
 
@@ -653,8 +673,9 @@ fi
 # A refusal is a STATE, not a fault — the same command succeeds once the in-flight operation
 # settles — so `_aca_retry` waits it out and fails fast on anything else. See readiness_probe.sh.
 say "updating $APP + ${LANE_WORKERS[*]} concurrently"
-_aca_retry az containerapp update "${AZ[@]}" -g "$RG" -n "$APP" --image "$IMG" \
-  --set-env-vars "${API_ENV_VARS[@]}" --no-wait -o none
+_aca_retry python3 "$SRC_ROOT/deploy/public/update_api_image.py" \
+  --subscription "$SUB" --group "$RG" --app "$APP" --image "$IMG" \
+  --env "${API_ENV_VARS[@]}"
 for a in "${LANE_WORKERS[@]}"; do
   _update_lane_worker "$a"
 done
@@ -961,3 +982,7 @@ fi
 # deploy including the one shipping the cleanup" — was true of the retired `processing` role and
 # is no longer the reason, because that role is no longer checked. Kept only as the note that the
 # rationale changed; a warning is not load-bearing enough to promote to fatal by accident.
+
+# This new gate is deliberately fatal: a crash-and-retry revision is not a clean
+# startup, even if its last process is now ready. It never performs an automatic rollback.
+_verify_startup "$APP" "${LANE_WORKERS[@]}"

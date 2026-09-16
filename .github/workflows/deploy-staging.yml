@@ -145,6 +145,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ACP_SUBSCRIPTION: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ACP_STARTUP_EVIDENCE_PATH: ${{ runner.temp }}/acp-startup-evidence.json
           # The greenlit sha on an auto run; the dispatch input on a manual one; redeploy.sh
           # resolves an empty value to origin/main.
           ACP_PIN: ${{ github.event.workflow_run.head_sha || inputs.pin }}
@@ -170,6 +171,14 @@ jobs:
           # exactly as before. See the input's own description for when this is legitimate.
           ACP_SKIP_CI_GATE: ${{ inputs.skip_ci_gate && '1' || '' }}
         run: bash deploy/public/redeploy.sh
+
+      - name: Retain sanitized startup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-startup-evidence
+          path: ${{ runner.temp }}/acp-startup-evidence.json
+          if-no-files-found: ignore
 
       - name: Confirm staging reports the new build
         env:

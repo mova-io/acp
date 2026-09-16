@@ -165,6 +165,7 @@ jobs:
           # check rather than skip.
           GH_TOKEN: ${{ github.token }}
           ACP_SUBSCRIPTION: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ACP_STARTUP_EVIDENCE_PATH: ${{ runner.temp }}/acp-startup-evidence.json
           # Empty on an auto (workflow_run) deploy, so redeploy.sh resolves ACP_PIN:-origin/main —
           # main's tip at the moment this runs (after any approval wait), re-fetched by the script.
           # A manual dispatch may still pin an explicit sha. The script's CI gate then refuses to
@@ -188,6 +189,14 @@ jobs:
           # exactly as before. See the input's own description for when this is legitimate.
           ACP_SKIP_CI_GATE: ${{ inputs.skip_ci_gate && '1' || '' }}
         run: bash deploy/public/redeploy.sh
+
+      - name: Retain sanitized startup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-startup-evidence
+          path: ${{ runner.temp }}/acp-startup-evidence.json
+          if-no-files-found: ignore
 
       # Independent of the script's own verification, and deliberately so: the script asserts the
       # deploy it just performed, which is the party with an interest in it having worked.
