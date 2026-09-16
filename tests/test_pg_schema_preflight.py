@@ -185,6 +185,29 @@ def test_advisory_admission_has_whole_deadline_and_no_migration(disposable_datab
     assert_previous_intact(url)
 
 
+def test_deferred_commit_work_cancelled_and_transaction_rolled_back(disposable_database):
+    from schema_boot_deadline import DeadlineConnection
+    url = disposable_database
+    execute(url, '''CREATE TABLE commit_probe(value INT);
+        CREATE FUNCTION slow_deferred_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN PERFORM pg_sleep(3); RETURN NEW; END $$;
+        CREATE CONSTRAINT TRIGGER slow_commit AFTER INSERT ON commit_probe
+        DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION slow_deferred_commit()''')
+    raw = psycopg2.connect(url)
+    started = time.monotonic()
+    try:
+        bounded = DeadlineConnection(raw, started + .25)
+        with bounded.cursor() as cur:
+            cur.execute('INSERT INTO commit_probe VALUES (1)')
+        with pytest.raises(psycopg2.errors.QueryCanceled):
+            bounded.commit()
+        raw.rollback()
+    finally:
+        raw.close()
+    assert time.monotonic() - started < 2
+    assert execute(url, 'SELECT * FROM commit_probe') == []
+
+
 def test_concurrent_gate_candidates_commit_once_and_recheck_after_lock(disposable_database, monkeypatch):
     url = disposable_database
     previous_schema(url)

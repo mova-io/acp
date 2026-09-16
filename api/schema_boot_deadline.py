@@ -30,10 +30,15 @@ class DeadlineConnection:
         return DeadlineCursor(self, self._connection.cursor())
 
     def commit(self):
-        # COMMIT must also fit the remaining server-side statement budget.
-        with self._connection.cursor() as cur:
-            cur.execute("SELECT set_config('statement_timeout', %s, false)",
-                        (str(self.remaining_ms()),))
+        # Run deferred constraint work as an ordinary bounded statement before
+        # entering COMMIT. PostgreSQL does not apply statement_timeout to all
+        # durability waits inside COMMIT, so the process supervisor remains the
+        # hard outer bound and a lost receipt is treated as an ambiguous failure.
+        with self.cursor() as cur:
+            cur.execute('SET CONSTRAINTS ALL IMMEDIATE')
+            cur.execute('COMMIT')
+        # Synchronize psycopg2's transaction bookkeeping after explicit COMMIT.
+        # There is no remaining transaction or deferred work at this point.
         self._connection.commit()
 
 
