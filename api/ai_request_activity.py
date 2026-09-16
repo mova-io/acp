@@ -7,18 +7,23 @@ import json
 import logging
 import re
 import uuid
+from time import perf_counter
+import math
 
 
 def _identifier(value):
     return value if isinstance(value, str) and len(value) <= 128 and '://' not in value and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:/-]*', value) else None
 
 
-def _emit(identity, status, http_status=None):
+def _emit(identity, status, http_status=None, elapsed_ms=None):
     if identity is None:
         return
     store, ctx, detail = identity
     kind = 'remediate.ai_request_started' if status == 'dispatched' else 'remediate.ai_request_finished'
     detail = dict(detail, status=status)
+    if type(elapsed_ms) in (int, float) and math.isfinite(elapsed_ms) and elapsed_ms >= 0:
+        detail['transport_elapsed_ms'] = round(elapsed_ms, 3)
+        detail['timing_basis'] = 'http_transport_round_trip'
     if type(http_status) is int and 100 <= http_status <= 599:
         detail['http_status'] = http_status
     try:
@@ -55,13 +60,15 @@ def _identity(provider, model, zone, surface):
 def send(post, endpoint, *, provider, model, zone, surface, **kwargs):
     identity = _identity(provider, model, zone, surface)
     _emit(identity, 'dispatched')
+    started = perf_counter()
     try:
         response = post(endpoint, **kwargs)
     except Exception:
-        _emit(identity, 'failed')
+        _emit(identity, 'failed', elapsed_ms=(perf_counter() - started) * 1000)
         raise
+    elapsed_ms = (perf_counter() - started) * 1000
     status = getattr(response, 'status_code', None)
-    _emit(identity, 'response_received' if type(status) is int and 200 <= status < 300 else 'failed', status)
+    _emit(identity, 'response_received' if type(status) is int and 200 <= status < 300 else 'failed', status, elapsed_ms)
     return response
 
 

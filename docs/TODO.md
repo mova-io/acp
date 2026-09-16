@@ -1,5 +1,18 @@
 # ACP — comprehensive to-do
 
+## Current delivery backlog — 14 September 2026
+
+This section is the current operational priority list. Older authored sections below retain historical decisions and may have stale summaries; the generated capability block remains authoritative for coverage.
+
+- **Shipped:** PR #2061 deleted-scan stage protection; PR #2062 human/status count separation; PR #2063 Discovery source tiles; PR #2064 retained activity history, scroll control, filters, actual AI model/location, exact-version evidence, shared compact accounting, timely assessment notifications and accepted-plan popup continuity. Production 2026.9.14.6 contains these changes.
+- **Merged:** PR #2067 removes the fixed 200 ms worker-lease test assumption and covers delayed startup. All required CI checks passed before merging; production worker code is unchanged.
+- **In progress:** actual HTTP transport durations and owner-bound performance summaries. Legacy request records cannot support local/cloud latency, quality or GPU comparisons; unknown metrics must remain explicitly unknown.
+- **Operational validation:** run a fresh owner-authorized scan through remediation, exact-byte verification and destination confirmation. Jeremy's latest 147-file assessment was erased before remediation at 17:51:30 UTC; deleted runs cannot be resumed.
+- **Deva delivery closure:**75 published receipts match saved correction hashes;10 delivery records remain incomplete. Recovery requires her original-owner SharePoint credentials. The recovered source-derived document remains a review copy, by explicit user decision.
+- **Infrastructure:** provision and validate managed Redis before cutover. Preserve existing TTLs, retain rollback references, prevent writes during the API/worker endpoint transition, and keep the active-job deployment guard. See [managed Redis cutover](runbooks/managed-redis-cutover.md).
+
+Completed UI work above is not remaining polish. Full WCAG conformance and successful publication remain separate claims.
+
 Authored sections reviewed against `d289a63` (main, 2026-07-28). The previous
 snapshot was `9d7c7a3` — **387 commits and 19 days earlier**, and several items
 below had shipped without being struck through. That is the failure this file's

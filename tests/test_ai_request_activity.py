@@ -110,3 +110,29 @@ def test_local_text_real_fallback_transport_records_both_actual_models(isolated_
     assert all('file' not in d for _,d in rows)
     assert not store.is_material_event('remediate.ai_request_started')
     assert not store.is_material_event('remediate.ai_request_finished')
+
+
+@pytest.mark.parametrize('fails', [False, True])
+def test_actual_http_duration_uses_monotonic_clock_and_records_failed_sends(isolated_store, monkeypatch, fails):
+    import core
+    import ai_request_activity as activity
+    store = isolated_store
+    job = local_job(store)
+    monkeypatch.setattr(core, 'store', store)
+    ticks = iter([100.0, 102.25])
+    monkeypatch.setattr(activity, 'perf_counter', lambda: next(ticks), raising=False)
+    def post(*_args, **_kwargs):
+        if fails:
+            raise RuntimeError('private request text')
+        return SimpleNamespace(status_code=200)
+    with run_context(store, job['payload'], job):
+        if fails:
+            with pytest.raises(RuntimeError):
+                activity.send(post, 'https://private/secret', provider='ollama', model='moondream:latest', zone='local', surface='vision')
+        else:
+            activity.send(post, 'https://private/secret', provider='ollama', model='moondream:latest', zone='local', surface='vision')
+    rows = events(store)
+    assert 'transport_elapsed_ms' not in rows[0][1]
+    assert rows[1][1]['transport_elapsed_ms'] == 2250
+    assert rows[1][1]['timing_basis'] == 'http_transport_round_trip'
+    assert 'private request text' not in json.dumps(rows)

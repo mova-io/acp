@@ -47,6 +47,10 @@ def read_metrics(store, owner, scan_id, run_id, *, stage=None, provider=None, mo
         complete=len(records) <= MAX_RECORDS, currency=currency, ledger_complete=ledger_count == len(records))
     from ai_local_activity import read_local_activity
     result['local_activity'] = read_local_activity(db, owner, scan_id, run_id)
+    from ai_transport_performance import read_transport_performance
+    result['transport_timing'] = read_transport_performance(db, owner, scan_id, run_id, provider=provider, model=model)
+    result['transport_timing']['generation_stage'] = None
+    result['transport_timing']['generation_stage_reason'] = 'Transport timing is run-wide; individual generation steps were not attributed.'
     result.update(scan_id=scan_id, run_id=run_id, batch_id=run_id)
     result['revision'] = hashlib.sha256(json.dumps({k:v for k,v in result.items() if k != 'generated_at'}, sort_keys=True).encode()).hexdigest()[:20]
     return result
