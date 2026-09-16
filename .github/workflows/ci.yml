@@ -431,7 +431,7 @@ jobs:
         run: |
           python -m pytest tests/test_schema_boot_locks.py tests/test_pg_job_queue.py \
             tests/test_pg_result_fencing.py tests/test_db_mutation_reserve.py \
-            tests/test_pg_hitl_idempotency.py \
+            tests/test_pg_hitl_idempotency.py tests/test_pg_pool_growth.py \
             -v --no-header -p no:warnings
 
       - name: Fail if anything in this job skipped instead of running
@@ -450,7 +450,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pytest tests/test_schema_boot_locks.py tests/test_pg_job_queue.py \
-            tests/test_pg_result_fencing.py tests/test_pg_hitl_idempotency.py \
+            tests/test_pg_result_fencing.py tests/test_pg_hitl_idempotency.py tests/test_pg_pool_growth.py \
             -q --no-header -p no:warnings > /tmp/pg.txt 2>&1 || { cat /tmp/pg.txt; exit 1; }
           cat /tmp/pg.txt
           if grep -qE '[0-9]+ skipped' /tmp/pg.txt; then

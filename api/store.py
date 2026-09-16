@@ -2315,8 +2315,8 @@ class _PgAdapter:
 
     def _get_pool(self):
         if self._pool is None:
-            import psycopg2.pool
-            self._pool = psycopg2.pool.ThreadedConnectionPool(
+            from responsive_connection_pool import ResponsiveConnectionPool
+            self._pool = ResponsiveConnectionPool(
                 self._MIN_CONN, self._MAX_CONN, self._url, **self._ssl_kwargs)
         return self._pool
 
