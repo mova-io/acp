@@ -53,7 +53,7 @@ def test_interrupted_bootstrap_restores_old_worker_images_and_floors():
     assert 'STAGING_OLD_IMAGES' in restore
     assert 'STAGING_OLD_MINS' in restore
     assert '--termination-grace-period "$WORKER_TERMINATION_GRACE_SECONDS"' in restore
-    assert 'active" = 1' in restore and 'replicas' in restore
+    assert '_wait_recovery_cohort' in restore
     assert 'recovery failed for $name' in restore
     assert 'trap _staging_bootstrap_exit EXIT' in SCRIPT
 
