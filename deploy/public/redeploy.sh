@@ -636,6 +636,52 @@ EOF
   die "$name did not converge to one active revision with zero prior-revision replicas"
 }
 
+_wait_recovery_cohort() {
+  local name="$1"
+  local prior="$2"
+  local expected_image="$3"
+  local minimum="$4"
+  local latest=""
+  local ready=""
+  local image=""
+  local revisions_json=""
+  local valid=""
+  local active=""
+  local old_replicas=""
+  for _ in $(seq 1 60); do
+    latest="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
+      --query properties.latestRevisionName -o tsv 2>/dev/null || true)"
+    ready="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
+      --query properties.latestReadyRevisionName -o tsv 2>/dev/null || true)"
+    image="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
+      --query properties.template.containers[0].image -o tsv 2>/dev/null || true)"
+    revisions_json="$(az containerapp revision list "${AZ[@]}" -g "$RG" -n "$name" --all \
+      -o json 2>/dev/null || true)"
+    read -r valid active <<EOF
+$(python3 -c 'import json,sys
+try:
+ rows=json.load(sys.stdin); latest=sys.argv[1]; prior=sys.argv[2]
+ assert latest and prior and any(r.get("name")==latest for r in rows) and any(r.get("name")==prior for r in rows)
+ active=[r["name"] for r in rows if r.get("properties",{}).get("active") is True]
+ print("true",1 if active==[latest] else -1)
+except Exception: print("false",-1)' "$latest" "$prior" <<<"$revisions_json")
+EOF
+    read -r valid _ old_replicas <<EOF
+$(python3 "$SRC_ROOT/deploy/public/revision_replica_gate.py" \
+  --subscription "$SUB" --group "$RG" --app "$name" \
+  --revision "$prior" --revision "$latest" --exclude-revision "$latest" \
+  <<<"$revisions_json" || printf 'false -1 -1')
+EOF
+    latest_replicas="$(az containerapp replica list "${AZ[@]}" -g "$RG" -n "$name" \
+      --revision "$latest" --query 'length(@)' -o tsv 2>/dev/null || true)"
+    [ "$valid" = true ] && [ "$active" = 1 ] && [ "$old_replicas" = 0 ] \
+      && [ "$latest" = "$ready" ] && [ "$image" = "$expected_image" ] \
+      && [[ "$latest_replicas" =~ ^[0-9]+$ ]] && [ "$latest_replicas" -ge "$minimum" ] && return 0
+    sleep 5
+  done
+  return 1
+}
+
 _ensure_single_revision_mode() {
   local name mode
   for name in "$APP" "${LANE_WORKERS[@]}"; do
@@ -675,33 +721,20 @@ _restore_staging_workers() {
     return "$failed"
   fi
   echo "  restoring the prior staging API and workers after an interrupted bootstrap" >&2
+  revision="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" \
+    --query properties.latestRevisionName -o tsv 2>/dev/null || true)"
   _aca_retry python3 "$SRC_ROOT/deploy/public/update_api_image.py" \
     --subscription "$SUB" --group "$RG" --app "$APP" --image "$STAGING_OLD_API_IMAGE" \
     --env "${API_ENV_VARS[@]}" || failed=1
-  active= replicas= image=
-  for _ in $(seq 1 60); do
-    revision="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" \
-      --query properties.latestRevisionName -o tsv 2>/dev/null || true)"
-    ready="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" \
-      --query properties.latestReadyRevisionName -o tsv 2>/dev/null || true)"
-    image="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" \
-      --query properties.template.containers[0].image -o tsv 2>/dev/null || true)"
-    active="$(az containerapp revision list "${AZ[@]}" -g "$RG" -n "$APP" --all \
-      --query "[?properties.active==\`true\`] | length(@)" -o tsv 2>/dev/null || true)"
-    replicas="$(az containerapp replica list "${AZ[@]}" -g "$RG" -n "$APP" --revision "$revision" \
-      --query 'length(@)' -o tsv 2>/dev/null || true)"
-    [ "$revision" = "$ready" ] && [ "$image" = "$STAGING_OLD_API_IMAGE" ] \
-      && [ "$active" = 1 ] && [ "${replicas:-0}" -ge 1 ] && break
-    sleep 5
-  done
-  if [ "$revision" != "$ready" ] || [ "$image" != "$STAGING_OLD_API_IMAGE" ] \
-      || [ "$active" != 1 ] || [ "${replicas:-0}" -lt 1 ]; then
+  if ! ( _wait_recovery_cohort "$APP" "$revision" "$STAGING_OLD_API_IMAGE" 1 ); then
     echo "  recovery failed for $APP; manual API restoration is required" >&2
     failed=1
   fi
   for index in "${!LANE_WORKERS[@]}"; do
     name="${LANE_WORKERS[$index]}"
     [ -n "${STAGING_OLD_IMAGES[$index]:-}" ] || continue
+    revision="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
+      --query properties.latestRevisionName -o tsv 2>/dev/null || true)"
     _aca_retry az containerapp update "${AZ[@]}" -g "$RG" -n "$name" \
       --image "${STAGING_OLD_IMAGES[$index]}" --min-replicas "${STAGING_OLD_MINS[$index]}" \
       --termination-grace-period "$WORKER_TERMINATION_GRACE_SECONDS" \
@@ -710,22 +743,8 @@ _restore_staging_workers() {
         "ACP_WORKERS=$([ "$name" = "$RELEASE_WORKER" ] && echo 3 || echo 2)" \
       --no-wait -o none \
       >/dev/null 2>&1 || failed=1
-    expected="${STAGING_OLD_IMAGES[$index]:-}"
-    [ -n "$expected" ] || continue
-    active= replicas=
-    for _ in $(seq 1 60); do
-      active="$(az containerapp revision list "${AZ[@]}" -g "$RG" -n "$name" --all \
-        --query "[?properties.active==\`true\`] | length(@)" -o tsv 2>/dev/null || true)"
-      replicas="$(az containerapp replica list "${AZ[@]}" -g "$RG" -n "$name" \
-        --revision "$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" --query properties.latestRevisionName -o tsv 2>/dev/null)" \
-        --query 'length(@)' -o tsv 2>/dev/null || true)"
-      image="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
-        --query properties.template.containers[0].image -o tsv 2>/dev/null || true)"
-      [ "$active" = 1 ] && [ "${replicas:-0}" -ge "${STAGING_OLD_MINS[$index]}" ] \
-        && [ "$image" = "$expected" ] && break
-      sleep 5
-    done
-    if [ "$active" != 1 ] || [ "${replicas:-0}" -lt "${STAGING_OLD_MINS[$index]}" ] || [ "$image" != "$expected" ]; then
+    if ! ( _wait_recovery_cohort "$name" "$revision" "${STAGING_OLD_IMAGES[$index]}" \
+        "${STAGING_OLD_MINS[$index]}" ); then
       echo "  recovery failed for $name; manual worker restoration is required" >&2
       failed=1
     fi
@@ -795,9 +814,12 @@ _quiesce_staging_workers() {
     _aca_retry az containerapp update "${AZ[@]}" -g "$RG" -n "$name" --min-replicas 0 --no-wait -o none
     configuration_revision=""
     for _ in $(seq 1 60); do
+      ROLLOUT_STATE_JSON="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
+        --query '{provisioning:properties.provisioningState,min_replicas:properties.template.scale.minReplicas,revision:properties.latestRevisionName}' \
+        -o json 2>/dev/null || true)"
       read -r provisioning applied_min configuration_revision <<EOF
-$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
-  --query '[properties.provisioningState,properties.template.scale.minReplicas,properties.latestRevisionName]' -o tsv 2>/dev/null || true)
+$(python3 "$SRC_ROOT/deploy/public/aca_rollout_state.py" <<<"$ROLLOUT_STATE_JSON" | \
+  python3 -c 'import json,sys; print(*json.load(sys.stdin))' || true)
 EOF
       [ "$provisioning" = Succeeded ] && [ "$applied_min" = 0 ] \
         && [ -n "$configuration_revision" ] && break

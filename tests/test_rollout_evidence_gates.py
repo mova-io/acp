@@ -69,6 +69,7 @@ AZ=(fake); RG=g; APP=api; SUB=s; SRC_ROOT="$1"; API_ENV_VARS=(ACP_DB_MAX_CONN=8)
 LOG="$2/recovery-log"
 WORKER_TERMINATION_GRACE_SECONDS=600; WORKER_DRAIN_SECONDS=540; RELEASE_WORKER=release
 _aca_retry() { "$@"; }
+_wait_recovery_cohort() { echo "$*" >> "$LOG"; return 0; }
 sleep() { :; }
 python3() { echo "$*" >> "$LOG"; }
 az() {
@@ -87,6 +88,36 @@ grep -- '--image old:image' "$2/recovery-log"
     result = subprocess.run(['bash', str(harness), str(ROOT), str(tmp_path)],
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+    assert 'api oldrev old:image 1' in (tmp_path / 'recovery-log').read_text()
+
+
+@pytest.mark.parametrize('old_replicas,expected', [(1, 1), (0, 0)])
+def test_recovery_gate_requires_zero_prior_replicas_and_sole_ready_image(
+        tmp_path, old_replicas, expected):
+    source = (ROOT / 'deploy/public/redeploy.sh').read_text()
+    function = source.split('_wait_recovery_cohort() {', 1)[1].split('\n}', 1)[0]
+    harness = tmp_path / 'recovery-gate.sh'
+    harness.write_text('set -euo pipefail\n_wait_recovery_cohort() {' + function + f'''\n}}
+AZ=(fake); RG=g; SUB=s; SRC_ROOT="$1"; OLD_REPLICAS={old_replicas}
+sleep() {{ :; }}
+python3() {{
+  if [[ "$*" == *revision_replica_gate.py* ]]; then cat >/dev/null; echo "true 1 $OLD_REPLICAS";
+  else command python3 "$@"; fi
+}}
+az() {{
+  case "$*" in
+    *latestReadyRevisionName*) echo rev373 ;;
+    *latestRevisionName*) echo rev373 ;;
+    *"containers[0].image"*) echo old:image ;;
+    *"revision list"*) echo '[{{"name":"rev372","properties":{{"active":false,"replicas":'$OLD_REPLICAS'}}}},{{"name":"rev373","properties":{{"active":true,"replicas":1}}}}]' ;;
+    *"replica list"*) echo 1 ;;
+    *) return 1 ;;
+  esac
+}}
+_wait_recovery_cohort worker rev372 old:image 1
+''')
+    result = subprocess.run(['bash', str(harness), str(ROOT)], capture_output=True, text=True)
+    assert (result.returncode == 0) is (expected == 0)
 
 
 def test_failed_revision_enumeration_cannot_converge_cohort(tmp_path):
@@ -206,7 +237,8 @@ az() {{
     *"containerapp update"*) : ;;
     *"provisioningState"*)
       n=$(cat "$WORK/show" 2>/dev/null || echo 0); echo $((n+1)) > "$WORK/show"
-      if [ "$n" = 0 ]; then printf 'Succeeded\\t1\\told\\n'; else printf 'Succeeded\\t0\\tconfig\\n'; fi ;;
+      if [ "$n" = 0 ]; then echo '{{"provisioning":"Succeeded","min_replicas":1,"revision":"old"}}'
+      else echo '{{"provisioning":"Succeeded","min_replicas":0,"revision":"config"}}'; fi ;;
     *"scale.minReplicas"*) echo 1 ;;
     *"revision deactivate"*) echo "$*" >> "$WORK/deactivated" ;;
     *"[?properties.active=="*"].name"*) printf 'old\\nconfig\\n' ;;
