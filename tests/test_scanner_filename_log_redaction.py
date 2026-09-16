@@ -124,13 +124,13 @@ def test_office_cli_diagnostics_allowlist_metadata_only(
         monkeypatch.setattr(scanner.subprocess, "run", lambda *_args, **_kwargs:
                             SimpleNamespace(returncode=0, stderr="", stdout=""))
 
-    scanner._analyse_office(tmp_path, doc_ref=OPAQUE_DOC)
+    scanner._analyse_office(tmp_path)
 
     output = capsys.readouterr().out
-    _assert_redacted(output)
+    _assert_redacted(output, opaque=None)
     assert str(tmp_path) not in output
     assert sentinel not in output
-    assert "doc=opaque-file-123" in output
+    assert "doc=h:" in output
 
 
 def test_unreadable_docx_diagnostic_hashes_reported_filename(tmp_path, monkeypatch, capsys):

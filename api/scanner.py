@@ -4326,17 +4326,15 @@ def _docx_body_readable(path: Path) -> bool:
         return False
 
 
-def _office_log_doc(dest: Path, opaque_ref: str | None = None) -> str:
+def _office_log_doc(dest: Path) -> str:
     """Return a safe correlation handle for legacy Office CLI diagnostics."""
     import joblog as _jl
-    if opaque_ref:
-        return _jl.doc_id(None, opaque_ref=opaque_ref) or "unknown"
     inputs = [p.name for p in dest.iterdir() if p.is_file() and p.name != "_o.json"]
     return _jl.doc_id(inputs[0]) if len(inputs) == 1 else f"batch:{len(inputs)}"
 
 
-def _analyse_office(dest: Path, *, rule_allowlists=None, doc_ref: str | None = None) -> dict:
-    log_doc = _office_log_doc(dest, doc_ref)
+def _analyse_office(dest: Path, *, rule_allowlists=None) -> dict:
+    log_doc = _office_log_doc(dest)
     out = dest / "_o.json"
     # DOTNET_ROOT only when that install actually exists, and never clobbering one the
     # environment already set (actions/setup-dotnet and the Docker image both set it
@@ -5193,7 +5191,7 @@ def analyse_and_assess(tmp: Path, name: str, *, detect_pii: bool = False,
             raw = {"engine": "python/pdf", **_analyse_pdf(tmp / name)}
     elif ext in OFFICE:
         with _jl.stage("analyse.office", doc=doc, scan_id=scan_id, ext=ext):
-            office = _analyse_office(tmp, doc_ref=doc_ref)  # .NET CLI over the one-file dir
+            office = _analyse_office(tmp)             # .NET CLI over the one-file dir
         raw = {"engine": ".net/office",
                **office.get(name, {"succeeded": False, "issues": [], "errors": ["no engine result"]})}
     elif ext in HTML_EXTS:
