@@ -112,11 +112,13 @@ def test_short_output_is_passed_through_whole():
 
 # ── the log line an operator actually reads ───────────────────────────────────────
 
-def test_log_line_names_the_exception_type(office_dir, run_stub, capsys):
+def test_log_line_reports_stream_presence_without_exception_detail(office_dir, run_stub, capsys):
     run_stub("abort_with_dotnet_trace", office_dir)
     log = capsys.readouterr().out
-    assert TRACE_HEAD_MARKER in log, "the exception type must reach the log"
-    assert TRACE_MESSAGE_MARKER in log
+    assert "diagnostic_streams=stderr" in log
+    assert TRACE_HEAD_MARKER not in log
+    assert TRACE_MESSAGE_MARKER not in log
+    assert TRACE_TAIL_MARKER not in log
 
 
 def test_log_line_still_says_sigabrt_not_just_minus_six(office_dir, run_stub, capsys):
@@ -131,7 +133,8 @@ def test_log_line_still_says_sigabrt_not_just_minus_six(office_dir, run_stub, ca
 def test_stdout_is_read_when_stderr_is_empty(office_dir, run_stub, capsys):
     run_stub("abort_with_stdout_only", office_dir)
     log = capsys.readouterr().out
-    assert TRACE_HEAD_MARKER in log
+    assert "diagnostic_streams=stdout" in log
+    assert TRACE_HEAD_MARKER not in log
     assert "stdout" in log
 
 
@@ -140,7 +143,7 @@ def test_both_streams_empty_is_said_plainly(office_dir, run_stub, capsys):
     it read something, and must not print a bare empty string after the colon."""
     run_stub("abort_after_complete_write", office_dir)
     log = capsys.readouterr().out
-    assert "<both streams empty>" in log
+    assert "diagnostic_streams=none" in log
 
 
 # ── the CLI contract these logs describe ──────────────────────────────────────────

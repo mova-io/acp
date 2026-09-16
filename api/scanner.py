@@ -4326,7 +4326,15 @@ def _docx_body_readable(path: Path) -> bool:
         return False
 
 
+def _office_log_doc(dest: Path) -> str:
+    """Return a safe correlation handle for legacy Office CLI diagnostics."""
+    import joblog as _jl
+    inputs = [p.name for p in dest.iterdir() if p.is_file() and p.name != "_o.json"]
+    return _jl.doc_id(inputs[0]) if len(inputs) == 1 else f"batch:{len(inputs)}"
+
+
 def _analyse_office(dest: Path, *, rule_allowlists=None) -> dict:
+    log_doc = _office_log_doc(dest)
     out = dest / "_o.json"
     # DOTNET_ROOT only when that install actually exists, and never clobbering one the
     # environment already set (actions/setup-dotnet and the Docker image both set it
@@ -4383,17 +4391,16 @@ def _analyse_office(dest: Path, *, rule_allowlists=None) -> dict:
             # for this same crash — if that was accurate rather than an artefact of the old
             # tail-only clip, whatever the process did say went to stdout and was never read.
             # Printing an empty stream would just be noise, so each is included only if present.
-            streams = [(n, _clip_diag(s)) for n, s in (("stderr", proc.stderr),
-                                                       ("stdout", proc.stdout)) if (s or "").strip()]
-            detail = "\n".join(f"  {n}: {s}" for n, s in streams) or "  <both streams empty>"
-            print(f"[scan] office CLI {aborted} ({proc.returncode}) on {dest}:\n{detail}",
-                  flush=True)
+            streams = [n for n, s in (("stderr", proc.stderr), ("stdout", proc.stdout))
+                       if (s or "").strip()]
+            print(f"[scan] office CLI {aborted} ({proc.returncode}); doc={log_doc}; "
+                  f"diagnostic_streams={','.join(streams) or 'none'}", flush=True)
     except subprocess.TimeoutExpired:
         # A timeout is not automatically engine-error either, for the same reason: the CLI may
         # have written its output and then hung on the way out. Whichever it did, the outcome is
         # logged below once we know, rather than guessed at here.
         aborted = f"timed out after {timeout_s}s"
-        print(f"[scan] office CLI timed out after {timeout_s}s on {dest}", flush=True)
+        print(f"[scan] office CLI timed out after {timeout_s}s; doc={log_doc}", flush=True)
     except OSError as e:
         # The CLI could not be LAUNCHED at all — no dotnet on PATH, DOTNET pointing at nothing,
         # the dll absent, the binary not executable. Every other CLI failure above is already
@@ -4415,8 +4422,9 @@ def _analyse_office(dest: Path, *, rule_allowlists=None) -> dict:
         # AFTER this call, each in its own try/except, so they still report — which is why a
         # 2.4.4 finding (office_structure, pure Python) survives a missing .NET runtime and can
         # be verified on a host that has none.
-        aborted = f"could not be launched ({type(e).__name__}: {e})"
-        print(f"[scan] office CLI could not be launched on {dest}: {type(e).__name__}: {e} — "
+        aborted = f"could not be launched ({type(e).__name__})"
+        print(f"[scan] office CLI could not be launched; doc={log_doc}; "
+              f"error_type={type(e).__name__} — "
               f"files will be recorded as engine-error", flush=True)
     res = {}
     if out.exists():
@@ -4427,7 +4435,8 @@ def _analyse_office(dest: Path, *, rule_allowlists=None) -> dict:
         try:
             items = json.loads(out.read_text())
         except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
-            print(f"[scan] office CLI output at {out} is unreadable ({type(e).__name__}: {e}) — "
+            print(f"[scan] office CLI output is unreadable; doc={log_doc}; "
+                  f"error_type={type(e).__name__} — "
                   f"files will be recorded as engine-error", flush=True)
             return {}
         for item in items:
@@ -4483,7 +4492,9 @@ def _flag_unreadable_docx(dest: Path, res: dict) -> None:
         if fp.suffix.lower() == ".docx" and fp.exists() and not _docx_body_readable(fp):
             res[fname]["errors"] = [*res[fname].get("errors", []),
                                     {"message": UNREADABLE_BODY_MSG, "rule": None}]
-            print(f"[scan] {fname}: word/document.xml missing or malformed — recorded as "
+            import joblog as _jl
+            print(f"[scan] {_jl.doc_id(fname) or 'unknown'}: "
+                  f"word/document.xml missing or malformed — recorded as "
                   f"uncertain with an explicit unreadable-content error", flush=True)
 
 
@@ -5157,8 +5168,6 @@ def analyse_and_assess(tmp: Path, name: str, *, detect_pii: bool = False,
     # stuck one in the container logs). The heavy steps are already bounded: the .NET office CLI
     # has ACP_OFFICE_CLI_TIMEOUT (180s) and OCR caps at ACP_OCR_MAX_IMAGES (30) + downscales, so a
     # single image-heavy deck can't hang its worker indefinitely.
-    _t0 = time.monotonic()
-    print(f"[scan] analysing {name} ({ext or '?'}) …", flush=True)
     import activity as _act
     import joblog as _jl
     # Prefer the Drive file id, which is ALREADY an opaque system identifier, over a digest of
@@ -5167,11 +5176,9 @@ def analyse_and_assess(tmp: Path, name: str, *, detect_pii: bool = False,
     # which is what makes "this one was open on all three crashes" sayable; keyed on the document
     # alone, deliberately not on scan_id, so a retry's separate run still correlates.
     #
-    # NOTE, and this is a limit on what this change achieves: the `[scan] analysing {name} …`
-    # line printed above is PRE-EXISTING and still writes the filename to this same stream. So
-    # the no-filename property belongs to the joblog records, NOT to the log stream as a whole,
-    # and must not be described as though it did. Redacting that line is its own change.
     doc = _jl.doc_id(name, opaque_ref=doc_ref)
+    _t0 = time.monotonic()
+    print(f"[scan] analysing {doc or 'unknown'} ({ext or '?'}) …", flush=True)
     _act.record_file(scan_id, name, phase="analysing",
                      action="running the accessibility engine", force=True)
     # Each engine below is a NATIVE entry point, and the enter line is flushed before the call:
@@ -5268,7 +5275,8 @@ def analyse_and_assess(tmp: Path, name: str, *, detect_pii: bool = False,
                         import core as _core
                         _core.store.save_scanned_pdf_layout(scan_id, name, _layouts)
                         print(
-                            f"[scan] scanned-PDF Tier A: {name} → {len(_layouts)} page(s) assessed",
+                            f"[scan] scanned-PDF Tier A: {doc or 'unknown'} → "
+                            f"{len(_layouts)} page(s) assessed",
                             flush=True,
                         )
                         import pdf_vision_review as _pvr
@@ -5276,7 +5284,8 @@ def analyse_and_assess(tmp: Path, name: str, *, detect_pii: bool = False,
                         if _tier_b:
                             raw["issues"] = list(raw.get("issues", [])) + _tier_b
                             print(
-                                f"[scan] scanned-PDF Tier B: {name} → {len(_tier_b)} REVIEW finding(s)",
+                                f"[scan] scanned-PDF Tier B: {doc or 'unknown'} → "
+                                f"{len(_tier_b)} REVIEW finding(s)",
                                 flush=True,
                             )
         except Exception:
@@ -5310,7 +5319,8 @@ def analyse_and_assess(tmp: Path, name: str, *, detect_pii: bool = False,
     if detect_pii:
         import pii as _pii_mod
         pinfo = _pii_mod.detect_file(tmp / name)
-    print(f"[scan] {name}: {len(raw.get('issues', []))} finding(s) in {time.monotonic() - _t0:.1f}s", flush=True)
+    print(f"[scan] {doc or 'unknown'}: {len(raw.get('issues', []))} finding(s) "
+          f"in {time.monotonic() - _t0:.1f}s", flush=True)
     _act.finish_file(scan_id, name)
     return fdict, pinfo
 
