@@ -87,6 +87,62 @@ def pg():
     return st
 
 
+def test_lifecycle_source_state_projects_and_restores_on_real_postgres(pg):
+    """Exercise cross-database projection SQL and receipt/state atomicity; no provider calls."""
+    owner='lifecycle@example.invalid'
+    def seed(scan,file='a.docx'):
+        pg.init_scan_run(scan,'drive',1,'2026-09-15','default','r',owner=owner,status='discovered')
+        pg.add_inventory(scan,[{'file':file,'drive_file_id':'item-a','drive_account_id':'account-a'}])
+    seed('lifecycle-old')
+    seed('lifecycle-known','renamed.docx')
+    from lifecycle_identity import source_identity
+    source_item={'drive_file_id':'item-a','drive_account_id':'account-a'}
+    with pg._db.cursor() as cur:
+        pg._db.execute(cur,"UPDATE scan_inventory SET lifecycle_status='Deleted' WHERE scan_id='lifecycle-old'")
+    legacy=pg.get_source_lifecycle_states(owner,'drive',[source_item])
+    assert legacy['states'][source_identity(owner,'drive',source_item)]['origin']=='legacy_inventory'
+    with pg._db.cursor() as cur:
+        pg._db.execute(cur,'SELECT COUNT(*) AS n FROM source_lifecycle_state')
+        assert pg._db.fetchone(cur)['n']==0
+    pg.create_disposition_audit('lifecycle-delete',doc_id='scan:lifecycle-old:a.docx',policy_id='rule',
+        action='delete',result='applied',detail='synthetic verified provider receipt',owner_email=owner)
+    pg.set_disposition_before_state('lifecycle-delete',{'action':'delete','lifecycle_status':'Active'})
+    pg.set_lifecycle_status('lifecycle-old','a.docx','Deleted',evidence_id='lifecycle-delete')
+    pg.set_lifecycle_status('lifecycle-old','a.docx','Deleted',exclusion_reason='excluded from Assess')
+    lookup=pg.get_source_lifecycle_states(owner,'drive',[source_item,{'drive_file_id':'item-a'}])
+    assert lookup['unavailable']==[1]
+    assert lookup['states'][source_identity(owner,'drive',source_item)]['lifecycle_status']=='Deleted'
+    assert pg.get_lifecycle_status('lifecycle-known','renamed.docx')['lifecycle_status']=='Deleted'
+    pg.bulk_upsert_effective_dispositions([('a.docx','lifecycle-old','stale','Archive Candidate',
+        'late recommendation','pending_approval',None,pg._now(),owner)])
+    pg.bulk_set_lifecycle_status([('lifecycle-old','a.docx','Archive Candidate','rule','late recommendation')])
+    assert pg.get_lifecycle_status('lifecycle-old','a.docx')['lifecycle_status']=='Deleted'
+    with pg._db.cursor() as cur:
+        pg._db.execute(cur,"SELECT lifecycle_status,approval_status FROM effective_disposition WHERE scan_id='lifecycle-old'")
+        assert pg._db.fetchone(cur)=={'lifecycle_status':'Deleted','approval_status':'applied'}
+    assert pg.lifecycle_undo_allowed('lifecycle-old','a.docx',owner,'lifecycle-delete')
+    with pg.transaction():
+        pg.create_disposition_audit('lifecycle-undo',doc_id='scan:lifecycle-old:a.docx',policy_id='rule',
+            action='undo_delete',result='applied',detail='synthetic verified restoration',owner_email=owner)
+        pg.restore_lifecycle_after_undo('lifecycle-old','a.docx',owner,'lifecycle-delete','lifecycle-undo')
+    seed('lifecycle-restored')
+    assert pg.get_lifecycle_status('lifecycle-restored','a.docx')['lifecycle_status']=='Active'
+    pg.set_lifecycle_status('lifecycle-restored','a.docx','Deleted',evidence_id='new-delete')
+    assert not pg.lifecycle_undo_allowed('lifecycle-old','a.docx',owner,'lifecycle-delete')
+
+
+def test_lifecycle_undo_claim_has_one_winner_on_real_postgres(pg):
+    owner='lifecycle@example.invalid'
+    original={'doc_id':'drive:item-a','policy_id':'rule','action':'delete'}
+    barrier=threading.Barrier(8)
+    def claim(_index):
+        barrier.wait()
+        return pg.claim_disposition_undo('lifecycle-once',original,owner)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results=list(executor.map(claim,range(8)))
+    assert sum(results)==1
+
+
 def test_maintenance_lease_elects_one_backfill_owner_under_real_concurrency(pg):
     workers = 8
     barrier = threading.Barrier(workers)

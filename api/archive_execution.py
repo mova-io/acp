@@ -205,6 +205,7 @@ def run(store, owner: str, scan_id: str, *, source_factory, actor: str,
     one outcome worse than a move that should not have started.
     """
     stamp = now or _now()
+    store.reconcile_source_lifecycle(scan_id)
     report = evaluate(store, owner, scan_id, policy=policy, now=stamp)
     snapshot = af.policy_snapshot(report["policy"])
     store.save_archive_snapshot(snapshot["snapshot_id"], owner, snapshot["policy"], scan_id)
@@ -394,6 +395,11 @@ def _finish(store, owner: str, execution_id: str, scan_id: str, state: str, deta
             stamp: datetime) -> dict:
     store.update_archive_execution(execution_id, owner, state=state, detail=detail,
                                    completed_at=stamp.isoformat())
+    if state == af.ARCHIVED:
+        row = store.get_archive_execution_by_id(execution_id, owner) or {}
+        if row.get('file') and not row.get('dry_run'):
+            store.set_lifecycle_status(scan_id,row['file'],'Archived',rule_id=row.get('policy_id'),
+                reason='archive move verified at source destination',evidence_id=execution_id)
     try:
         store.log_decision(owner, f"archive_autofire.{state}", scan_id=scan_id,
                            file=None, rule_id=None, detail=detail[:500])

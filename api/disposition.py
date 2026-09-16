@@ -642,6 +642,9 @@ def undo_action(doc: dict, before: dict | None, svc) -> tuple[str, str]:
     try:
         if action == "delete":
             svc.files().update(fileId=fid, body={"trashed": False}).execute()
+            current = svc.files().get(fileId=fid, fields='id,trashed').execute()
+            if current.get('trashed') is not False:
+                return 'failed','Drive restoration could not be verified; lifecycle exclusion was retained'
             return "applied", "restored from Drive trash"
         if action == "rename":
             prior = before.get("name")
@@ -661,6 +664,9 @@ def undo_action(doc: dict, before: dict | None, svc) -> tuple[str, str]:
             svc.files().update(fileId=fid, addParents=",".join(prior_parents),
                                removeParents=",".join(current.get("parents", [])),
                                fields="id").execute()
+            restored = svc.files().get(fileId=fid,fields='id,parents').execute()
+            if set(restored.get('parents') or []) != set(prior_parents):
+                return 'failed','Drive folder restoration could not be verified; lifecycle exclusion was retained'
             return "applied", f"moved back to its previous folder ({', '.join(prior_parents)})"
         return "failed", f"nothing recorded for action '{action}' can be undone"
     except Exception as e:  # HttpError, network, permission — record, don't raise

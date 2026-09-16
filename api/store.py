@@ -975,6 +975,13 @@ _SCHEMA = [
       snapshot_id TEXT, owner_email TEXT, policy_json TEXT, created_at TEXT, scan_id TEXT,
       PRIMARY KEY (snapshot_id, owner_email)
     )""",
+    # Source lifecycle tombstones survive ordinary scan deletion. Explicit full data reset
+    # erases them; neither operation restores provider files. Never guess account/drive identity.
+    """CREATE TABLE IF NOT EXISTS source_lifecycle_state (
+      owner_email TEXT, provider TEXT, account_namespace TEXT, source_item_id TEXT,
+      lifecycle_status TEXT, evidence_id TEXT, reason TEXT, rule_id TEXT, updated_at TEXT,
+      PRIMARY KEY(owner_email,provider,account_namespace,source_item_id)
+    )""",
     """CREATE TABLE IF NOT EXISTS archive_execution (
       execution_id TEXT PRIMARY KEY, idempotency_key TEXT, owner_email TEXT, scan_id TEXT,
       file TEXT, policy_id TEXT, snapshot_id TEXT, source_connection TEXT,
@@ -2513,8 +2520,9 @@ class _PgAdapter:
     # decision, so a rolling deploy under-counts nothing and double-counts nothing.
     # v53 retains numeric-only GPU timing in nullable ai_calls.timing.
     # v54 binds local request telemetry to its authenticated execution without paid attempts.
-    _SCHEMA_VERSION = 54
-    _SCHEMA_CHECKSUM_AT_VERSION = "71a7807dd1f25d943d0d7627c967a3f8"
+    # v55 preserves tenant/provider/account/item lifecycle state across scan history pruning.
+    _SCHEMA_VERSION = 55
+    _SCHEMA_CHECKSUM_AT_VERSION = "a74c6aaaa10617e485145c1afc9fa388"
     # Namespaced so it cannot collide with an advisory lock taken anywhere else. Session-scoped
     # (pg_advisory_lock, not _xact) because the migration spans several transactions.
     _MIGRATION_ADVISORY_KEY = 0x4143500001          # 'ACP' + slot 1
@@ -3572,12 +3580,12 @@ class Store:
                "drive_file_id=EXCLUDED.drive_file_id, mime=EXCLUDED.mime, size_kb=EXCLUDED.size_kb, "
                "doc_class=EXCLUDED.doc_class, checksum=EXCLUDED.checksum, path=EXCLUDED.path, "
                "created_at=EXCLUDED.created_at, source_modified=EXCLUDED.source_modified, "
-               "owner=EXCLUDED.owner, parent_folder=EXCLUDED.parent_folder, drive_id=EXCLUDED.drive_id, "
+               "owner=EXCLUDED.owner, parent_folder=EXCLUDED.parent_folder, drive_id=COALESCE(EXCLUDED.drive_id,scan_inventory.drive_id), "
                # COALESCE, not overwrite: a re-list that got no content type this time (a
                # transient enrichment failure) must not blank out one recorded on a PRIOR
                # list of the same file — that would be a real answer thrown away for a gap.
                "content_type=COALESCE(EXCLUDED.content_type, scan_inventory.content_type), "
-               "drive_account_id=EXCLUDED.drive_account_id, "
+               "drive_account_id=COALESCE(EXCLUDED.drive_account_id,scan_inventory.drive_account_id), "
                # COALESCE for the same reason content_type uses it: a re-list of the same file
                # through a narrower path (a folder scan of one library, a delta reconstruction)
                # may not know the site, and a gap must not erase a site id an earlier list of the
@@ -3597,7 +3605,13 @@ class Store:
                "checked_out_by=COALESCE(EXCLUDED.checked_out_by, scan_inventory.checked_out_by), "
                "sp_version=COALESCE(EXCLUDED.sp_version, scan_inventory.sp_version), "
                "modified_by=COALESCE(EXCLUDED.modified_by, scan_inventory.modified_by), "
-               "sp_metadata=COALESCE(EXCLUDED.sp_metadata, scan_inventory.sp_metadata)")
+               "sp_metadata=COALESCE(EXCLUDED.sp_metadata, scan_inventory.sp_metadata) "
+               "WHERE COALESCE(scan_inventory.lifecycle_status,'Active') NOT IN ('Already archived','Archived','Deleted','Exempted') "
+               "OR ((scan_inventory.drive_file_id=EXCLUDED.drive_file_id OR "
+               "(scan_inventory.drive_file_id IS NULL AND EXCLUDED.drive_file_id IS NULL)) "
+               "AND (scan_inventory.drive_id IS NULL OR EXCLUDED.drive_id IS NULL OR scan_inventory.drive_id=EXCLUDED.drive_id) "
+               "AND (scan_inventory.drive_account_id IS NULL OR EXCLUDED.drive_account_id IS NULL "
+               "OR scan_inventory.drive_account_id=EXCLUDED.drive_account_id))")
 
         def _params(it: dict) -> tuple:
             return (scan_id, it.get("file"), it.get("source_name") or it.get("file"),
@@ -3614,14 +3628,27 @@ class Store:
         failed = 0
         with self._db.cursor() as cur:
             self._db.execute(cur,
+                "SELECT file,drive_file_id,drive_id,drive_account_id FROM scan_inventory WHERE scan_id=%s "
+                "AND lifecycle_status IN ('Already archived','Archived','Deleted','Exempted')",(scan_id,))
+            protected={r['file']:r for r in self._db.fetchall(cur)}
+            accepted=[]
+            for it in items:
+                prior=protected.get(it.get('file'))
+                changed=prior and (prior.get('drive_file_id')!=it.get('drive_file_id') or any(
+                    prior.get(key) and it.get(key) and prior[key]!=it[key] for key in ('drive_id','drive_account_id')))
+                if changed:
+                    failed+=1
+                else:
+                    accepted.append(it)
+            self._db.execute(cur,
                 "SELECT COUNT(*) AS cnt FROM scan_inventory WHERE scan_id=%s", (scan_id,))
             before = (self._db.fetchone(cur) or {}).get("cnt", 0)
             try:
-                self._db.executemany(cur, sql, [_params(it) for it in items])
+                self._db.executemany(cur, sql, [_params(it) for it in accepted])
             except Exception:
                 logger.warning("add_inventory: batch insert failed for scan %s (%d items), "
                                "falling back to per-item", scan_id, len(items), exc_info=True)
-                for it in items:
+                for it in accepted:
                     try:
                         self._db.execute(cur, sql, _params(it))
                     except Exception:
@@ -3631,6 +3658,7 @@ class Store:
             after = (self._db.fetchone(cur) or {}).get("cnt", 0)
         new_count = max(0, after - before)
         updated_count = max(0, len(items) - failed - new_count)
+        self.reconcile_source_lifecycle(scan_id)
         return {"new": new_count, "updated": updated_count, "unchanged": 0, "failed": failed}
 
     def mark_discovery_complete(self, scan_id: str, at: str | None = None) -> str | None:
@@ -3819,7 +3847,7 @@ class Store:
                 "SELECT MAX(discovered_at) AS at FROM scan_inventory WHERE scan_id=%s", (scan_id,))
             return (self._db.fetchone(cur) or {}).get("at")
 
-    _INV_COLS = ("scan_id,file,source_name,drive_file_id,mime,size_kb,doc_class,checksum,path,"
+    _INV_COLS = ("scan_id,file,source_name,drive_file_id,drive_account_id,mime,size_kb,doc_class,checksum,path,"
                  "created_at,source_modified,owner,parent_folder,discovered_at,drive_id,"
                  "lifecycle_status,lifecycle_rule_id,lifecycle_reason,exclusion_reason,"
                  "lifecycle_override_reason,lifecycle_overridden_by,lifecycle_overridden_at,"
@@ -4007,21 +4035,275 @@ class Store:
                           "Delete Candidate", "Deleted", "Failed", "Exempted", "Reactivated",
                           "Unevaluable", "Conflict — review required")
     # Statuses Assess excludes by default (PRD §4.5): archive/delete-flagged and terminal.
-    LIFECYCLE_EXCLUDED_DEFAULT = ("Archive Candidate", "Archived", "Delete Candidate", "Deleted")
+    LIFECYCLE_EXCLUDED_DEFAULT = ("Already archived", "Archive Candidate", "Archived", "Delete Candidate", "Deleted")
+
+    def get_source_lifecycle_states(self, owner: str, provider: str, items: list[dict]) -> dict:
+        """Read-only pre-analysis gate: exact retained identities plus unlinked input indices.
+
+        Callers supply inventory-shaped source metadata, not display filenames or raw URLs.
+        An absent state for a complete identity is distinct from unavailable source identity.
+        Callers exclude only terminal states; a retained restoration is known nonterminal state.
+        Queries are capped at 400 unique source identities per batch, including duplicates.
+        """
+        from lifecycle_identity import source_identity
+        identities=set()
+        unavailable=[]
+        for index,item in enumerate(items):
+            identity=source_identity(owner,provider,item)
+            if identity is None:
+                unavailable.append(index)
+            else:
+                identities.add(identity)
+        states={}
+        ordered=sorted(identities)
+        if ordered:
+            with self._db.cursor() as cur:
+                for offset in range(0,len(ordered),400):
+                    batch=ordered[offset:offset+400]
+                    pairs=','.join('(%s,%s)' for _ in batch)
+                    params=[batch[0][0],batch[0][1]]
+                    for identity in batch:
+                        params.extend(identity[2:])
+                    self._db.execute(cur,
+                        'SELECT * FROM source_lifecycle_state WHERE owner_email=%s AND provider=%s '
+                        f'AND (account_namespace,source_item_id) IN ({pairs})',tuple(params))
+                    for row in self._db.fetchall(cur):
+                        key=(row['owner_email'],row['provider'],row['account_namespace'],row['source_item_id'])
+                        states[key]=row
+                    # First v55 analysis can precede inventory reconciliation. Read legacy
+                    # terminal snapshots without writing, only for keys absent from the ledger.
+                    # Any retained restoration shadows legacy terminal history.
+                    missing=[identity for identity in batch if identity not in states]
+                    if missing:
+                        pairs=','.join('(%s,%s)' for _ in missing)
+                        params=[batch[0][0],batch[0][1],batch[0][1]]
+                        for identity in missing:
+                            params.extend(identity[2:])
+                        self._db.execute(cur,
+                            'SELECT si.scan_id,si.file,si.drive_file_id,si.drive_account_id,si.drive_id,'
+                            'si.lifecycle_status,si.lifecycle_reason,si.lifecycle_rule_id,sr.source '
+                            'FROM scan_inventory si JOIN scan_runs sr ON sr.id=si.scan_id '
+                            'WHERE LOWER(TRIM(sr.owner_email))=%s AND LOWER(TRIM(sr.source))=%s '
+                            f"AND (CASE WHEN %s='drive' THEN si.drive_account_id ELSE si.drive_id END,si.drive_file_id) IN ({pairs}) "
+                            "AND si.lifecycle_status IN ('Already archived','Archived','Deleted') "
+                            "ORDER BY CASE si.lifecycle_status WHEN 'Deleted' THEN 0 WHEN 'Archived' THEN 1 ELSE 2 END,"
+                            'si.discovered_at DESC,si.scan_id,si.file',tuple(params))
+                        for row in self._db.fetchall(cur):
+                            identity=source_identity(owner,provider,row)
+                            if identity and identity not in states:
+                                states[identity]={'owner_email':identity[0],'provider':identity[1],
+                                    'account_namespace':identity[2],'source_item_id':identity[3],
+                                    'lifecycle_status':row['lifecycle_status'],'reason':row.get('lifecycle_reason'),
+                                    'rule_id':row.get('lifecycle_rule_id'),
+                                    'evidence_id':f"legacy:{row['scan_id']}:{row['file']}",'origin':'legacy_inventory'}
+        return {'states':states,'unavailable':unavailable}
+
+    def reconcile_source_lifecycle(self, scan_id: str) -> None:
+        """Replay durable source state, including safely identified legacy terminal rows.
+
+        Batch reads/writes keep this bounded by inventory size rather than one query per file.
+        A restoration state in the ledger shadows historical terminal snapshots permanently.
+        """
+        from lifecycle_identity import source_identity, TERMINAL
+        with self._db.cursor() as cur:
+            self._db.execute(cur, 'SELECT owner_email,source FROM scan_runs WHERE id=%s', (scan_id,))
+            run = self._db.fetchone(cur)
+            if not run or not run.get('owner_email'):
+                return
+            owner = str(run['owner_email']).strip().lower()
+            provider = str(run.get('source') or '').strip().lower()
+            self._db.execute(cur,
+                "SELECT si.*,sr.source FROM scan_inventory si JOIN scan_runs sr ON sr.id=si.scan_id "
+                "JOIN scan_inventory current_item ON current_item.scan_id=%s "
+                "AND current_item.drive_file_id=si.drive_file_id "
+                "AND CASE WHEN %s='drive' THEN current_item.drive_account_id ELSE current_item.drive_id END "
+                "= CASE WHEN %s='drive' THEN si.drive_account_id ELSE si.drive_id END "
+                "WHERE LOWER(TRIM(sr.owner_email))=%s AND LOWER(TRIM(sr.source))=%s "
+                "AND si.lifecycle_status IN ('Already archived','Archived','Deleted') "
+                "ORDER BY CASE si.lifecycle_status WHEN 'Deleted' THEN 0 WHEN 'Archived' THEN 1 ELSE 2 END,"
+                "si.discovered_at DESC,si.scan_id,si.file", (scan_id,provider,provider,owner, provider))
+            legacy = self._db.fetchall(cur)
+            legacy_params = []
+            legacy_seen = set()
+            for row in legacy:
+                identity = source_identity(owner, provider, row)
+                if not identity or identity in legacy_seen:
+                    continue
+                legacy_seen.add(identity)
+                legacy_params.append((*identity, row['lifecycle_status'], f"legacy:{row['scan_id']}:{row['file']}",
+                                      row.get('lifecycle_reason'), row.get('lifecycle_rule_id'), self._now()))
+            if legacy_params:
+                self._db.executemany(cur,
+                    'INSERT INTO source_lifecycle_state(owner_email,provider,account_namespace,source_item_id,'
+                    'lifecycle_status,evidence_id,reason,rule_id,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) '
+                    'ON CONFLICT(owner_email,provider,account_namespace,source_item_id) DO NOTHING',
+                    legacy_params)
+            self._db.execute(cur,
+                'SELECT * FROM source_lifecycle_state state WHERE owner_email=%s AND provider=%s '
+                'AND EXISTS (SELECT 1 FROM scan_inventory si WHERE si.scan_id=%s '
+                'AND si.drive_file_id=state.source_item_id '
+                "AND CASE WHEN %s='drive' THEN si.drive_account_id ELSE si.drive_id END=state.account_namespace)",
+                (owner, provider,scan_id,provider))
+            states = {(r['owner_email'],r['provider'],r['account_namespace'],r['source_item_id']): r
+                      for r in self._db.fetchall(cur)}
+            self._db.execute(cur, 'SELECT * FROM scan_inventory WHERE scan_id=%s', (scan_id,))
+            updates = []
+            for row in self._db.fetchall(cur):
+                state = states.get(source_identity(owner, provider, row))
+                if state and row.get('lifecycle_status') != 'Exempted' and (
+                        state['lifecycle_status'] in TERMINAL or row.get('lifecycle_status') in TERMINAL):
+                    updates.append((state['lifecycle_status'],state.get('rule_id'),state.get('reason'),scan_id,row['file']))
+            if updates:
+                self._db.executemany(cur,
+                    'UPDATE scan_inventory SET lifecycle_status=%s,lifecycle_rule_id=%s,lifecycle_reason=%s '
+                    'WHERE scan_id=%s AND file=%s', updates)
+
+    def _retain_source_lifecycle(self, cur, scan_id, file, status, rule_id, reason, evidence_id):
+        from lifecycle_identity import source_identity, TERMINAL
+        if status not in TERMINAL:
+            return
+        self._db.execute(cur,
+            'SELECT si.*,sr.owner_email,sr.source FROM scan_inventory si JOIN scan_runs sr ON sr.id=si.scan_id '
+            'WHERE si.scan_id=%s AND si.file=%s', (scan_id,file))
+        row = self._db.fetchone(cur)
+        identity = source_identity((row or {}).get('owner_email'), (row or {}).get('source'), row or {})
+        if identity:
+            self._db.execute(cur,
+                'INSERT INTO source_lifecycle_state(owner_email,provider,account_namespace,source_item_id,'
+                'lifecycle_status,evidence_id,reason,rule_id,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) '
+                'ON CONFLICT(owner_email,provider,account_namespace,source_item_id) DO UPDATE SET '
+                'lifecycle_status=EXCLUDED.lifecycle_status,evidence_id=EXCLUDED.evidence_id,'
+                'reason=EXCLUDED.reason,rule_id=EXCLUDED.rule_id,updated_at=EXCLUDED.updated_at '
+                "WHERE (source_lifecycle_state.lifecycle_status!='Deleted' OR EXCLUDED.lifecycle_status='Deleted') "
+                "AND (%s OR source_lifecycle_state.lifecycle_status!=EXCLUDED.lifecycle_status)",
+                (*identity,status,evidence_id or f"inventory:{scan_id}:{file}:{status}",reason,rule_id,self._now(),bool(evidence_id)))
+            if cur.rowcount:
+                self._project_source_lifecycle(cur,identity,status,rule_id,reason,'applied')
+
+    def _project_source_lifecycle(self, cur, identity, status, rule_id, reason, approval):
+        owner,provider,namespace,item_id=identity
+        self._db.execute(cur,
+            'UPDATE scan_inventory SET lifecycle_status=%s,lifecycle_rule_id=%s,lifecycle_reason=%s,'
+            'exclusion_reason=NULL WHERE drive_file_id=%s '
+            "AND CASE WHEN %s='drive' THEN drive_account_id ELSE drive_id END=%s "
+            "AND COALESCE(lifecycle_status,'Active')!='Exempted' AND EXISTS (SELECT 1 FROM scan_runs sr "
+            'WHERE sr.id=scan_inventory.scan_id AND LOWER(TRIM(sr.owner_email))=%s AND LOWER(TRIM(sr.source))=%s)',
+            (status,rule_id,reason,item_id,provider,namespace,owner,provider))
+        self._db.execute(cur,
+            'UPDATE effective_disposition SET lifecycle_status=%s,precedence_reason=%s,approval_status=%s,'
+            'updated_at=%s WHERE EXISTS (SELECT 1 FROM scan_inventory si JOIN scan_runs sr ON sr.id=si.scan_id '
+            'WHERE si.scan_id=effective_disposition.scan_id AND si.file=effective_disposition.document_id '
+            'AND si.drive_file_id=%s AND si.lifecycle_status=%s '
+            "AND CASE WHEN %s='drive' THEN si.drive_account_id ELSE si.drive_id END=%s "
+            'AND LOWER(TRIM(sr.owner_email))=%s AND LOWER(TRIM(sr.source))=%s)',
+            (status,reason,approval,self._now(),item_id,status,provider,namespace,owner,provider))
+
+    def lifecycle_undo_allowed(self, scan_id: str, file: str, owner: str, audit_id: str) -> bool:
+        """An old undo must not clear a newer disposition on the same source item."""
+        from lifecycle_identity import source_identity, source_binding
+        item = self.lifecycle_source_item(scan_id,file,owner)
+        if not item:
+            return False
+        original = self.get_disposition_audit(audit_id,owner=owner) or {}
+        before=self.get_disposition_before_state(audit_id,owner) or {}
+        binding=before.get('lifecycle_source_binding') or next(
+            (r.get('source_binding') for r in before.get('lifecycle_inventory') or []
+             if r.get('scan_id')==scan_id and r.get('file')==file),None)
+        if binding and binding!=source_binding(item):
+            return False
+        expected = {'archive': 'Archived','delete': 'Deleted'}.get(original.get('action'))
+        if expected and item.get('lifecycle_status') != expected:
+            return False
+        identity = source_identity(owner,item.get('source'),item)
+        if not identity or not expected:
+            return True
+        with self._db.cursor() as cur:
+            self._db.execute(cur,
+                'SELECT evidence_id FROM source_lifecycle_state WHERE owner_email=%s AND provider=%s '
+                'AND account_namespace=%s AND source_item_id=%s',identity)
+            state = self._db.fetchone(cur)
+        return not state or state.get('evidence_id') == audit_id
+
+    def restore_lifecycle_after_undo(self, scan_id: str, file: str, owner: str, audit_id: str, undo_id: str) -> None:
+        """Clear exclusion only after a recorded provider restoration, never a status toggle."""
+        from lifecycle_identity import source_identity
+        undo = self.get_disposition_audit(undo_id,owner=owner) or {}
+        original = self.get_disposition_audit(audit_id,owner=owner) or {}
+        before = self.get_disposition_before_state(audit_id,owner) or {}
+        prior = before.get('lifecycle_status')
+        if prior is None:
+            prior=next((r.get('lifecycle_status') for r in before.get('lifecycle_inventory') or []
+                        if r.get('scan_id')==scan_id and r.get('file')==file),None)
+        if undo.get('result') != 'applied' or undo.get('action') != f"undo_{original.get('action')}" or prior not in self.LIFECYCLE_STATUSES:
+            return
+        if not self.lifecycle_undo_allowed(scan_id,file,owner,audit_id):
+            raise ValueError('a newer lifecycle decision prevents restoring this inventory state')
+        item = self.lifecycle_source_item(scan_id,file,owner) or {}
+        identity = source_identity(owner,item.get('source'),item)
+        reason = f"restored by verified undo of {original.get('action')}"
+        with self._db.cursor() as cur:
+            if identity:
+                self._db.execute(cur,
+                    'UPDATE source_lifecycle_state SET lifecycle_status=%s,evidence_id=%s,reason=%s,updated_at=%s '
+                    'WHERE owner_email=%s AND provider=%s AND account_namespace=%s AND source_item_id=%s '
+                    'AND evidence_id=%s', (prior,undo_id,reason,self._now(),*identity,audit_id))
+                if not cur.rowcount:
+                    raise ValueError('source lifecycle restoration no longer matches the executed action')
+                self._project_source_lifecycle(cur,identity,prior,original.get('policy_id'),reason,'restored')
+            self._db.execute(cur,
+                'UPDATE scan_inventory SET lifecycle_status=%s,lifecycle_reason=%s,exclusion_reason=NULL '
+                'WHERE scan_id=%s AND file=%s',(prior,reason,scan_id,file))
+            self._db.execute(cur,
+                'UPDATE effective_disposition SET lifecycle_status=%s,precedence_reason=%s,approval_status=%s,'
+                'updated_at=%s WHERE scan_id=%s AND document_id=%s',
+                (prior,reason,'restored',self._now(),scan_id,file))
+
+    def restore_governance_lifecycle_after_undo(self, owner: str, audit_id: str, undo_id: str) -> None:
+        from lifecycle_identity import source_identity
+        before=self.get_disposition_before_state(audit_id,owner) or {}
+        restored=set()
+        for ref in before.get('lifecycle_inventory') or []:
+            item=self.lifecycle_source_item(ref['scan_id'],ref['file'],owner) or {}
+            identity=source_identity(owner,item.get('source'),item)
+            if identity and identity in restored:
+                continue
+            self.restore_lifecycle_after_undo(ref['scan_id'],ref['file'],owner,audit_id,undo_id)
+            if identity:
+                restored.add(identity)
+
+    def claim_disposition_undo(self, undo_id: str, original: dict, owner: str) -> bool:
+        """Claim before calling the provider so retries cannot restore an item twice."""
+        with self._db.cursor() as cur:
+            self._db.execute(cur,
+                'INSERT INTO disposition_audit(id,ts,doc_id,policy_id,action,result,detail,owner_email) '
+                'VALUES(%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO NOTHING',
+                (undo_id,self._now(),original['doc_id'],original['policy_id'],f"undo_{original['action']}",
+                 'undo_in_progress','provider restoration claimed',owner))
+            return cur.rowcount == 1
 
     def set_lifecycle_status(self, scan_id: str, file: str, status: str, *,
                              rule_id: str | None = None, reason: str | None = None,
-                             exclusion_reason: str | None = None) -> None:
+                             exclusion_reason: str | None = None, evidence_id: str | None = None) -> None:
         """Move one inventory row to `status`, recording the rule + reason that produced it
         (PRD §4.3). Unknown statuses raise — the set is closed. Idempotent."""
         if status not in self.LIFECYCLE_STATUSES:
             raise ValueError(f"unknown lifecycle status {status!r} "
                              f"(allowed: {list(self.LIFECYCLE_STATUSES)})")
         with self._db.cursor() as cur:
+            # Recommendations and ordinary metadata updates cannot clear terminal state.
             self._db.execute(cur,
                 "UPDATE scan_inventory SET lifecycle_status=%s, lifecycle_rule_id=%s, "
-                "lifecycle_reason=%s, exclusion_reason=%s WHERE scan_id=%s AND file=%s",
-                (status, rule_id, reason, exclusion_reason, scan_id, file))
+                "lifecycle_reason=%s, exclusion_reason=%s WHERE scan_id=%s AND file=%s "
+                "AND (COALESCE(lifecycle_status,'Active') NOT IN ('Already archived','Archived','Deleted','Exempted') "
+                "OR lifecycle_status=%s OR (lifecycle_status IN ('Already archived','Archived') AND %s='Deleted'))",
+                (status, rule_id, reason, exclusion_reason, scan_id, file,status,status))
+            if cur.rowcount:
+                self._retain_source_lifecycle(cur,scan_id,file,status,rule_id,reason,evidence_id)
+                self._db.execute(cur,
+                    'UPDATE effective_disposition SET lifecycle_status=%s,precedence_reason=%s,'
+                    'approval_status=%s,updated_at=%s WHERE scan_id=%s AND document_id=%s',
+                    (status,reason,'applied' if status in ('Archived','Deleted','Already archived') else 'not_required',
+                     self._now(),scan_id,file))
 
     def bulk_set_lifecycle_status(self, rows: list) -> None:
         """Bulk-update lifecycle status for rows accumulated by the lifecycle rule evaluator.
@@ -4035,7 +4317,8 @@ class Store:
         with self._db.cursor() as cur:
             self._db.executemany(cur,
                 "UPDATE scan_inventory SET lifecycle_status=%s, lifecycle_rule_id=%s, "
-                "lifecycle_reason=%s, exclusion_reason=%s WHERE scan_id=%s AND file=%s",
+                "lifecycle_reason=%s, exclusion_reason=%s WHERE scan_id=%s AND file=%s "
+                "AND COALESCE(lifecycle_status,'Active') NOT IN ('Already archived','Archived','Deleted','Exempted')",
                 [(status, rule_id, reason, None, scan_id, file)
                  for scan_id, file, status, rule_id, reason in rows])
 
@@ -4103,13 +4386,27 @@ class Store:
             self._db.executemany(cur,
                 "INSERT INTO effective_disposition(document_id,scan_id,winning_evaluation_id,"
                 "lifecycle_status,precedence_reason,approval_status,override_reason,updated_at,owner_email) "
-                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(scan_id,document_id) DO UPDATE SET "
+                "SELECT incoming.document_id,incoming.scan_id,"
+                "CASE WHEN si.lifecycle_status IN ('Already archived','Archived','Deleted','Exempted') "
+                "THEN NULL ELSE incoming.winning_evaluation_id END,"
+                "CASE WHEN si.lifecycle_status IN ('Already archived','Archived','Deleted','Exempted') "
+                "THEN si.lifecycle_status ELSE incoming.lifecycle_status END,"
+                "CASE WHEN si.lifecycle_status IN ('Already archived','Archived','Deleted','Exempted') "
+                "THEN si.lifecycle_reason ELSE incoming.precedence_reason END,"
+                "CASE WHEN si.lifecycle_status IN ('Already archived','Archived','Deleted') THEN 'applied' "
+                "WHEN si.lifecycle_status='Exempted' THEN 'not_required' ELSE incoming.approval_status END,"
+                "incoming.override_reason,incoming.updated_at,incoming.owner_email "
+                "FROM (SELECT %s AS document_id,%s AS scan_id,%s AS winning_evaluation_id,%s AS lifecycle_status,"
+                "%s AS precedence_reason,%s AS approval_status,%s AS override_reason,%s AS updated_at,%s AS owner_email) incoming "
+                "LEFT JOIN scan_inventory si ON si.scan_id=incoming.scan_id AND si.file=incoming.document_id WHERE 1=1 "
+                "ON CONFLICT(scan_id,document_id) DO UPDATE SET "
                 "winning_evaluation_id=EXCLUDED.winning_evaluation_id,lifecycle_status=EXCLUDED.lifecycle_status,"
                 "precedence_reason=EXCLUDED.precedence_reason,approval_status=EXCLUDED.approval_status,"
                 "override_reason=EXCLUDED.override_reason,updated_at=EXCLUDED.updated_at,owner_email=EXCLUDED.owner_email",
                 rows)
 
     def lifecycle_summary(self, scan_id: str, owner: str) -> dict:
+        from lifecycle_identity import source_identity
         counts = self.count_lifecycle_by_status(scan_id)
         total = self.count_inventory(scan_id)
         normalized = {
@@ -4140,6 +4437,12 @@ class Store:
             self._db.execute(cur, "SELECT scope FROM scan_runs WHERE id=%s AND owner_email=%s",
                              (scan_id, owner))
             run = self._db.fetchone(cur) or {}
+            self._db.execute(cur,
+                "SELECT si.*,sr.source FROM scan_inventory si JOIN scan_runs sr ON sr.id=si.scan_id "
+                "WHERE si.scan_id=%s AND sr.owner_email=%s "
+                "AND si.lifecycle_status IN ('Already archived','Archived','Deleted')",(scan_id,owner))
+            terminal_items=self._db.fetchall(cur)
+            unlinked=sum(source_identity(owner,row.get('source'),row) is None for row in terminal_items)
         scope = run.get("scope") or {}
         if isinstance(scope, str):
             try:
@@ -4151,6 +4454,8 @@ class Store:
         evidence_complete = (candidate_count == candidate_evidence and
                              (expected_rules == 0 or recorded_rules >= expected_rules))
         return {"scan_id": scan_id, "total": total, "reconciled_total": sum(normalized.values()),
+                'source_identity_linkage': {'terminal_items': len(terminal_items),'unavailable': unlinked,
+                    'detail': 'Missing stable provider account/drive identity prevents cross-scan linkage; these files remain excluded within this scan.' if unlinked else None},
                 "counts": normalized,
                 "assessment_excluded": normalized["already_archived"] + normalized["archive_candidate"] + normalized["delete_candidate"] + normalized["deleted"],
                 "data_version": self.lifecycle_data_version(scan_id),
@@ -4326,6 +4631,24 @@ class Store:
                 "WHERE si.scan_id=%s AND si.file=%s AND sr.owner_email=%s",
                 (scan_id, file, owner))
             return self._db.fetchone(cur)
+
+    def lifecycle_document_refs(self, doc_id: str, owner: str) -> list[dict]:
+        """Link a governance Drive action to known inventory only when its account is unambiguous."""
+        from lifecycle_identity import source_identity
+        if not str(doc_id).startswith('drive:'):
+            return []
+        with self._db.cursor() as cur:
+            self._db.execute(cur,
+                "SELECT si.*,sr.source FROM scan_inventory si JOIN scan_runs sr ON sr.id=si.scan_id "
+                "WHERE sr.owner_email=%s AND sr.source='drive' AND si.drive_file_id=%s "
+                "ORDER BY si.discovered_at DESC,si.scan_id,si.file",
+                (owner,str(doc_id)[6:]))
+            rows=self._db.fetchall(cur)
+        identities={source_identity(owner,'drive',row) for row in rows}
+        identities.discard(None)
+        if len(identities)>1:
+            raise ValueError('the source item is associated with multiple Drive accounts; approve an exact scan candidate')
+        return [row for row in rows if source_identity(owner,'drive',row) in identities or not identities]
 
     def drive_targets_for_files(self, scan_id: str, files: list[str], owner: str) -> dict[str, str]:
         """{file: drive_file_id} for the files in one scan that have one, in ONE query.
@@ -4930,7 +5253,7 @@ class Store:
                          "scan_decisions", "pii_findings", "hitl_queue", "hitl_events",
                          "disposition_audit", "decision_log", "inventory", "jobs", "documents",
                          "tenant_queue_state",
-                         "lifecycle_evaluation", "effective_disposition",
+                         "lifecycle_evaluation", "effective_disposition", "source_lifecycle_state",
                          "org_memory", "remediation_state", "finding_disposition",
                          "finding_disposition_event", "remediation_diff", "applied_fixes",
                          "ai_calls", "ai_validation_outcomes", "second_opinion_reservations",
@@ -5050,12 +5373,12 @@ class Store:
           - doc_id-keyed (_RESET_USER_DOC_TABLES): doc_id IN (SELECT doc_id FROM documents WHERE
             owner_email=%s) — disposition_audit/remediation_state key on doc_id, not scan_id.
           - owns owner_email directly: scan_decisions, documents, scan_runs, content_workspaces,
-            content_workspace_documents (ADR 0044 — WHERE owner_email=%s); org_memory
-            (WHERE org=%s — every call site sets `org` to the signed-in user's own email, so it
+            content_workspace_documents (ADR 0044 — WHERE LOWER(TRIM(owner_email))=%s); org_memory
+            (WHERE LOWER(TRIM(org))=%s — every call site sets `org` to the signed-in user's own email, so it
             is already per-user despite the name).
           - content_workspace_document_versions carries no owner_email of its own (see its
             migration comment) — scoped via document_id IN (SELECT id FROM
-            content_workspace_documents WHERE owner_email=%s), deleted BEFORE its parent
+            content_workspace_documents WHERE LOWER(TRIM(owner_email))=%s), deleted BEFORE its parent
             documents for the same "no real FK, but tidy child-before-parent order" reason
             _RESET_USER_DOC_TABLES's rows are deleted before `documents` below.
 
@@ -5086,31 +5409,37 @@ class Store:
         see stale bytes take extra storage until a real per-owner blob accounting exists; nothing
         product-visible references them once the DB rows are gone.
         """
+        owner_email=owner_email.strip().lower()
         cleared: list[str] = []
         with self._db.cursor() as cur:
+            # Full tenant erasure clears source identifiers and all lifecycle projections in
+            # this same transaction. This is not an undo and makes no provider call.
+            for table in ('source_lifecycle_state','lifecycle_evaluation','effective_disposition','disposition_audit'):
+                self._db.execute(cur,f'DELETE FROM {table} WHERE LOWER(TRIM(owner_email))=%s',(owner_email,))
+                cleared.append(table)
             # Release children key on release_id rather than scan_id. Remove them before their
             # owner-scoped executions, while the join can still identify this user's rows.
             for table in ("release_report_bundles", "release_documents", "release_roots", "release_root_claims"):
                 self._db.execute(cur,
                     f"DELETE FROM {table} WHERE release_id IN "
-                    "(SELECT id FROM release_executions WHERE owner_email=%s)", (owner_email,))
+                    "(SELECT id FROM release_executions WHERE LOWER(TRIM(owner_email))=%s)", (owner_email,))
                 cleared.append(table)
-            self._db.execute(cur, "DELETE FROM release_executions WHERE owner_email=%s",
+            self._db.execute(cur, "DELETE FROM release_executions WHERE LOWER(TRIM(owner_email))=%s",
                              (owner_email,))
             cleared.append("release_executions")
             for t in self._RESET_USER_SCAN_TABLES:
                 self._db.execute(cur,
-                    f"DELETE FROM {t} WHERE scan_id IN (SELECT id FROM scan_runs WHERE owner_email=%s)",
+                    f"DELETE FROM {t} WHERE scan_id IN (SELECT id FROM scan_runs WHERE LOWER(TRIM(owner_email))=%s)",
                     (owner_email,))
                 cleared.append(t)
             # orchestration_events' scan_id-less rows (worker/capacity/dependency events with no
             # scan involved) are invisible to the scan_id-IN-subquery pass above — this second
             # pass, scoped by the column the table carries directly, is what actually makes this
             # owner's log fully gone. Safe to re-run over rows the loop above already deleted.
-            self._db.execute(cur, "DELETE FROM orchestration_events WHERE owner_email=%s", (owner_email,))
+            self._db.execute(cur, "DELETE FROM orchestration_events WHERE LOWER(TRIM(owner_email))=%s", (owner_email,))
             for t in self._RESET_USER_DOC_TABLES:
                 self._db.execute(cur,
-                    f"DELETE FROM {t} WHERE doc_id IN (SELECT doc_id FROM documents WHERE owner_email=%s)",
+                    f"DELETE FROM {t} WHERE doc_id IN (SELECT doc_id FROM documents WHERE LOWER(TRIM(owner_email))=%s)",
                     (owner_email,))
                 cleared.append(t)
             # Archive executions carry owner_email directly and key on neither scan_id nor
@@ -5118,37 +5447,37 @@ class Store:
             # durable audit record), so the scan_id-IN-subquery pass above cannot reach one whose
             # scan has already been deleted. Same shape as orchestration_events' second pass.
             for t in ("archive_execution", "archive_policy_snapshot"):
-                self._db.execute(cur, f"DELETE FROM {t} WHERE owner_email=%s", (owner_email,))
+                self._db.execute(cur, f"DELETE FROM {t} WHERE LOWER(TRIM(owner_email))=%s", (owner_email,))
                 cleared.append(t)
             # Policy actions are idempotency/audit receipts for customer changes, not the live
             # policy itself. The policy remains configuration; its historical receipts do not.
             for t in ("remediation_contribution_runs", "remediation_contribution_proposals",
                          "ai_local_call_execution_links", "ai_proposal_snapshots", "ai_attempt_trace_links", "ai_review_receipts", "ai_attempt_history",
                       "ai_spending_attempts", "ai_spending_run_policies", "ai_spending_budgets"):
-                self._db.execute(cur, f"DELETE FROM {t} WHERE owner_id=%s", (owner_email,))
+                self._db.execute(cur, f"DELETE FROM {t} WHERE LOWER(TRIM(owner_id))=%s", (owner_email,))
                 cleared.append(t)
-            self._db.execute(cur, "DELETE FROM remediation_policy_action WHERE owner_email=%s",
+            self._db.execute(cur, "DELETE FROM remediation_policy_action WHERE LOWER(TRIM(owner_email))=%s",
                              (owner_email,))
             cleared.append("remediation_policy_action")
-            self._db.execute(cur, "DELETE FROM scan_decisions WHERE owner_email=%s", (owner_email,))
+            self._db.execute(cur, "DELETE FROM scan_decisions WHERE LOWER(TRIM(owner_email))=%s", (owner_email,))
             cleared.append("scan_decisions")
-            self._db.execute(cur, "DELETE FROM tenant_queue_state WHERE tenant_key=%s", (owner_email,))
+            self._db.execute(cur, "DELETE FROM tenant_queue_state WHERE LOWER(TRIM(tenant_key))=%s", (owner_email,))
             cleared.append("tenant_queue_state")
-            self._db.execute(cur, "DELETE FROM documents WHERE owner_email=%s", (owner_email,))
+            self._db.execute(cur, "DELETE FROM documents WHERE LOWER(TRIM(owner_email))=%s", (owner_email,))
             cleared.append("documents")
-            self._db.execute(cur, "DELETE FROM org_memory WHERE org=%s", (owner_email,))
+            self._db.execute(cur, "DELETE FROM org_memory WHERE LOWER(TRIM(org))=%s", (owner_email,))
             cleared.append("org_memory")
             self._db.execute(cur,
                 "DELETE FROM content_workspace_document_versions WHERE document_id IN "
-                "(SELECT id FROM content_workspace_documents WHERE owner_email=%s)", (owner_email,))
+                "(SELECT id FROM content_workspace_documents WHERE LOWER(TRIM(owner_email))=%s)", (owner_email,))
             cleared.append("content_workspace_document_versions")
             self._db.execute(cur,
-                "DELETE FROM content_workspace_documents WHERE owner_email=%s", (owner_email,))
+                "DELETE FROM content_workspace_documents WHERE LOWER(TRIM(owner_email))=%s", (owner_email,))
             cleared.append("content_workspace_documents")
-            self._db.execute(cur, "DELETE FROM content_workspaces WHERE owner_email=%s", (owner_email,))
+            self._db.execute(cur, "DELETE FROM content_workspaces WHERE LOWER(TRIM(owner_email))=%s", (owner_email,))
             cleared.append("content_workspaces")
             # scan_runs last — every scan_id-scoped subquery above depends on these rows existing.
-            self._db.execute(cur, "DELETE FROM scan_runs WHERE owner_email=%s", (owner_email,))
+            self._db.execute(cur, "DELETE FROM scan_runs WHERE LOWER(TRIM(owner_email))=%s", (owner_email,))
             cleared.append("scan_runs")
         return {"owner": owner_email, "cleared_tables": cleared}
 

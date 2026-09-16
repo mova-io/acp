@@ -37,6 +37,7 @@ def test_graph_candidate_restore_never_calls_google_drive(gated_client, isolated
     st.create_disposition_audit('namespace-audit', doc_id='scan:scan-exec-1:a.docx',
         policy_id='namespace-rule', action='delete', result='applied', detail='legacy row', owner_email=OWNER)
     st.set_disposition_before_state('namespace-audit', {'action': 'delete', 'trashed': False})
+    st.set_lifecycle_status('scan-exec-1','a.docx','Deleted')
     result = gated_client(OWNER).post('/disposition/approvals/namespace-audit/undo')
     assert result.status_code == 502, result.text
     assert drive._files.touched == []
