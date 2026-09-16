@@ -38,4 +38,8 @@ it('renders the live panel with separate reconciled groups under automatic appro
  expect(summary.textContent).toContain('112 status checks')
  expect(container.textContent).not.toContain('122 review items')
  expect(container.textContent).toContain('112 status-check items')
+ const details=container.querySelector('.remaining-work-details')
+ expect(details).not.toBeNull()
+ expect(details.open).toBe(false)
+ expect(container.querySelector('[aria-label="Remaining work item counts"]').textContent).toContain('190 need your input')
 })

@@ -118,3 +118,18 @@ it('retains the safe empty-response reason and shows a concrete next action', ()
   expect(notices[0].responsibility).toContain('Provide the missing description')
   expect(JSON.stringify(notices)).not.toContain('private text')
 })
+
+it('keeps blockers visible while collapsing routine preparation and status groups', () => {
+  const html = renderToStaticMarkup(<RemainingWorkStatus automatic rows={[
+    {id:1,file:'draft.docx',rule_id:'1.1.1',status:'pending',aiDraftable:true,hasProposal:false},
+    {id:2,file:'failed.docx',rule_id:'2.4.2',status:'verification_failed',hasProposal:true,after:'Title'},
+    {id:3,file:'status-a.docx',rule_id:'1.3.3',status:'pending',hasProposal:true,after:'Use button'},
+    {id:4,file:'status-b.docx',rule_id:'1.3.3',status:'pending'},
+  ]} />)
+  expect(html).toContain('Saved fix needs recovery')
+  expect(html).toContain('Status and recovery details')
+  expect(html).toContain('Recorded status needs checking')
+  expect(html).toContain('separate recorded groups')
+  expect(html).toContain('A recorded status is not a verified fix')
+  expect(html).not.toContain('<details class="remaining-work-details" open=""')
+})

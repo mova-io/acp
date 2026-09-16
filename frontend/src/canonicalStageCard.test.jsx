@@ -379,6 +379,29 @@ describe('unified idempotent workflow integration', () => {
     await act(async () => { root.unmount() })
   })
 
+  it('opens the current completed Remediate stage when verified fixes do not cover all assessed findings', async () => {
+    const { container, root } = createTestRoot()
+    const remediation = stage('remediate', 'succeeded', 5, { domain_reconciliation: {
+      unit: 'assessed findings', total: 4771, accounted: 4771, exact: true,
+      buckets: { resolved_verified: 2002, awaiting_review: 0, failed: 0, excluded: 2769 },
+    } })
+    const lineage = { workflow_id: 'unresolved-remediation', workflow_revision: 7, stages: [remediation] }
+    await act(async () => { root.render(createElement(WorkflowStageStack, { lineage, activeStage: 'remediate' })) })
+    const body = container.querySelector('[data-stage="remediate"] .workflow-stage-stack__body')
+    expect(body.hidden).toBe(false)
+    expect(body.textContent).toContain('Processing finished; unresolved work remains')
+    // A person's explicit collapse survives later snapshots for this execution.
+    await act(async () => { container.querySelector('[data-stage="remediate"] .workflow-stage-stack__summary').click() })
+    await act(async () => { root.render(createElement(WorkflowStageStack, { lineage: {
+      ...lineage, stages: [{ ...remediation, revision: 6 }],
+    }, activeStage: 'remediate' })) })
+    expect(body.hidden).toBe(true)
+    // The same completed stage stays collapsed outside its own workspace.
+    await act(async () => { root.render(createElement(WorkflowStageStack, { lineage, activeStage: 'assess' })) })
+    expect(container.querySelector('[data-stage="remediate"] .workflow-stage-stack__body').hidden).toBe(true)
+    await act(async () => { root.unmount() })
+  })
+
   it('allows a completed card to be reopened without reopening other completed cards', async () => {
     const { container, root } = createTestRoot()
     const lineage = { workflow_id: 'completed-reopen', workflow_revision: 7, stages: [
