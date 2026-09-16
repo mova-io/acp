@@ -143,7 +143,9 @@ def test_the_step_8_updates_are_the_ones_wrapped():
     m = re.search(r'say "updating \$APP.*?\ndone', _CODE, re.S)
     assert m, "could not find step 8's concurrent update block"
     block = m.group(0)
-    assert block.count('_aca_retry python3 "$SRC_ROOT/deploy/public/update_api_image.py"') == 1, block
+    assert block.count('_update_api_normal') == 1, block
+    helper = re.search(r'_update_api_normal\(\) \{(.*?)\n\}', _CODE, re.S)
+    assert helper and '_aca_retry python3 "$SRC_ROOT/deploy/public/update_api_image.py"' in helper.group(1)
     assert '_update_lane_worker "$a"' in block
     helper = (ROOT / "deploy/public" / "remediation_scaler.sh").read_text()
     assert '_aca_retry az containerapp update' in helper

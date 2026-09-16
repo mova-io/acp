@@ -129,6 +129,41 @@ def test_release_pool_admits_three_handlers_and_both_heartbeat_writers(monkeypat
         adapter._putconn(conn)
 
 
+def test_two_handler_staging_pool_admits_sweeper_after_short_heartbeat(monkeypatch):
+    """Pool five has four ordinary permits: handlers hold two; heartbeat writers are brief.
+
+    A sweeper that arrives behind both heartbeat writes must wait within the existing admission
+    deadline rather than fail or consume the mutation reserve.
+    """
+    import threading
+    import time
+
+    adapter = _adapter(monkeypatch, capacity=5)
+    handlers = [adapter._getconn(timeout=0.2) for _ in range(2)]
+    heartbeats = [adapter._getconn(timeout=0.2) for _ in range(2)]
+    acquired = []
+
+    def sweep():
+        conn = adapter._getconn(timeout=0.5)
+        acquired.append(conn)
+
+    waiter = threading.Thread(target=sweep)
+    waiter.start()
+    time.sleep(0.05)
+    adapter._putconn(heartbeats.pop())
+    waiter.join(timeout=0.5)
+    assert len(acquired) == 1
+
+    token = store.DB_MUTATION_REQUEST.set(True)
+    try:
+        critical = adapter._getconn(timeout=0.2)
+    finally:
+        store.DB_MUTATION_REQUEST.reset(token)
+    adapter._putconn(critical)
+    for conn in [*handlers, *heartbeats, *acquired]:
+        adapter._putconn(conn)
+
+
 def test_overlapping_mutations_borrow_idle_ordinary_capacity(monkeypatch):
     """The reserve is a guaranteed floor, not a one-request mutation ceiling.
 
