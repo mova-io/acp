@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +21,28 @@ def module(name):
 gate = module('schema_preflight')
 update = module('update_api_image')
 evidence = module('startup_evidence')
+
+
+def test_startup_evidence_retries_transient_azure_reads(monkeypatch):
+    attempts = iter([
+        SimpleNamespace(returncode=1, stdout='', stderr='transient'),
+        SimpleNamespace(returncode=0, stdout='{"ready": true}', stderr=''),
+    ])
+    monkeypatch.setattr(evidence.subprocess, 'run', lambda *args, **kwargs: next(attempts))
+    monkeypatch.setattr(evidence.time, 'sleep', lambda seconds: None)
+    assert evidence.read('sub', 'containerapp', 'show') == {'ready': True}
+
+
+def test_startup_evidence_refuses_after_bounded_read_retries(monkeypatch):
+    calls = []
+    def fail(*args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=1, stdout='', stderr='transient')
+    monkeypatch.setattr(evidence.subprocess, 'run', fail)
+    monkeypatch.setattr(evidence.time, 'sleep', lambda seconds: None)
+    with pytest.raises(RuntimeError, match='startup evidence unavailable'):
+        evidence.read('sub', 'containerapp', 'show')
+    assert len(calls) == 3
 
 
 def app(name='api-staging', database='main', secret=False):

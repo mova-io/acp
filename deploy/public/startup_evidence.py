@@ -16,20 +16,27 @@ STARTUP_PHASES = {'scheduler_reload', 'scheduler_start', 'capacity_reconcile_sta
 
 
 def read(subscription, *args, lines=False):
-    result = subprocess.run(['az', *args, '--subscription', subscription,
-                             '--only-show-errors', '-o', 'json'],
-                            capture_output=True, text=True, timeout=30)
-    if result.returncode:
-        raise RuntimeError('startup evidence unavailable')
-    if lines:
-        rows = []
-        for line in result.stdout.splitlines():
+    """Retry Azure's eventually consistent read endpoints within a small budget."""
+    for attempt in range(3):
+        result = subprocess.run(['az', *args, '--subscription', subscription,
+                                 '--only-show-errors', '-o', 'json'],
+                                capture_output=True, text=True, timeout=30)
+        if not result.returncode:
+            if lines:
+                rows = []
+                for line in result.stdout.splitlines():
+                    try:
+                        rows.append(json.loads(line))
+                    except ValueError:
+                        continue
+                return rows
             try:
-                rows.append(json.loads(line))
+                return json.loads(result.stdout)
             except ValueError:
-                continue
-        return rows
-    return json.loads(result.stdout)
+                pass
+        if attempt < 2:
+            time.sleep(2 ** attempt)
+    raise RuntimeError('startup evidence unavailable')
 
 
 def sanitized_events(system, console, revision):
