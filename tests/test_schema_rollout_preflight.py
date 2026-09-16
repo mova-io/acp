@@ -283,6 +283,31 @@ def test_api_contract_still_requires_startup_phase(monkeypatch):
     assert caught.value.reason == 'console_logs_incomplete'
 
 
+def test_missing_container_started_reports_system_logs_incomplete(monkeypatch):
+    row = app()
+    replicas, _system, console = _complete_startup_reads(row)
+    clock = [0.0]
+
+    def read(_subscription, *args, **_kwargs):
+        if args[1:3] == ('revision', 'show') or args[1] == 'show':
+            return row
+        if args[1:3] == ('replica', 'list'):
+            return replicas
+        if '--type' in args:
+            return []
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: None)
+    monkeypatch.setattr(evidence.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(evidence.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    with pytest.raises(evidence.EvidenceUnavailable) as caught:
+        evidence.collect('sub', 'group', row['name'], 'old', timeout=6)
+    assert caught.value.reason == 'system_logs_incomplete'
+
+
 def test_permanently_missing_post_ready_logs_exhaust_one_deadline(monkeypatch):
     row = app()
     replicas, _, console = _complete_startup_reads(row)

@@ -310,7 +310,11 @@ def collect(subscription, group, name, image, *, timeout=OBSERVATION_SECONDS):
                         result, require_startup_phase=require_startup_phase):
                     return result
                 if result['ok']:
-                    unavailable_reason = 'console_logs_incomplete'
+                    events = result.get('events', [])
+                    unavailable_reason = (
+                        'console_logs_incomplete'
+                        if any(event.get('reason') == 'ContainerStarted' for event in events)
+                        else 'system_logs_incomplete')
         except StartupFailure:
             raise
         except EvidenceUnavailable:
