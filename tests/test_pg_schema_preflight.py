@@ -62,6 +62,7 @@ def execute(url, query, params=()):
 
 
 def previous_schema(url):
+    require_disposable_postgres(url)
     store._PgAdapter(url).init_schema()
     execute(url, 'DROP TABLE document_wide_chunks')
     execute(url, 'DROP TABLE document_wide_chunk_plans')
