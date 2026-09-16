@@ -19,6 +19,7 @@ import base64
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -374,6 +375,8 @@ app.include_router(_activity_evidence_router)
 core.register_protected_routes(core.enumerate_api_routes(app))
 
 _embedded_worker_reporter = None
+_STARTUP_FAILURE_PATH = os.environ.get(
+    "ACP_STARTUP_FAILURE_PATH", "/tmp/acp-startup-failure.json")
 
 
 @app.on_event("startup")
@@ -389,6 +392,19 @@ def _start_job_workers():
 
     revision = (os.environ.get("CONTAINER_APP_REVISION") or "unknown").strip()
 
+    def _retain_local_failure(phase, fields):
+        # core.store does not exist when the earliest store phase fails. Keep
+        # the same allowlisted receipt on the replica filesystem so the next
+        # process can publish it after opening the store. Container restarts
+        # preserve /tmp; replacement replicas do not, so system evidence still
+        # remains authoritative for a vanished replica.
+        path = Path(_STARTUP_FAILURE_PATH)
+        if path.exists():
+            return
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(json.dumps({"revision": revision, "phase": phase, **fields}))
+        os.replace(temporary, path)
+
     def _retain_failure(phase, fields):
         # Store only allowlisted fields under the exact revision. A recovered process must not
         # erase the failed process's receipt before deployment has collected it.
@@ -396,7 +412,26 @@ def _start_job_workers():
             f"startup_failure:{revision}",
             json.dumps({"revision": revision, "phase": phase, **fields}))
 
-    _startup_phase.run("store", core.get_store)
+    # Do not retry this phase: get_store includes schema/bootstrap work, so an
+    # exception does not prove it failed before mutation. Capture the exact
+    # sanitized failure and let the platform restart a clean process instead.
+    _startup_phase.run("store", core.get_store,
+                       on_final_failure=_retain_local_failure)
+    try:
+        path = Path(_STARTUP_FAILURE_PATH)
+        prior = json.loads(path.read_text())
+        if (prior.get("revision") == revision and prior.get("phase") == "store"
+                and set(prior) == {"revision", "phase", "error_type", "sqlstate"}
+                and isinstance(prior.get("error_type"), str)
+                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,59}", prior["error_type"])
+                and (prior.get("sqlstate") is None
+                     or (isinstance(prior.get("sqlstate"), str)
+                         and re.fullmatch(r"[A-Z0-9]{5}", prior["sqlstate"])))):
+            core.store.set_setting(f"startup_failure:{revision}", json.dumps(prior))
+        path.unlink(missing_ok=True)
+    except (OSError, ValueError, TypeError, AttributeError):
+        # Failure evidence must never replace a successful store startup.
+        pass
     _announce_isolation_mode()
     # Tracing first, so the scheduler and worker spans below are captured from the first tick
     # rather than from whenever the first HTTP request happened to arrive. A no-op without

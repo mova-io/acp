@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import time
 
-STARTUP_PHASES = {'scheduler_reload', 'scheduler_start', 'capacity_reconcile_start',
+STARTUP_PHASES = {'store', 'scheduler_reload', 'scheduler_start', 'capacity_reconcile_start',
                   'workers_start', 'worker_reporter_start'}
 OBSERVATION_SECONDS = 120
 
