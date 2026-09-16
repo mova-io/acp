@@ -157,6 +157,15 @@ def test_deleted_failed_process_is_retained_from_system_evidence_without_credent
     assert 'credential' not in json.dumps(result) and 'secret' not in json.dumps(result)
 
 
+def test_durable_failed_process_receipt_cannot_be_hidden_by_recovered_process():
+    row = app()
+    replicas = [{'properties': {'containers': [{'ready': True, 'started': True, 'restartCount': 0}]}}]
+    durable = {'reason': 'startup.failure', 'state': 'failed', 'phase': 'scheduler_reload',
+               'error_type': 'PoolError', 'sqlstate': None}
+    result = evidence.receipt(row, replicas, [], [], 'old', durable)
+    assert not result['ok'] and result['events'] == [durable]
+
+
 @pytest.mark.parametrize('blue_green,active_override', [('0', '0'), ('1', '0'), ('0', '1')])
 def test_real_shell_failure_gate_stops_both_rollout_paths(tmp_path, blue_green, active_override):
     script = (ROOT / 'deploy/public/redeploy.sh').read_text()

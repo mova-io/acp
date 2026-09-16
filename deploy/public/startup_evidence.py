@@ -11,6 +11,9 @@ import subprocess
 import tempfile
 import time
 
+STARTUP_PHASES = {'scheduler_reload', 'scheduler_start', 'capacity_reconcile_start',
+                  'workers_start', 'worker_reporter_start'}
+
 
 def read(subscription, *args, lines=False):
     result = subprocess.run(['az', *args, '--subscription', subscription,
@@ -49,11 +52,13 @@ def sanitized_events(system, console, revision):
             phase = json.JSONDecoder().raw_decode(message[message.index('{'):])[0]
         except (ValueError, TypeError):
             continue
-        if phase.get('event') != 'schema.boot':
+        if phase.get('event') not in ('schema.boot', 'startup.phase'):
             continue
         code = phase.get('sqlstate')
         error = phase.get('error_type')
-        events.append({'time': row.get('TimeStamp'), 'reason': 'schema.boot',
+        reason = phase.get('event')
+        events.append({'time': row.get('TimeStamp'), 'reason': reason,
+                       'phase': phase.get('phase') if phase.get('phase') in STARTUP_PHASES else None,
                        'state': phase.get('state') if phase.get('state') in ('started', 'completed', 'failed') else None,
                        'version': phase.get('version') if isinstance(phase.get('version'), int) else None,
                        'elapsed_ms': phase.get('elapsed_ms') if isinstance(phase.get('elapsed_ms'), (int, float)) else None,
@@ -62,7 +67,36 @@ def sanitized_events(system, console, revision):
     return events
 
 
-def receipt(app, replicas, system, console, image):
+def durable_failure(app, subscription, group, name, revision):
+    """Read an allowlisted failed-process receipt without exposing its connection string."""
+    import psycopg2
+    from schema_preflight import connection_string
+    dsn = connection_string(app, subscription, group, name)
+    conn = psycopg2.connect(dsn, connect_timeout=5,
+                           options='-c default_transaction_read_only=on -c statement_timeout=5000')
+    try:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute('SELECT value FROM app_settings WHERE key=%s',
+                        ('startup_failure:' + revision,))
+            row = cur.fetchone()
+        if not row:
+            return None
+        value = json.loads(row[0])
+        error = value.get('error_type')
+        state = value.get('sqlstate')
+        phase = value.get('phase')
+        if value.get('revision') != revision or phase not in STARTUP_PHASES:
+            return {'reason': 'startup.failure', 'state': 'failed',
+                    'phase': None, 'error_type': 'InvalidReceipt', 'sqlstate': None}
+        return {'reason': 'startup.failure', 'state': 'failed', 'phase': phase,
+                'error_type': error if isinstance(error, str) and re.fullmatch('[A-Za-z_][A-Za-z0-9_]{0,59}', error) else None,
+                'sqlstate': state if isinstance(state, str) and re.fullmatch('[A-Z0-9]{5}', state) else None}
+    finally:
+        conn.close()
+
+
+def receipt(app, replicas, system, console, image, durable=None):
     properties = app['properties']
     revision = properties['latestRevisionName']
     selected = [c for c in properties['template']['containers'] if c.get('name') == app['name']]
@@ -70,6 +104,8 @@ def receipt(app, replicas, system, console, image):
              'restart_count': c.get('restartCount')} for replica in replicas
             for c in replica.get('properties', {}).get('containers', [])]
     events = sanitized_events(system, console, revision)
+    if durable is not None:
+        events.append(durable)
     ok = (properties.get('latestReadyRevisionName') == revision
           and len(selected) == 1 and selected[0]['image'] == image
           and bool(rows) and all(c['ready'] and c['started'] and c['restart_count'] == 0 for c in rows)
@@ -103,7 +139,8 @@ def collect(subscription, group, name, image):
         raise RuntimeError('startup target revision changed during observation')
     replicas = read(subscription, 'containerapp', 'replica', 'list', '-g', group,
                     '-n', name, '--revision', revision)
-    return receipt(final, replicas, system, console, image)
+    persisted = durable_failure(final, subscription, group, name, revision)
+    return receipt(final, replicas, system, console, image, persisted)
 
 
 def main(argv=None):

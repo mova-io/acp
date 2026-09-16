@@ -385,7 +385,18 @@ def _start_job_workers():
     by the first HTTP request — and a boot-time failure surfaces at startup instead of as a 500
     on some route. reload_scheduler() reads the schedule out of that store, so it must follow
     it; the scheduler thread then starts with its jobs already pending."""
-    core.get_store()
+    import startup_phase as _startup_phase
+
+    revision = (os.environ.get("CONTAINER_APP_REVISION") or "unknown").strip()
+
+    def _retain_failure(phase, fields):
+        # Store only allowlisted fields under the exact revision. A recovered process must not
+        # erase the failed process's receipt before deployment has collected it.
+        core.store.set_setting(
+            f"startup_failure:{revision}",
+            json.dumps({"revision": revision, "phase": phase, **fields}))
+
+    _startup_phase.run("store", core.get_store)
     _announce_isolation_mode()
     # Tracing first, so the scheduler and worker spans below are captured from the first tick
     # rather than from whenever the first HTTP request happened to arrive. A no-op without
@@ -420,19 +431,30 @@ def _start_job_workers():
             print(f"[audit] deployment recorded: {_info.get('version')}", flush=True)
     except Exception:  # noqa: BLE001 — never take startup down for an audit row.
         swallowed("app.startup: recording the deployment audit event failed")
-    core.reload_scheduler()
-    core.start_scheduler()
+    # Reads happen before reload_scheduler mutates APScheduler, so retrying only recognized
+    # connection/admission failures is side-effect safe. Configuration and programming errors
+    # remain fail-fast and every later phase runs exactly once.
+    _startup_phase.run("scheduler_reload", core.reload_scheduler,
+                       retry_transient_database=True, attempts=2,
+                       on_final_failure=_retain_failure)
+    _startup_phase.run("scheduler_start", core.start_scheduler,
+                       on_final_failure=_retain_failure)
     # Overrides are Azure policy changes, not merely labels in Settings. The reconciler is
     # deliberately armed only with the same fail-closed gateway used by the admin apply route.
     import capacity_reconcile as _capacity_reconcile
     from routes import control as _capacity_control
-    _capacity_reconcile.start(core.store, _capacity_control._capacity_apply_gateway)
-    n = core.start_workers()
+    _startup_phase.run(
+        "capacity_reconcile_start",
+        lambda: _capacity_reconcile.start(core.store, _capacity_control._capacity_apply_gateway),
+        on_final_failure=_retain_failure)
+    n = _startup_phase.run("workers_start", core.start_workers,
+                           on_final_failure=_retain_failure)
     if n:
         global _embedded_worker_reporter
         from worker_telemetry import WorkerInstanceReporter
         _embedded_worker_reporter = WorkerInstanceReporter(core)
-        _embedded_worker_reporter.start()
+        _startup_phase.run("worker_reporter_start", _embedded_worker_reporter.start,
+                           on_final_failure=_retain_failure)
         print(f"[acp] started {n} async job worker(s)", flush=True)
 
 
