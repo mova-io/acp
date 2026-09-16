@@ -10,7 +10,7 @@
 # what "the version updates with every push" actually asks for. Production stays gated; staging
 # is the fast, unattended, throwaway environment.
 #
-# It reuses deploy/public/redeploy.sh unchanged — the same eight guards (pin, CI gate, isolated
+# It reuses deploy/public/redeploy.sh — the same eight guards (pin, CI gate, isolated
 # clone, module count, health-before, stamped-image refusal). The ONLY differences from prod are
 # the four this file sets: no reviewer gate, staging app/worker names, staging FQDN, and the
 # dormancy guard below.
@@ -53,6 +53,11 @@ on:
         description: "Commit to deploy to staging (default: current main)"
         required: false
         type: string
+      allow_rollback:
+        description: "Explicit manual rollback/recovery to the supplied pin; keeps the CI gate enabled"
+        required: false
+        type: boolean
+        default: false
       skip_ci_gate:
         description: "Bypass redeploy.sh's CI-conclusion gate (ACP_SKIP_CI_GATE=1) — for a manual dispatch when CI is red on a known-unrelated flake, not routine use"
         required: false
@@ -62,7 +67,8 @@ on:
 concurrency:
   # Same hazard as prod: two staging deploys at once race the CalVer ordinal and could split
   # acp-app-staging and acp-worker-staging onto different images. Queue rather than cancel — a
-  # half-finished deploy is worse than a queued one, and rapid merges still converge on the tip.
+  # half-finished deploy is worse than a queued one. The live-pin ancestry guard below prevents
+  # late CI completions from rolling staging back after a newer build has already deployed.
   group: deploy-staging
   cancel-in-progress: false
 
@@ -90,12 +96,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # Pin the EXACT commit CI greenlit. Staging has no approval wait, so there is no
-          # drift window to reason about — but pinning head_sha still beats a moving `main` ref:
-          # if a newer commit merged in the seconds since, deploying main's tip would hand
-          # redeploy.sh a sha whose own CI may still be queued, and its gate would (correctly)
-          # refuse it. head_sha is always the one CI just passed. A manual dispatch pins its input.
-          ref: ${{ github.event.workflow_run.head_sha || inputs.pin || github.sha }}
+          # Execute the current guard even when an older CI completion triggers this run.
+          # redeploy.sh separately resolves ACP_PIN and builds its isolated pinned clone.
+          ref: main
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -119,12 +122,15 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Deploy to staging
+        id: staging_deploy
         env:
           GH_TOKEN: ${{ github.token }}
           ACP_SUBSCRIPTION: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           # The greenlit sha on an auto run; the dispatch input on a manual one; redeploy.sh
           # resolves an empty value to origin/main.
           ACP_PIN: ${{ github.event.workflow_run.head_sha || inputs.pin }}
+          ACP_STAGING_DEPLOY_MODE: ${{ github.event_name == 'workflow_run' && 'automatic' || 'manual' }}
+          ACP_STAGING_ALLOW_ROLLBACK: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_rollback && '1' || '0' }}
           # Every role worker is explicit. ACP_WORKER is the retired mixed-tier variable; passing
           # only that once made redeploy.sh fall through to its three PRODUCTION defaults.
           ACP_RG: ${{ vars.STAGING_RG || 'mdk-accessibility' }}
@@ -147,6 +153,7 @@ jobs:
         run: bash deploy/public/redeploy.sh
 
       - name: Confirm staging reports the new build
+        if: steps.staging_deploy.outputs.staging_deployed == 'true'
         run: |
           set -euo pipefail
           FQDN="${{ vars.STAGING_FQDN }}"

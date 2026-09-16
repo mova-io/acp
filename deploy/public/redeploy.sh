@@ -157,6 +157,27 @@ PIN="$(git rev-parse --verify --quiet "${ACP_PIN:-origin/main}^{commit}")" \
   || die "cannot resolve ${ACP_PIN:+ACP_PIN=}${ACP_PIN:-origin/main} to a commit — check the ref exists locally (a fetch may be needed) and is unambiguous"
 say "pinning ${PIN:0:7}"
 
+# Serialized automatic staging events can arrive out of order. Compare the actual
+# resolved ACP_PIN, never workflow metadata, against the currently serving build.
+if [ "$DEPLOY_TARGET_ENV" = staging ] && [ -n "${ACP_STAGING_DEPLOY_MODE:-}" ]; then
+  GUARD_FQDN="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" --query properties.configuration.ingress.fqdn -o tsv)"
+  [ -n "$GUARD_FQDN" ] || die "staging target has no ingress hostname"
+  GUARD_HEALTH="$(curl -fsS --max-time 20 "https://$GUARD_FQDN/healthz" || echo '{}')"
+  GUARD_ARGS=(--repo "$SRC_ROOT" --pin "$PIN" --mode "$ACP_STAGING_DEPLOY_MODE")
+  if [ "${ACP_STAGING_ALLOW_ROLLBACK:-0}" = 1 ]; then
+    [ -n "${ACP_PIN:-}" ] || die "manual rollback/recovery requires an explicit pin"
+    GUARD_ARGS+=(--rollback)
+  fi
+  GUARD_DECISION="$(python3 "$SRC_ROOT/deploy/public/staging_pin_guard.py" "${GUARD_ARGS[@]}" <<<"$GUARD_HEALTH")" \
+    || die "staging monotonic pin guard refused deployment"
+  if [ "$GUARD_DECISION" = skip ]; then
+    say "Skipping stale automatic staging pin ${PIN:0:7}; live build is newer"
+    [ -z "${GITHUB_OUTPUT:-}" ] || echo 'staging_deployed=false' >> "$GITHUB_OUTPUT"
+    exit 0
+  fi
+  [ -z "${GITHUB_OUTPUT:-}" ] || echo 'staging_deployed=true' >> "$GITHUB_OUTPUT"
+fi
+
 # The CI gate, ENFORCED rather than described. This step's own comment has always said "check CI
 # is green on it", and nothing ever checked — a human was expected to remember. Deploying an
 # unbuilt commit is exactly the mistake an automated pipeline makes faster than a person.
