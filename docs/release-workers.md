@@ -4,7 +4,9 @@ Release can run independently from remediation using the same application image 
 
 ## Initial capacity
 
-One private Container App, one replica maximum, 1 CPU and 2 GiB memory. `ACP_WORKERS=3` reserves one slot for reports and two for publishing, packaging and release continuation. The database pool is capped at three connections. Reports cannot take the publishing slot. There are no additional model calls. This adds Azure compute cost; the model-evaluation spending limit does not act as an Azure billing cap.
+One private Container App, one replica maximum, 1 CPU and 2 GiB memory. `ACP_WORKERS=3` reserves one slot for reports and two for publishing, packaging and release continuation. `ACP_DB_MAX_CONN=6` supplies five ordinary permits for those three handlers plus the compatibility heartbeat and per-process worker reporter, while preserving Store's separate mutation-reserve connection. Reports cannot take the publishing slot. There are no additional model calls. This adds Azure compute cost; the model-evaluation spending limit does not act as an Azure billing cap.
+
+The production capacity check includes this six-connection Release replica: 528 steady-state application pools + 278 rollout-overlap floors + 15 reserved server connections = 821 of PostgreSQL's measured 859 connection ceiling, leaving 38 connections of headroom. CPU quota remains an independent deployment gate. The normal redeploy path reapplies both `ACP_WORKERS=3` and `ACP_DB_MAX_CONN=6`, so an existing worker is normalized rather than retaining the original three-connection pool.
 
 Existing admission checks, source hashes, receipts, retry limits and graceful shutdown remain in force. `deliver_corrected_copy` stays with remediation because it completes remediation's own saved-copy delivery. Only explicit Release jobs move.
 

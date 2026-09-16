@@ -17,6 +17,12 @@ sys.path.insert(0, str(ROOT / 'api'))
 import queue_scaler
 import ast
 
+RELEASE_WORKERS = 3
+# Three handlers can all hold ordinary connections while the compatibility heartbeat and
+# WorkerInstanceReporter each record liveness. Store keeps one separate mutation reserve, so the
+# smallest pool that admits that five-way ordinary overlap without weakening the reserve is six.
+RELEASE_DB_MAX_CONN = RELEASE_WORKERS + 2 + 1
+
 
 def release_types():
     tree = ast.parse((ROOT / 'api/core.py').read_text())
@@ -43,7 +49,8 @@ def definition(source, secrets, name, image, environment):
         raise ValueError('System-identity registry access requires explicit provisioning first')
     if any(s.get('keyVaultUrl') and s.get('identity') == 'system' for s in secrets):
         raise ValueError('System-identity Key Vault references require explicit access provisioning first')
-    for key, value in {'ACP_WORKER_ROLE': 'release', 'ACP_WORKERS': '3', 'ACP_DB_MAX_CONN': '3',
+    for key, value in {'ACP_WORKER_ROLE': 'release', 'ACP_WORKERS': str(RELEASE_WORKERS),
+                       'ACP_DB_MAX_CONN': str(RELEASE_DB_MAX_CONN),
                        'ACP_DEDICATED_RELEASE_WORKERS': '1', 'ACP_SHUTDOWN_DRAIN_SECONDS': '540'}.items():
         env[key] = {'name': key, 'value': value}
     container.update(name=name, image=image, env=list(env.values()), resources={'cpu': 1.0, 'memory': '2Gi'})
@@ -111,7 +118,8 @@ def main():
         blob_roles = select_blob_grants(blob_roles, json.loads(a.blob_grants_file.read_text()),
             account=source_env.get('ACP_BLOB_ACCOUNT', {}).get('value'),
             subscription=a.subscription, environment=a.environment)
-    print(f'{a.name}: private Release worker, 1 CPU/2Gi, three slots (two delivery, one report), one replica maximum.')
+    print(f'{a.name}: private Release worker, 1 CPU/2Gi, three slots (two delivery, one report), '
+          f'{RELEASE_DB_MAX_CONN}-connection pool, one replica maximum.')
     if not a.apply:
         print('Validation only. No Azure resources changed.'); return
     # Delete secrets-bearing material even on a failed request.
