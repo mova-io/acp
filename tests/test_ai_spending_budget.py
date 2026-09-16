@@ -13,16 +13,19 @@ from ai_spending_budget import (  # noqa: E402
 from store import _SQLiteAdapter, _PgAdapter  # noqa: E402
 
 
-@pytest.fixture(params=["sqlite"] + (["postgres"] if os.getenv("ACP_BUDGET_TEST_PG_URL") else []))
+PG_URL = os.getenv("ACP_BUDGET_TEST_PG_URL") or os.getenv("DATABASE_URL")
+
+
+@pytest.fixture(params=["sqlite"] + (["postgres"] if PG_URL else []))
 def ledger(tmp_path, request):
     if request.param == "postgres":
         from conftest import require_disposable_postgres
         from urllib.parse import urlparse
-        url = os.environ["ACP_BUDGET_TEST_PG_URL"]
+        url = PG_URL
         require_disposable_postgres(url)
         parsed = urlparse(url)
         assert parsed.hostname in ("127.0.0.1", "localhost")
-        assert parsed.path == "/acp_budget_test", "only a dedicated disposable test DB is allowed"
+        assert parsed.path in ("/acp_budget_test", "/acp_ci"), "only a dedicated disposable test DB is allowed"
         adapter = _PgAdapter(url)
     else:
         adapter = _SQLiteAdapter(str(tmp_path / "budget.db"))
