@@ -179,7 +179,7 @@ def test_advisory_admission_has_whole_deadline_and_no_migration(disposable_datab
         with pytest.raises(psycopg2.errors.QueryCanceled):
             gate.prepare(url, ROOT / 'api', timeout_seconds=.25)
         assert time.monotonic() - started < 2
-        assert gate.schema_marker(url) == (55, 'previous')
+        assert gate.schema_marker(url) == (56, 'colliding-production-schema')
     finally:
         blocker.close()
     assert_previous_intact(url)
