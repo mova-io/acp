@@ -63,19 +63,17 @@ def execute(url, query, params=()):
 
 def previous_schema(url):
     store._PgAdapter(url).init_schema()
-    for name in ('execution_context', 'execution_revision', 'scan_id', 'execution_deadline',
-                 'execution_failures', 'execution_job_id'):
-        execute(url, sql.SQL('ALTER TABLE schedule_occurrences DROP COLUMN {}').format(sql.Identifier(name)))
-    execute(url, 'ALTER TABLE jobs DROP COLUMN scheduled_execution_binding')
-    execute(url, 'DELETE FROM acp_schema_version WHERE version=57')
-    execute(url, "INSERT INTO acp_schema_version(version,checksum) VALUES (56,'colliding-production-schema')")
+    execute(url, 'DROP TABLE document_wide_chunks')
+    execute(url, 'DROP TABLE document_wide_chunk_plans')
+    execute(url, 'DELETE FROM acp_schema_version WHERE version=58')
+    execute(url, "INSERT INTO acp_schema_version(version,checksum) VALUES (57,'4a3338134fdc573bcaa2062935c2711d')")
     execute(url, "CREATE TABLE customer_probe(id INT PRIMARY KEY,value TEXT); INSERT INTO customer_probe VALUES (1,'keep')")
 
 
 def assert_previous_intact(url):
-    assert gate.schema_marker(url) == (56, 'colliding-production-schema')
+    assert gate.schema_marker(url) == (57, '4a3338134fdc573bcaa2062935c2711d')
     assert execute(url, 'SELECT value FROM customer_probe') == [('keep',)]
-    assert execute(url, "SELECT COUNT(*) FROM information_schema.columns WHERE table_name='jobs' AND column_name='scheduled_execution_binding'") == [(0,)]
+    assert execute(url, "SELECT to_regclass('public.document_wide_chunk_plans'),to_regclass('public.document_wide_chunks')") == [(None,None)]
     assert execute(url, 'SELECT pg_try_advisory_lock(%s)', (store._PgAdapter._MIGRATION_ADVISORY_KEY,)) == [(True,)]
     # execute() closes its connection, releasing the session advisory lock.
 
@@ -83,18 +81,18 @@ def assert_previous_intact(url):
 def test_fresh_database_prepared_before_any_role_boot(disposable_database):
     url = disposable_database
     result = gate.prepare(url, ROOT / 'api')
-    assert result['state'] == 'prepared' and result['observed_version'] == 57
-    assert gate.schema_marker(url) == (57, store._PgAdapter._SCHEMA_CHECKSUM_AT_VERSION)
+    assert result['state'] == 'prepared' and result['observed_version'] == 58
+    assert gate.schema_marker(url) == (58, store._PgAdapter._SCHEMA_CHECKSUM_AT_VERSION)
 
 
 def test_equal_version_wrong_checksum_refused_without_replay(disposable_database, monkeypatch):
     url = disposable_database
     store._PgAdapter(url).init_schema()
-    execute(url, "UPDATE acp_schema_version SET checksum='unexpected' WHERE version=57")
+    execute(url, "UPDATE acp_schema_version SET checksum='unexpected' WHERE version=58")
     monkeypatch.setattr(store._PgAdapter, '_apply_schema', lambda *args: pytest.fail('unexpected marker replayed DDL'))
     with pytest.raises(gate.PreflightRefused, match='target_schema_checksum_mismatch'):
         gate.prepare(url, ROOT / 'api')
-    assert gate.schema_marker(url) == (57, 'unexpected')
+    assert gate.schema_marker(url) == (58, 'unexpected')
 
 
 def test_held_customer_reader_refused_without_ddl_or_cancel_then_release_succeeds(disposable_database):
@@ -179,7 +177,7 @@ def test_advisory_admission_has_whole_deadline_and_no_migration(disposable_datab
         with pytest.raises(psycopg2.errors.QueryCanceled):
             gate.prepare(url, ROOT / 'api', timeout_seconds=.25)
         assert time.monotonic() - started < 2
-        assert gate.schema_marker(url) == (56, 'colliding-production-schema')
+        assert gate.schema_marker(url) == (57, '4a3338134fdc573bcaa2062935c2711d')
     finally:
         blocker.close()
     assert_previous_intact(url)
@@ -228,7 +226,7 @@ def test_concurrent_gate_candidates_commit_once_and_recheck_after_lock(disposabl
     monkeypatch.setattr(store._PgAdapter, '_apply_schema', apply)
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(lambda _: gate.prepare(url, ROOT / 'api'), range(2)))
-    assert all(r['observed_version'] == 57 for r in results) and len(calls) == 1
+    assert all(r['observed_version'] == 58 for r in results) and len(calls) == 1
 
 
 def hanging_migration_child(pipe, dsn, api_path, timeout_seconds):

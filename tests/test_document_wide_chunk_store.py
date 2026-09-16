@@ -84,6 +84,31 @@ def test_live_authority_is_rechecked_before_receipts_can_publish(isolated_store,
         assessment_snapshot_id=SNAPSHOT,remediation_source_revision=SOURCE) is None
 
 
+@pytest.mark.parametrize('state', ['processing_complete','reconciling'])
+def test_validated_receipts_remain_available_during_completion_seam(isolated_store, monkeypatch, state):
+    seed(isolated_store, monkeypatch); ledger = ChunkPlanStore(isolated_store); ledger.create(plan(), chunks())
+    with isolated_store._db.cursor() as cur:
+        isolated_store._db.execute(cur, "UPDATE document_wide_chunk_plans SET state='complete' WHERE plan_id=%s", (PLAN,))
+        isolated_store._db.execute(cur, "UPDATE document_wide_chunks SET state='validated',receipt_json=%s",
+                                   (json.dumps({'validated':True}),))
+        isolated_store._db.execute(cur, 'UPDATE stage_executions SET state=%s WHERE execution_id=%s', (state,RUN))
+    assert ledger.complete_receipts(OWNER,RUN,PLAN,source_sha256=SHA,
+        assessment_snapshot_id=SNAPSHOT,remediation_source_revision=SOURCE) == [
+            {'validated':True}, {'validated':True}]
+
+
+@pytest.mark.parametrize('state', ['failed','cancelled','succeeded'])
+def test_terminal_execution_states_cannot_publish_receipts(isolated_store, monkeypatch, state):
+    seed(isolated_store, monkeypatch); ledger = ChunkPlanStore(isolated_store); ledger.create(plan(), chunks())
+    with isolated_store._db.cursor() as cur:
+        isolated_store._db.execute(cur, "UPDATE document_wide_chunk_plans SET state='complete' WHERE plan_id=%s", (PLAN,))
+        isolated_store._db.execute(cur, "UPDATE document_wide_chunks SET state='validated',receipt_json=%s",
+                                   (json.dumps({'validated':True}),))
+        isolated_store._db.execute(cur, 'UPDATE stage_executions SET state=%s WHERE execution_id=%s', (state,RUN))
+    assert ledger.complete_receipts(OWNER,RUN,PLAN,source_sha256=SHA,
+        assessment_snapshot_id=SNAPSHOT,remediation_source_revision=SOURCE) is None
+
+
 def test_global_reset_deletes_chunk_children_before_plans(isolated_store, monkeypatch):
     seed(isolated_store, monkeypatch); ChunkPlanStore(isolated_store).create(plan(), chunks())
     isolated_store.reset_analytics()
@@ -129,14 +154,14 @@ def test_postgres_v57_to_v58_preserves_existing_rows_and_records_checksum(monkey
         adapter.execute(cur, 'DELETE FROM acp_schema_version')
         adapter.execute(cur, 'INSERT INTO acp_schema_version(version,checksum) VALUES(%s,%s)', (57,'4a3338134fdc573bcaa2062935c2711d'))
     if adapter._pool: adapter._pool.closeall()
-    monkeypatch.setattr(store_mod, '_DATABASE_URL', url)
-    migrated = store_mod.Store()
-    with migrated._db.cursor() as cur:
-        migrated._db.execute(cur, "SELECT value FROM app_settings WHERE key='chunk-migration-sentinel'")
-        assert migrated._db.fetchone(cur)['value'] == 'preserve'
-        migrated._db.execute(cur, 'SELECT version,checksum FROM acp_schema_version')
-        marker = migrated._db.fetchone(cur)
+    migrated = store_mod._PgAdapter(url)
+    migrated.init_schema()
+    with migrated.cursor() as cur:
+        migrated.execute(cur, "SELECT value FROM app_settings WHERE key='chunk-migration-sentinel'")
+        assert migrated.fetchone(cur)['value'] == 'preserve'
+        migrated.execute(cur, 'SELECT version,checksum FROM acp_schema_version')
+        marker = migrated.fetchone(cur)
         assert marker == {'version':58,'checksum':store_mod._PgAdapter._SCHEMA_CHECKSUM_AT_VERSION}
-        migrated._db.execute(cur, "SELECT to_regclass('public.document_wide_chunk_plans') AS plans,to_regclass('public.document_wide_chunks') AS chunks")
-        assert all(migrated._db.fetchone(cur).values())
-    if migrated._db._pool: migrated._db._pool.closeall()
+        migrated.execute(cur, "SELECT to_regclass('public.document_wide_chunk_plans') AS plans,to_regclass('public.document_wide_chunks') AS chunks")
+        assert all(migrated.fetchone(cur).values())
+    if migrated._pool: migrated._pool.closeall()
