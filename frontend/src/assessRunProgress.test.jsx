@@ -47,12 +47,28 @@ describe('the assessment running screen focuses on the document in flight', () =
       ],
     } })
     expect(html).toContain('Document activity')
-    expect(html).toContain('Latest 2 Of 51 Completed')
+    expect(html).toContain('8 of 22 documents assessed')
+    expect(html).toContain('Showing 2 most recent completed documents')
     expect(html).toContain('Clinical/History.pdf')
     expect(html).not.toContain('/100')
     expect(html).not.toContain('alscore')
     expect(html).toContain('1.3.1')
     expect(html).toContain('overflow-y:auto')
+  })
+
+  it('separates overall assessment progress from the capped recent-completions list', () => {
+    const items = Array.from({ length: 50 }, (_, i) => ({
+      file: `Synthetic/Document-${i + 1}.pdf`, score: 100, criteria: [],
+    }))
+    const html = render({ ...SNAP,
+      totals: { discovered: 147, eligible: 147 },
+      kpis: { ...SNAP.kpis, completed: 79, processing: 1 },
+      documents: { completed: 79, displayed: 50, truncated: true, items },
+    })
+    expect(html).toContain('79 of 147 documents assessed')
+    expect(html).toContain('Showing 50 most recent completed documents')
+    expect(html).not.toContain('Latest 50 Of 79 Completed')
+    expect((html.match(/class="done"/g) || [])).toHaveLength(50)
   })
 
   it('formats internal SC rule ids as readable monospace criterion tags', () => {
@@ -243,7 +259,7 @@ describe('Stop — board-exact placement, inline with what stopping does', () =>
     ] } })
     expect(html).toContain('Processing Now:')
     expect(html).toContain('Finance/Q3 Board Pack.pdf')
-    expect(html).toContain('Completed 8 Of 22')
+    expect(html).toContain('8 of 22 documents assessed')
     expect(html).toContain('max-height:420px')
     expect(html).toContain('Finished.pdf')
     expect(html).toContain('1.3.1')
@@ -253,6 +269,6 @@ describe('Stop — board-exact placement, inline with what stopping does', () =>
   it('shows the current-document banner before any file finishes', () => {
     const html = render({ ...SNAP, kpis: { completed: 0, processing: 1 }, documents: { completed: 0, displayed: 0, items: [] } })
     expect(html).toContain('Processing Now:')
-    expect(html).toContain('Completed 0 Of 22')
+    expect(html).toContain('0 of 22 documents assessed')
   })
  })

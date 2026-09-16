@@ -292,10 +292,13 @@ export default function AssessRunProgress({ snapshot, throughput, onStop }) {
                     <span className="assessfname">{cur.file}</span>
                     <span className="assess-live-stage">{stepLabel(cur)}</span>
                   </>}
-                  <span className="muted assessphase">{documents?.truncated
-                    ? `Latest ${documents.displayed.toLocaleString()} Of ${(documents.completed ?? completed).toLocaleString()} Completed`
-                    : `Completed ${completed.toLocaleString()} Of ${total.toLocaleString()}`}</span>
+                  <span className="muted assessphase">{completed.toLocaleString()} of {total.toLocaleString()} documents assessed</span>
                 </div>
+                {documents?.truncated && (
+                  <p className="muted" style={{ margin: '0 12px 5px', fontSize: 12 }}>
+                    Showing {documents.displayed.toLocaleString()} most recent completed documents
+                  </p>
+                )}
                 <ul className="assesslist" aria-label="Durable per-document assessment progress"
                     style={{ maxHeight: 420, overflowY: 'auto', margin: 0, padding: '7px 11px' }}>
                   {(documents?.items || []).map((row) => (
