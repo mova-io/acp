@@ -33,6 +33,7 @@ from pydantic import BaseModel
 
 import core
 import disposition
+from lifecycle_identity import source_binding
 from .system import _require_admin, _require_owner
 from swallowed import swallowed
 
@@ -67,6 +68,25 @@ def _persist_tags(doc: dict, cfg: dict, policy_id: str) -> None:
     if tags:
         core.store.add_file_tags(doc["doc_id"], doc.get("path") or doc["doc_id"],
                                  tags, kind="system", rule_id=policy_id)
+
+
+def _governance_lifecycle_refs(doc_id: str, owner: str) -> list[dict]:
+    try:
+        refs=core.store.lifecycle_document_refs(doc_id,owner)
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from exc
+    for ref in refs:
+        held=_exempt_now(f"scan:{ref['scan_id']}:{ref['file']}",owner)
+        if held:
+            raise HTTPException(409,f'this source item cannot be actioned right now: {held}')
+    return refs
+
+
+def _record_governance_terminal(refs: list[dict], action: str, policy_id: str, audit_id: str) -> None:
+    if action in _TERMINAL_STATUS:
+        for ref in refs:
+            core.store.set_lifecycle_status(ref['scan_id'],ref['file'],_TERMINAL_STATUS[action],
+                rule_id=policy_id,reason=f'{action} executed by governance policy',evidence_id=audit_id)
 
 
 def _trace_decision(doc_id: str, path: str | None, *, action: str, status: str,
@@ -731,7 +751,13 @@ def execute_policy(policy_id: str, request: Request):
             _trace_decision(doc["doc_id"], doc.get("path"), action=policy["action"],
                             status="pending_approval", policy_id=policy_id, reason=detail)
         else:
+            refs=_governance_lifecycle_refs(doc['doc_id'],owner) if policy['action'] in disposition.SOURCE_MUTATING else []
             result, detail, before = disposition.execute_action(doc, policy["action"], cfg, svc)
+            if before and refs:
+                before={**before,'lifecycle_inventory': [
+                    {'scan_id':r['scan_id'],'file':r['file'],'lifecycle_status':r.get('lifecycle_status'),
+                     'source_binding':source_binding(r)}
+                    for r in refs]}
             if result == "applied" and policy["action"] == "tag":
                 _persist_tags(doc, cfg, policy_id)
             core.store.create_disposition_audit(
@@ -741,6 +767,8 @@ def execute_policy(policy_id: str, request: Request):
             # route, so without this the ONE path that moves a file with no human in the loop
             # would be the one path whose result could not be undone.
             core.store.set_disposition_before_state(audit_id, before)
+            if result=='applied':
+                _record_governance_terminal(refs,policy['action'],policy_id,audit_id)
             summary[result] += 1
             _trace_decision(doc["doc_id"], doc.get("path"), action=policy["action"],
                             status=result, policy_id=policy_id, reason=detail)
@@ -887,6 +915,7 @@ def approve_disposition(audit_id: str, request: Request,
         _trace_decision(row["doc_id"], None, action=row["action"], status="failed",
                         policy_id=row["policy_id"], reason="document no longer exists")
         raise HTTPException(410, "document no longer exists")
+    refs=_governance_lifecycle_refs(row['doc_id'],owner) if not _lifecycle_ref(row['doc_id']) and row['action'] in disposition.SOURCE_MUTATING else []
     result, detail, before = disposition.execute_action(doc, row["action"], cfg,
                                                         _drive_svc(request))
     if result == "applied" and row["action"] == "tag":
@@ -899,7 +928,13 @@ def approve_disposition(audit_id: str, request: Request,
     ref = _lifecycle_ref(row["doc_id"])
     if ref and before:
         before = {**before, "lifecycle_status":
-                  (core.store.get_lifecycle_status(*ref) or {}).get("lifecycle_status")}
+                  (core.store.get_lifecycle_status(*ref) or {}).get("lifecycle_status"),
+                  'lifecycle_source_binding':doc.get('lifecycle_source_binding')}
+    elif refs and before:
+        before={**before,'lifecycle_inventory': [
+            {'scan_id':r['scan_id'],'file':r['file'],'lifecycle_status':r.get('lifecycle_status'),
+             'source_binding':source_binding(r)}
+            for r in refs]}
     # Recorded BEFORE the result is written, deliberately. A crash between the two then leaves a
     # before-state on a row that still reads pending_approval — harmless, and re-approving
     # overwrites nothing (set_disposition_before_state only fills a NULL). The other order loses
@@ -907,6 +942,8 @@ def approve_disposition(audit_id: str, request: Request,
     # cannot recover from.
     core.store.set_disposition_before_state(audit_id, before)
     core.store.set_disposition_audit_result(audit_id, result, detail)
+    if result=='applied' and refs:
+        _record_governance_terminal(refs,row['action'],row['policy_id'],audit_id)
     if ref and result == "applied" and row["action"] in _TERMINAL_STATUS:
         # Only after the action actually applied. A candidate whose archive FAILED is still
         # Active, and stamping it anyway would hide the failure in the one view a reviewer checks
@@ -914,7 +951,7 @@ def approve_disposition(audit_id: str, request: Request,
         # nobody reads the audit to find out what is in a folder.
         core.store.set_lifecycle_status(ref[0], ref[1], _TERMINAL_STATUS[row["action"]],
                                         rule_id=row["policy_id"],
-                                        reason=f"{row['action']} executed after review approval")
+                                        reason=f"{row['action']} executed after review approval",evidence_id=audit_id)
     core.store.log_decision(owner, f"disposition.{result}",
                             detail=f"{row['action']} {row['doc_id']}: {detail}"[:200])
     _trace_decision(row["doc_id"], doc.get("path"), action=row["action"], status=result,
@@ -951,6 +988,19 @@ def undo_disposition(audit_id: str, request: Request):
         raise HTTPException(409, "no before-state was recorded for this action, so it cannot be "
                                  "undone — it was applied before ACP recorded where files came "
                                  "from")
+    undo_id = hashlib.sha256(f"undo:{audit_id}".encode()).hexdigest()[:24]
+    existing = core.store.get_disposition_audit(undo_id,owner=owner)
+    if existing:
+        if existing.get('result') == 'applied':
+            return {'undone': audit_id,'audit_id': undo_id,'result': 'applied','detail': existing.get('detail')}
+        raise HTTPException(409,'this restoration was already attempted; inspect its receipt before further source changes')
+    ref = _lifecycle_ref(row['doc_id'])
+    if ref and not core.store.lifecycle_undo_allowed(ref[0],ref[1],owner,audit_id):
+        raise HTTPException(409,'the source item has a newer lifecycle decision; this older action cannot be undone')
+    inventory_before=before.get('lifecycle_inventory') or []
+    for saved in inventory_before:
+        if not core.store.lifecycle_undo_allowed(saved['scan_id'],saved['file'],owner,audit_id):
+            raise HTTPException(409,'a newer source lifecycle decision prevents undoing this governance action')
     docs = {d["doc_id"]: d for d in core.store.list_all_documents(owner=owner)}
     # A lifecycle candidate is resolved here the same way the approval that executed it resolved
     # it. Without this the fallback below hands undo_action a `scan:` id labelled source="drive",
@@ -960,24 +1010,21 @@ def undo_disposition(audit_id: str, request: Request):
     doc = (docs.get(row["doc_id"]) or _lifecycle_drive_doc(row["doc_id"], owner)
            or {"doc_id": row["doc_id"], "source": "drive"})
 
+    if not core.store.claim_disposition_undo(undo_id,row,owner):
+        raise HTTPException(409,'this restoration is already claimed; inspect its receipt')
     result, detail = disposition.undo_action(doc, before, _drive_svc(request))
-    undo_id = hashlib.sha256(f"undo:{audit_id}".encode()).hexdigest()[:24]
-    core.store.create_disposition_audit(
-        undo_id, doc_id=row["doc_id"], policy_id=row["policy_id"],
-        action=f"undo_{row['action']}", result=result, detail=detail, owner_email=owner)
-    # The estate goes back too, to the status the approval recorded before it stamped a terminal
-    # one. Restoring the file in Drive while Discover still reads "Archived" and Assess still
-    # excludes it is an undo of the visible half only.
-    #
-    # The membership test is not defensive noise: set_lifecycle_status RAISES on a status outside
-    # its closed set, and a 500 here would abort a request whose file has already been moved back
-    # — reporting a failure for an undo that succeeded. A status it cannot restore is left alone
-    # and the Drive restoration still stands.
-    ref = _lifecycle_ref(row["doc_id"])
-    prior = (before or {}).get("lifecycle_status")
-    if ref and result == "applied" and prior in core.store.LIFECYCLE_STATUSES:
-        core.store.set_lifecycle_status(ref[0], ref[1], prior, rule_id=row["policy_id"],
-                                        reason=f"restored by undo of {row['action']}")
+    # Receipt and exclusion restoration commit together. A replay must never have to guess
+    # whether a previously verified provider restore still needs a local status change.
+    try:
+        with core.store.transaction():
+            core.store.set_disposition_audit_result(undo_id,result,detail)
+            if ref and result=='applied' and before.get('lifecycle_status') in core.store.LIFECYCLE_STATUSES:
+                core.store.restore_lifecycle_after_undo(ref[0],ref[1],owner,audit_id,undo_id)
+            elif result=='applied' and inventory_before:
+                core.store.restore_governance_lifecycle_after_undo(owner,audit_id,undo_id)
+    except ValueError as exc:
+        core.store.set_disposition_audit_result(undo_id,'recovery_required',str(exc))
+        raise HTTPException(409,'the provider restoration completed but local lifecycle reconciliation needs review') from exc
     core.store.log_decision(owner, f"disposition.undo_{result}",
                             detail=f"{row['action']} {row['doc_id']}: {detail}"[:200])
     _trace_decision(row["doc_id"], doc.get("path"), action=f"undo_{row['action']}",
@@ -1283,7 +1330,7 @@ def _lifecycle_drive_doc(doc_id: str | None, owner: str) -> dict | None:
     if not item or str(item.get("source") or "").lower() != "drive":
         return None
     fid = item.get("drive_file_id")
-    return _drive_doc(fid, file) if fid else None
+    return {**_drive_doc(fid,file),'lifecycle_source_binding':source_binding(item)} if fid else None
 
 
 #: The lifecycle status an applied action leaves the inventory row in.

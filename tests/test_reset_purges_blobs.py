@@ -24,6 +24,10 @@ import store as store_mod  # noqa: E402
 # clean slate for a new customer. If you add a config/program table, add it here WITH a reason;
 # if you add a data table, add it to store._ANALYTICS_TABLES instead. One of the two — the test
 # below fails closed otherwise.
+_SAFETY_SURVIVORS = {'source_lifecycle_state'}
+# Analytics reset does not restore or untrash provider files. Erasing source tombstones here
+# would let the next listing silently reactivate them; only validated restoration clears them.
+
 _CONFIG_SURVIVORS = {
     "app_settings",        # worker count, AI mode, feature flags
     "schedule_config",     # scheduled-scan cadence
@@ -162,7 +166,7 @@ def test_reset_leaves_no_customer_data(isolated_store):
 
     # 2) Every table is EITHER wiped OR an explicit config/program survivor — nothing falls
     #    through the cracks and silently persists across a reset.
-    unclassified = all_tables - wiped - _CONFIG_SURVIVORS
+    unclassified = all_tables - wiped - _CONFIG_SURVIVORS - _SAFETY_SURVIVORS
     assert not unclassified, (
         f"these tables survive RESET but aren't declared config survivors — classify each as "
         f"data (add to _ANALYTICS_TABLES) or config (add to _CONFIG_SURVIVORS): {sorted(unclassified)}")

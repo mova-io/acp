@@ -2159,6 +2159,8 @@ def _evaluate_discover_lifecycle_rules(scan_id: str, source: str, actor: str | N
     """
     import disposition
     import hashlib
+    from lifecycle_identity import TERMINAL, source_identity
+    core.store.reconcile_source_lifecycle(scan_id)
     # owner=actor is the fix for the reported "rules created by the demo account can appear in
     # your workflow" defect: this was the one caller of list_disposition_policies() that already
     # had the scan owner in scope (as `actor`) and still fetched every tenant's enabled policies.
@@ -2225,6 +2227,22 @@ def _evaluate_discover_lifecycle_rules(scan_id: str, source: str, actor: str | N
                 "rate_per_second": round(files_evaluated / _elapsed),
             })
         file = r.get("file")
+        if r.get('lifecycle_status') in TERMINAL:
+            # An evaluated recommendation is not a provider restoration. Preserve both
+            # projections even when a changed rule now recommends the opposite disposition.
+            lc_skipped += 1
+            evaluated_at = _dt.datetime.now(_dt.timezone.utc).isoformat()
+            status = r['lifecycle_status']
+            linked = source_identity(actor,source,r) is not None
+            reason = r.get('lifecycle_reason') or f'retained lifecycle state: {status}'
+            for p in policies:
+                version = int(p.get('version') or 1)
+                evaluation_id = hashlib.sha256(f"{scan_id}:{file}:{p['policy_id']}:{version}".encode()).hexdigest()[:32]
+                evaluation_rows.append((evaluation_id,scan_id,file,p['policy_id'],version,'terminal',
+                    _json.dumps({'conditions': [],'file': file,'reason': reason,'source_identity_available': linked}),
+                    p.get('action'),p.get('priority'),evaluated_at,actor))
+            effective_rows.append((file,scan_id,None,status,reason,'applied',None,evaluated_at,actor))
+            continue
         # An Exempted file (legal hold etc.) is never moved to a candidate status, tagged, or
         # re-audited by a rule run (PRD §6). It still receives an immutable EXEMPT evaluation
         # for every enabled rule so the ledger reconciles evaluated/exempt files.
@@ -2351,10 +2369,10 @@ def _evaluate_discover_lifecycle_rules(scan_id: str, source: str, actor: str | N
                 effective_rows.append((file, scan_id, None, "Active", "matching rules were tag-only", "not_required", None, evaluated_at, actor))
                 continue
             key = (doc_id, chosen["policy_id"])
+            if key in seen:
+                continue  # Retain the executed/overridden projection, not a new pending claim.
             effective_rows.append((file, scan_id, eval_ids.get(chosen["policy_id"]), new_status,
                                    reason, "pending_approval", None, evaluated_at, actor))
-            if key in seen:
-                continue  # this rule already flagged + audited this file on an earlier Discover
             status_rows.append((scan_id, file, new_status, chosen["policy_id"], reason))
             _audit_id = hashlib.sha256(
                 f"discover:{scan_id}:{file}:{chosen['policy_id']}:{chosen.get('action', '')}".encode()
