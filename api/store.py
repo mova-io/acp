@@ -12,6 +12,7 @@ import contextlib
 import contextvars
 import json
 import logging
+import readiness_phase_diagnostics as _readiness
 import os
 import re
 import time
@@ -2654,7 +2655,7 @@ class _PgAdapter:
                     f"INSERT INTO {self._SCHEMA_VERSION_TABLE} (version, checksum) "
                     "VALUES (%s, %s) ON CONFLICT (version) DO UPDATE SET checksum=EXCLUDED.checksum",
                     (self._SCHEMA_VERSION, want))
-            conn.commit()
+            _readiness.run("db_commit", conn.commit)
         except Exception:
             conn.rollback()
             raise
@@ -2674,6 +2675,7 @@ class _PgAdapter:
                 self._read_connections_lock = threading.Lock()
         return self._read_gate
 
+    @_readiness.phase("db_admission")
     def _getconn(self, timeout: float = 5.0, read_only: bool | None = None):
         """psycopg2's ThreadedConnectionPool.getconn raises PoolError the moment the pool is
         empty — it never waits. A request arriving during a burst should queue for a moment,
@@ -2718,7 +2720,7 @@ class _PgAdapter:
         try:
             while True:
                 try:
-                    conn = pool.getconn()
+                    conn = _readiness.run("db_pool_checkout", pool.getconn)
                 except psycopg2.pool.PoolError:
                     if time.monotonic() >= deadline:
                         raise
@@ -2769,12 +2771,12 @@ class _PgAdapter:
         try:
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             yield cur
-            conn.commit()
+            _readiness.run("db_commit", conn.commit)
         except Exception:
             conn.rollback()
             raise
         finally:
-            self._putconn(conn, pool)
+            _readiness.run("db_return", self._putconn, conn, pool)
 
     @contextlib.contextmanager
     def transaction(self):
@@ -2787,16 +2789,16 @@ class _PgAdapter:
         token = self._transaction_conn.set(conn)
         try:
             yield
-            conn.commit()
+            _readiness.run("db_commit", conn.commit)
         except Exception:
             conn.rollback()
             raise
         finally:
             self._transaction_conn.reset(token)
-            self._putconn(conn, pool)
+            _readiness.run("db_return", self._putconn, conn, pool)
 
     def execute(self, cur, sql: str, params: tuple = ()) -> None:
-        cur.execute(sql, params)
+        _readiness.run("db_query", cur.execute, sql, params)
 
     def executemany(self, cur, sql: str, params_list) -> None:
         import psycopg2.extras

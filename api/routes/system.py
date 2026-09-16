@@ -13,6 +13,7 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 import core
+import readiness_phase_diagnostics as _readiness
 from swallowed import swallowed
 
 router = APIRouter()
@@ -579,13 +580,13 @@ def readyz():
     `degraded` is a list of machine-readable reasons rather than prose, so a monitor can alert
     on one condition without pattern-matching a sentence.
     """
-    workers = core.store.worker_tier_status()
+    workers = _readiness.run("worker_heartbeat", lambda: core.store.worker_tier_status())
     # Aggregate only: deployment automation needs to know whether replacing worker revisions
     # would interrupt customer work, but a public readiness response must never expose tenant,
     # filename, job id, or payload data. PostgreSQL is authoritative; Redis is intentionally not
     # consulted here because a Redis rollover is one of the failures this gate must detect.
     try:
-        _queue_stats = core.store.job_stats(owner=None)
+        _queue_stats = _readiness.run("queue_summary", lambda: core.store.job_stats(owner=None))
         queue = {
             "queued": int(_queue_stats.get("queued") or 0),
             "running": int(_queue_stats.get("running") or 0),
@@ -593,7 +594,7 @@ def readyz():
             # attempts below max_attempts, the same predicate claim_job uses. `queued` stays the
             # raw row count because it is the true state of the table and the number an operator
             # investigating a backlog wants.
-            "claimable": int(core.store.claimable_job_count()),
+            "claimable": int(_readiness.run("queue_claimable", lambda: core.store.claimable_job_count())),
         }
         # `active` is the DEPLOY GATE's number (redeploy.sh reads exactly this field), so it must
         # mean "work a worker cutover would disturb", not "rows in the table". It counted every
@@ -612,7 +613,7 @@ def readyz():
     # the source and vision probes below take. An empty dict reads as "no role ever beaten", which
     # is the honest answer when this cannot be established.
     try:
-        role_status = core.store.worker_roles_status()
+        role_status = _readiness.run("role_heartbeats", lambda: core.store.worker_roles_status())
     except Exception as exc:  # pragma: no cover - defensive: a role probe must not break /readyz
         role_status = {"error": f"{exc.__class__.__name__}: {exc}"}
     local_pool = int(getattr(core, "WORKERS", 0) or 0)
@@ -637,11 +638,11 @@ def readyz():
         degraded.append("release_worker_capacity_insufficient")
     if not can_run_scans:
         degraded.append("no_workers" if workers["ever_seen"] else "worker_tier_never_started")
-    pdf = pdf_engine_status()
+    pdf = _readiness.run("pdf_engine", pdf_engine_status)
     if not pdf["available"]:
         degraded.append("pdf_engine_missing")
     try:
-        redis_status = core.redis_dependency_status()
+        redis_status = _readiness.run("redis", core.redis_dependency_status)
     except Exception as exc:  # pragma: no cover - diagnostics must not 500 readiness
         redis_status = {"configured": bool(getattr(core, "REDIS_URL", "")),
                         "reachable": False, "tls": None, "topology": "unknown",
@@ -658,7 +659,7 @@ def readyz():
     # does, and defended so a source probe can never 500 the readiness endpoint itself.
     try:
         import smb_source
-        smb_ready = smb_source.describe_smb_readiness()
+        smb_ready = _readiness.run("sources_config", smb_source.describe_smb_readiness)
     except Exception as exc:  # pragma: no cover - defensive: a source probe must not break /readyz
         smb_ready = {"ready": False, "error": f"{exc.__class__.__name__}: {exc}"}
 
@@ -674,8 +675,8 @@ def readyz():
     try:
         import ai as _ai
         import providers as _providers
-        vision = {"ready": _ai.vision_is_available(),
-                  "reason": _ai.vision_unavailable_reason(),
+        vision = {"ready": _readiness.run("vision_available", _ai.vision_is_available),
+                  "reason": _readiness.run("vision_reason", _ai.vision_unavailable_reason),
                   "model": _ai.OLLAMA_VISION_MODEL,
                   "zone": _providers.zone_for_url(_ai.OLLAMA_BASE_URL)}
     except Exception as exc:  # pragma: no cover - defensive: a vision probe must not break /readyz
@@ -700,7 +701,7 @@ def readyz():
     # passing on an empty structure tree.
     try:
         import acr_export_pdf as _acr_pdf
-        _renderer_ok = _acr_pdf.is_available()
+        _renderer_ok = _readiness.run("pdf_renderer", _acr_pdf.is_available)
         report_pdf = {"ready": _renderer_ok,
                       "reason": None if _renderer_ok else _acr_pdf.MISSING_RENDERER,
                       "variant": _acr_pdf.PDF_VARIANT}
@@ -723,7 +724,7 @@ def readyz():
         # Langfuse is optional, so failed export is visible but never flips pipeline readiness.
         # `shallow_health` and `ingestion_exporter` stay separate: service-up was a false green
         # during the incident while real trace writes returned HTTP 500.
-        "dependencies": {"redis": redis_status, "langfuse": _langfuse_status()},
+        "dependencies": {"redis": redis_status, "langfuse": _readiness.run("langfuse", _langfuse_status)},
         # `pdf` is the ANALYSER (can this deployment read a PDF); `pdf_renderer` is the tagged-PDF
         # WRITER (can it produce one). Deliberately not both under "pdf": they fail independently,
         # for unrelated reasons, and a single key would make one of them unanswerable.
@@ -789,7 +790,7 @@ def _probe_database() -> tuple[bool, str]:
         # last database read has not come back is not ready, and saying so is the point.
         return False, "db_check_in_flight"
     try:
-        core.store.ping()
+        _readiness.run("db_ping", lambda: core.store.ping())
         return True, ""
     except Exception as exc:  # noqa: BLE001 — any failure to reach the DB means not ready
         # Class name only. This body is served to an unauthenticated caller, and a psycopg2
