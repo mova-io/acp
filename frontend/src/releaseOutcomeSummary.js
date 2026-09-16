@@ -22,40 +22,57 @@ export function releaseOutcomeSummary({ scanId, authorization, pending = false, 
   const domain = releaseBatchDomain(batch)
   const names = authorization?.files
   const membership = batch?.file_membership
-  const scoped = !!domain && !!authorization?.id && batch.authorization_id === authorization.id
-    && batch.run_id === authorization.run_id && Array.isArray(names) && names.length === domain.total
-    && new Set(names).size === names.length && names.every(name => Object.hasOwn(membership, name))
+  const authorizationScope = !!authorization?.id && !!authorization?.run_id
+    && Array.isArray(names) && names.length > 0 && new Set(names).size === names.length
+    && names.length === files.length
     && names.every(name => files.filter(file => file.file === name).length === 1)
-  const available = !pending && !error && scoped
+  const deliveryScoped = authorizationScope && !!domain
+    && batch.authorization_id === authorization.id && batch.run_id === authorization.run_id
+    && names.length === domain.total
+    && names.every(name => Object.hasOwn(membership, name))
+  const deliveryAvailable = !pending && !error && deliveryScoped
   const currentReceipt = file => digest(file.corrected_sha256)
     && results[file.file]?.status === 'published'
     && results[file.file]?.artifact_digest === `sha256:${file.corrected_sha256}`
-  const delivered = available ? names.filter(name => membership[name] === 'published'
+  const delivered = deliveryAvailable ? names.filter(name => membership[name] === 'published'
     && currentReceipt(files.find(file => file.file === name))).length : null
-  const confirmed = available && delivered === batch.delivered
+  const confirmed = deliveryAvailable && delivered === batch.delivered
   const complete = confirmed && batch.state === 'succeeded' && delivered === domain.total
-  const blocked = available && (batch.state === 'failed' || domain.buckets.failed > 0 || domain.buckets.skipped > 0)
+  const authorizationBlocked = authorizationScope && (authorization.requires_reconnect === true
+    || authorization.needs_attention === true || ['blocked', 'failed', 'stopped'].includes(authorization.status))
+  const blocked = authorizationBlocked || (deliveryAvailable
+    && (batch.state === 'failed' || domain.buckets.failed > 0 || domain.buckets.skipped > 0))
   const original = snapshot?.finding_reconciliation?.original_assessment
-  const originalMatches = available && Array.isArray(original)
+  const originalMatches = authorizationScope && Array.isArray(original)
     && !!originalFindingMetrics(original, snapshot.finding_reconciliation.assessed)
     && original.every(group => names.includes(group.file))
   const findingBound = originalMatches && snapshot.total_documents === names.length
     && (snapshot.scan_id || snapshot.run_id) === scanId
     && !!snapshot.batch_id && snapshot.batch_id === authorization.run_id
   const findings = findingBound ? findingMath(snapshot) : { exact: false }
-  const open = findings.exact ? ['awaiting_review', 'approved_pending_verification', 'unchanged_no_fix', 'failed']
-    .reduce((sum, key) => sum + findings.rec[key], 0) : null
+  // Release uses the same equation as Remediate: every assessed finding that is not
+  // resolved with verification remains open. Exclusions and superseded findings stay
+  // named separately below, but must not disappear from the open total.
+  const open = findings.exact ? findings.remaining : null
+  const deliveryReason = confirmed ? null
+    : pending ? 'Automatic publication evidence is still loading.'
+      : error ? 'Automatic publication evidence could not be loaded.'
+        : !authorization ? 'No saved automatic publication scope is available.'
+          : !authorizationScope ? 'The saved authorization scope does not match this Release view.'
+            : !deliveryScoped ? 'Saved delivery evidence is incomplete for this authorization.'
+              : 'Saved delivery totals do not match current corrected-copy receipts.'
   return {
-    state: complete ? 'complete' : blocked ? 'attention' : available && confirmed ? 'processing' : 'unavailable',
+    state: complete ? 'complete' : blocked ? 'attention' : deliveryAvailable && confirmed ? 'processing' : 'unavailable',
     title: complete ? 'Delivery complete' : blocked ? 'Delivery needs attention'
-      : available && confirmed ? 'Delivery in progress' : 'Checking delivery confirmation',
-    total: available ? domain.total : null,
+      : deliveryAvailable && confirmed ? 'Delivery in progress' : 'Checking delivery confirmation',
+    total: deliveryAvailable ? domain.total : null,
     delivered: confirmed ? delivered : null,
     remainingCopies: confirmed ? domain.total - delivered : null,
     fixed: findings.exact && count(findings.fixed) ? findings.fixed : null,
     open,
     excluded: findings.exact ? findings.rec.excluded : null,
     superseded: findings.exact ? findings.rec.superseded : null,
+    deliveryReason,
     complete,
   }
 }

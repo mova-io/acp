@@ -22,7 +22,7 @@ function evidence(delivered = 2, status = 'completed') {
 }
 describe('Release outcome evidence', () => {
   it('summarizes the whole saved authorization with exact findings and current-copy receipts', () => {
-    expect(releaseOutcomeSummary(evidence())).toMatchObject({complete:true,total:2,delivered:2,fixed:4,open:4,excluded:1,superseded:1})
+    expect(releaseOutcomeSummary(evidence())).toMatchObject({complete:true,total:2,delivered:2,fixed:4,open:6,excluded:1,superseded:1})
   })
   it('keeps partial delivery in progress and never borrows a completed one-file request', () => {
     expect(releaseOutcomeSummary({...evidence(1,'publishing'), latestRequest:{status:'completed',total:1}}))
@@ -55,6 +55,53 @@ describe('Release outcome evidence', () => {
     expect(releaseOutcomeSummary(inconsistent).fixed).toBe(null)
     const otherScope=evidence();otherScope.snapshot.finding_reconciliation={...rec,original_assessment:[{file:'other.docx',rule_id:'1.1.1',fix_mode:'assisted',finding_count:10}]}
     expect(releaseOutcomeSummary(otherScope).open).toBe(null)
+  })
+  it('keeps exact remediation findings visible when a blocked release has no complete delivery aggregate', () => {
+    const blocked=evidence(0,'blocked')
+    blocked.authorization={...blocked.authorization,status:'blocked',requires_reconnect:true,
+      batch_progress:{available:false,scope:'automatic'}}
+    expect(releaseOutcomeSummary(blocked)).toMatchObject({state:'attention',title:'Delivery needs attention',
+      delivered:null,fixed:4,open:6,deliveryReason:'Saved delivery evidence is incomplete for this authorization.'})
+  })
+  it('keeps findings and delivery as separate evidence during loading and errors', () => {
+    expect(releaseOutcomeSummary({...evidence(),pending:true})).toMatchObject({fixed:4,open:6,delivered:null,
+      deliveryReason:'Automatic publication evidence is still loading.'})
+    expect(releaseOutcomeSummary({...evidence(),error:'offline'})).toMatchObject({fixed:4,open:6,delivered:null,
+      deliveryReason:'Automatic publication evidence could not be loaded.'})
+  })
+  it('matches the Remediate finding equation for a blocked 4,771-finding release', () => {
+    const blocked=evidence(0,'blocked')
+    blocked.authorization.status='blocked'
+    blocked.authorization.requires_reconnect=true
+    blocked.authorization.batch_progress={available:false,scope:'automatic'}
+    blocked.snapshot.finding_reconciliation={...rec,assessed:4771,resolved_verified:2002,
+      awaiting_review:0,approved_pending_verification:0,unchanged_no_fix:0,failed:0,
+      excluded:2769,superseded:0,
+      original_assessment:[{file:'one.docx',rule_id:'1.1.1',fix_mode:'assisted',finding_count:2400},
+        {file:'two.pdf',rule_id:'1.1.1',fix_mode:'assisted',finding_count:2371}]}
+    expect(releaseOutcomeSummary(blocked)).toMatchObject({fixed:2002,open:2769,delivered:null,state:'attention'})
+  })
+  it('renders a confirmed delivery count of zero instead of treating it as unavailable', () => {
+    const none=evidence(0,'blocked')
+    none.authorization.status='blocked'
+    none.authorization.batch_progress.file_membership['one.docx']='processing'
+    expect(releaseOutcomeSummary(none)).toMatchObject({state:'attention',total:2,delivered:0,remainingCopies:2})
+    const html=renderToStaticMarkup(createElement(ReleaseOutcomeSummary,none))
+    expect(html).toContain('Copies delivered</dt><dd>0<small> of 2 authorized copies')
+    expect(html).not.toContain('Copies delivered</dt><dd>Unavailable')
+  })
+  it('does not borrow findings from a different remediation run or release scope', () => {
+    const run=evidence();run.snapshot.batch_id='other-run'
+    expect(releaseOutcomeSummary(run)).toMatchObject({fixed:null,open:null})
+    const scope=evidence();scope.authorization.files=['one.docx']
+    expect(releaseOutcomeSummary(scope)).toMatchObject({fixed:null,open:null,delivered:null,
+      deliveryReason:'The saved authorization scope does not match this Release view.'})
+  })
+  it('explains unavailable delivery evidence and offers an explicit retry', () => {
+    const retry=()=>{}
+    const html=renderToStaticMarkup(createElement(ReleaseOutcomeSummary,{...evidence(),pending:true,onRetry:retry}))
+    expect(html).toContain('Automatic publication evidence is still loading.')
+    expect(html).toContain('Refresh release evidence')
   })
   it('delivery complete is explicit about remaining open findings and does not claim conformance', () => {
     const html=renderToStaticMarkup(createElement(ReleaseOutcomeSummary,{...evidence(),folders:[{name:'Saved folder',url:'https://example.sharepoint.com/saved'}]}))
@@ -89,5 +136,6 @@ describe('Release outcome evidence', () => {
     const publish=readFileSync('src/Publish.jsx','utf8')
     expect(publish).toContain('<ReleaseOutcomeSummary scanId={run?.id} authorization={automaticCoveredFiles.length ? currentAutomaticAuthorization : null}')
     expect(publish).toContain('snapshot={remediationSnapshot}')
+    expect(publish).toContain('onRetry={() => setAutomaticStatusRefresh(value => value + 1)}')
   })
 })
