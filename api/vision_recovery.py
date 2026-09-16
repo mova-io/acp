@@ -13,6 +13,21 @@ TRANSIENT = frozenset({'vision_timeout', 'timeout', 'capacity_busy', 'circuit_op
     'assessment_vision_budget_exhausted', 'shared_capacity_busy',
     'shared_capacity_unavailable', 'shared_coordination_unavailable'})
 OUTPUT_FAILURES = frozenset({'empty', 'empty_response', 'reply_unusable'})
+ACTION_BLOCKS = {
+    'provider_access_denied': 'vision_provider_access_denied',
+    'budget_admission_denied': 'vision_budget_admission_denied',
+    'run_dispatch_permission_unavailable': 'vision_run_permission_unavailable',
+    'ai_disabled_or_budget_zero': 'vision_ai_disabled_or_budget_zero',
+    'verified_model_pricing_unavailable': 'vision_pricing_not_verified',
+    'vision_pricing_not_verified': 'vision_pricing_not_verified',
+    'provider_limit_exceeded': 'vision_provider_limit_exceeded',
+    'provider_refused': 'vision_provider_request_rejected',
+    'request_rejected_before_dispatch': 'vision_provider_request_rejected',
+}
+BLOCK_CODES = frozenset({'vision_spending_reconciliation_required',
+    'vision_generated_output_unusable', 'vision_local_endpoint_required',
+    'vision_response_empty', 'vision_recovery_unresolved', 'vision_budget_exhausted',
+    *ACTION_BLOCKS.values()})
 
 
 class RecoveryBlocked(ValueError):
@@ -49,7 +64,7 @@ def _decision(store, sid, file, state, **detail):
                        file=file, detail=_encoded(detail))
     safe = {key: detail[key] for key in ('retry', 'run_after', 'drafts') if key in detail}
     if state == 'blocked':
-        safe['reason_code'] = detail.get('reason_code') if detail.get('reason_code') in {'vision_spending_reconciliation_required', 'vision_permission_or_budget_blocked', 'vision_generated_output_unusable', 'vision_local_endpoint_required', 'vision_response_empty'} else 'vision_recovery_unresolved'
+        safe['reason_code'] = detail.get('reason_code') if detail.get('reason_code') in BLOCK_CODES else 'vision_recovery_unresolved'
     store.append_scan_event(sid, 'remediate.vision_retry_' + state,
         phase='remediate', document=file, correlation_id=detail.get('run_id'),
         detail=safe or None)
@@ -97,19 +112,20 @@ def _recovery_block(context, misses=(), *, check_admission=True):
         if snapshot['blocked']:
             return 'vision_spending_reconciliation_required'
         if check_admission and snapshot['available_units'] <= 0:
-            return 'vision_permission_or_budget_blocked'
+            return 'vision_budget_exhausted'
     # Settled, rejected output is not evidence of missing consent or funds.
     if 'attempts_exhausted' in reasons:
         return 'vision_generated_output_unusable'
-    if reasons & {'provider_access_denied', 'budget_admission_denied'}:
-        return 'vision_permission_or_budget_blocked'
+    for reason, code in ACTION_BLOCKS.items():
+        if reason in reasons:
+            return code
     if getattr(context, 'local_drafting', False):
         if set(misses) & {'empty', 'empty_response'}:
             return 'vision_response_empty'
     if set(misses) & OUTPUT_FAILURES:
         return 'vision_generated_output_unusable'
     if any(reason not in TRANSIENT for reason in reasons):
-        return 'vision_recovery_unresolved' if getattr(context, 'local_drafting', False) else 'vision_permission_or_budget_blocked'
+        return 'vision_recovery_unresolved'
     return None
 
 
@@ -122,6 +138,22 @@ def _block_description(reason_code):
         return 'Automatic generation is paused; check the recorded AI failure before retrying.'
     if reason_code == 'vision_generated_output_unusable':
         return 'Generated AI output could not be used; automatic attempts have stopped.'
+    if reason_code == 'vision_provider_access_denied':
+        return 'The saved AI provider does not allow this request. Check provider access before starting a new attempt.'
+    if reason_code == 'vision_budget_admission_denied':
+        return 'The saved spending ledger did not admit another AI request. Check its recorded budget decision before retrying.'
+    if reason_code == 'vision_budget_exhausted':
+        return 'The saved AI spending allowance is exhausted. Increase it through a new approved plan before retrying.'
+    if reason_code == 'vision_run_permission_unavailable':
+        return 'This saved run does not authorize another AI request. Review or replace the plan before retrying.'
+    if reason_code == 'vision_ai_disabled_or_budget_zero':
+        return 'AI is disabled or this saved plan has no AI spending allowance. Create an approved plan before retrying.'
+    if reason_code == 'vision_pricing_not_verified':
+        return 'Verified pricing is unavailable for the saved AI model. Select a model with verified pricing before retrying.'
+    if reason_code == 'vision_provider_limit_exceeded':
+        return 'The AI provider limit was reached. Check provider capacity or limits before starting a new attempt.'
+    if reason_code == 'vision_provider_request_rejected':
+        return 'The AI provider rejected the request before usable output was returned. Check AI activity before retrying.'
     return 'AI spending or permission is unresolved; automatic vision retry is paused.'
 
 
