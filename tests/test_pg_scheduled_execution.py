@@ -90,3 +90,13 @@ def test_pg_server_descendant_binding_and_payload_tamper_denial(accepted_pg):
                        (json.dumps({**st.get_job(child_id)['payload'], 'drive_file_id': 'foreign'}), child_id))
     with pytest.raises(ValueError, match='binding changed'):
         execution.source_context(st, sid, child, provider='drive', owner=owner, item=item)
+
+
+def test_pg_tenant_reset_revokes_accepted_tick_without_root_scan(accepted_pg):
+    execution, st, row, tick = accepted_pg
+    owner = row['owner_email']
+    assert execution.source_context(st, row['scan_id'], tick, provider='drive', owner=owner)
+    st.reset_user_data('  ' + owner.upper() + ' ')
+    assert execution.get(st, owner, row['occurrence_key']) is None
+    assert st.get_job(tick['id']) is None
+    assert execution.source_context(st, row['scan_id'], tick, provider='drive', owner=owner) is None

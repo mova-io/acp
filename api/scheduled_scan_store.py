@@ -400,3 +400,39 @@ def exhausted_tick(store, job, *, worker_id, attempt):
                 raise ValueError('Scheduled execution claim changed')
         store.cancel_scan(row['scan_id'], owner=row['owner_email'])
         return True
+
+
+def erase_owner(store, owner):
+    """Erase scheduled execution authority even before its root scan exists."""
+    owner = str(owner).strip().lower()
+    scope = 'SELECT scan_id FROM schedule_occurrences WHERE LOWER(TRIM(owner_email))=%s'
+    with store._db.cursor() as cur:
+        # Lock elected jobs before occurrence rows, matching runtime handoff order.
+        if store._db.supports_for_update:
+            store._db.execute(cur, 'SELECT id FROM jobs WHERE id IN '
+                              '(SELECT execution_job_id FROM schedule_occurrences WHERE LOWER(TRIM(owner_email))=%s) FOR UPDATE', (owner,))
+            store._db.fetchall(cur)
+            store._db.execute(cur, 'SELECT occurrence_key FROM schedule_occurrences '
+                              'WHERE LOWER(TRIM(owner_email))=%s FOR UPDATE', (owner,))
+            store._db.fetchall(cur)
+        store._db.execute(cur, 'SELECT scan_id FROM schedule_occurrences WHERE LOWER(TRIM(owner_email))=%s', (owner,))
+        scan_ids = {r['scan_id'] for r in store._db.fetchall(cur) if r['scan_id']}
+        store._db.execute(cur, 'DELETE FROM jobs WHERE LOWER(TRIM(scheduled_owner))=%s OR '
+                          'scan_id IN (' + scope + ') OR id IN '
+                          '(SELECT execution_job_id FROM schedule_occurrences WHERE LOWER(TRIM(owner_email))=%s)',
+                          (owner, owner, owner))
+        for table in ('stage_attempts', 'stage_events', 'stage_outbox', 'stage_output_manifests',
+                      'side_effect_receipts', 'stage_work_items'):
+            store._db.execute(cur, 'DELETE FROM ' + table + ' WHERE execution_id IN '
+                              '(SELECT execution_id FROM stage_executions WHERE scan_id IN (' + scope + '))', (owner,))
+        for table in ('stage_executions', 'scan_inputs', 'workflow_executions'):
+            store._db.execute(cur, 'DELETE FROM ' + table + ' WHERE scan_id IN (' + scope + ')', (owner,))
+        store._db.execute(cur, 'DELETE FROM schedule_notifications WHERE LOWER(TRIM(owner_email))=%s', (owner,))
+        store._db.execute(cur, 'DELETE FROM schedule_occurrences WHERE LOWER(TRIM(owner_email))=%s', (owner,))
+    store.clear_user_setting(owner, store._SWEEP_KEY)
+    last_global = store.get_last_sweep()
+    if last_global and last_global.get('scan_id') in scan_ids:
+        store.set_setting(store._SWEEP_KEY, '')
+    return ['schedule_occurrences', 'schedule_notifications', 'scan_inputs', 'stage_executions',
+            'stage_work_items', 'stage_attempts', 'stage_events', 'stage_outbox',
+            'stage_output_manifests', 'side_effect_receipts']

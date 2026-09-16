@@ -5437,7 +5437,9 @@ class Store:
         """
         owner_email=owner_email.strip().lower()
         cleared: list[str] = []
-        with self._db.cursor() as cur:
+        with self.transaction(), self._db.cursor() as cur:
+            from scheduled_scan_store import erase_owner
+            cleared.extend(erase_owner(self, owner_email))
             # Full tenant erasure clears source identifiers and all lifecycle projections in
             # this same transaction. This is not an undo and makes no provider call.
             for table in ('source_lifecycle_state','lifecycle_evaluation','effective_disposition','disposition_audit'):

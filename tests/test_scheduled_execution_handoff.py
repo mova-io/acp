@@ -357,3 +357,71 @@ def test_sharepoint_changed_accepted_library_or_app_denies_before_token(isolated
         monkeypatch.setattr(sp_sync, '_cfg', lambda key: 'changed-app')
     with pytest.raises(ValueError):
         staged._scheduled_app_token(context)
+
+
+@pytest.mark.parametrize('after_discovery', [False, True])
+@pytest.mark.parametrize('alias', [False, True])
+def test_full_tenant_reset_erases_pre_root_and_descendant_authority(accepted, monkeypatch, after_discovery, alias):
+    import core
+    import scheduled_scan_execution as staged
+    execution, st, row, tick, now = accepted
+    held = tick
+    if after_discovery:
+        execution, st, row, held, item = scoped_child(accepted)
+        assert execution.source_context(st, row['scan_id'], held, provider='drive', owner=OWNER, item=item)
+    else:
+        assert execution.source_context(st, row['scan_id'], held, provider='drive', owner=OWNER)
+    other = 'other@example.test'
+    st.save_user_scan_schedule(other, True, 'UTC', '10:00', list(range(7)), source='drive')
+    other_payload = {'owner_email': other, 'occurrence_key': 'other:day', 'scheduled_for': now.isoformat()}
+    st.enqueue_scheduled_sweep('other:day', other_payload)
+    other_job = st.claim_job('other-worker', job_types=['scheduled_sweep'])
+    other_row = execution.accept(st, other_payload, other_job, st.get_user_scan_schedule(other))
+    st.create_schedule_notification(OWNER, row['occurrence_key'], 'failed', title='fixture', message='fixture')
+    st.record_sweep_outcome(ok=True, when=st._now(), source='drive', scan_id=row['scan_id'], owner=OWNER)
+    before_config = st.get_user_scan_schedule(OWNER)
+    if alias:
+        with st._db.cursor() as cur:
+            st._db.execute(cur, 'UPDATE schedule_occurrences SET owner_email=%s WHERE owner_email=%s', ('  OWNER@EXAMPLE.TEST ', OWNER))
+    with st._db.cursor() as cur:
+        st._db.execute(cur, 'SELECT execution_id FROM stage_executions WHERE scan_id=%s', (row['scan_id'],))
+        execution_ids = [entry['execution_id'] for entry in st._db.fetchall(cur)]
+    if after_discovery:
+        assert execution_ids
+    st.reset_user_data('  OWNER@EXAMPLE.TEST ')
+    assert execution.get(st, OWNER, row['occurrence_key']) is None
+    assert st.get_job(held['id']) is None
+    assert st.get_scan_inputs(row['scan_id']) is None
+    with st._db.cursor() as cur:
+        for execution_id in execution_ids:
+            for table in ('stage_executions', 'stage_work_items', 'stage_events', 'stage_attempts',
+                          'stage_outbox', 'stage_output_manifests', 'side_effect_receipts'):
+                st._db.execute(cur, 'SELECT COUNT(*) AS n FROM ' + table + ' WHERE execution_id=%s', (execution_id,))
+                assert st._db.fetchone(cur)['n'] == 0
+    assert not st.list_schedule_notifications(OWNER)
+    assert st.get_last_sweep(OWNER) is None
+    assert execution.get(st, other, other_row['occurrence_key']) == other_row
+    assert st.get_job(other_job['id'])['status'] == 'running'
+    after_config = st.get_user_scan_schedule(OWNER)
+    for key in ('enabled', 'source', 'source_scope', 'timezone', 'local_time', 'days', 'last_enqueued_occurrence'):
+        assert after_config[key] == before_config[key]
+    assert execution.source_context(st, row['scan_id'], held, provider='drive', owner=OWNER) is None
+    monkeypatch.setattr(core, 'get_store', lambda: st)
+    monkeypatch.setattr(staged, '_discovery_plan', lambda *args: pytest.fail('erased tick recreated source work'))
+    with pytest.raises(ValueError, match='claim changed'):
+        staged.run_tick(tick['payload'], tick)
+
+
+def test_tenant_reset_failure_rolls_back_scheduler_erasure(accepted, monkeypatch):
+    execution, st, row, tick, now = accepted
+    original = st._db.execute
+    def fail(cur, sql, params=()):
+        if 'DELETE FROM schedule_occurrences' in sql:
+            raise RuntimeError('injected reset rollback')
+        return original(cur, sql, params)
+    monkeypatch.setattr(st._db, 'execute', fail)
+    with pytest.raises(RuntimeError, match='injected reset rollback'):
+        st.reset_user_data(OWNER)
+    assert execution.get(st, OWNER, row['occurrence_key']) == row
+    assert st.get_job(tick['id'])['status'] == 'running'
+    assert execution.source_context(st, row['scan_id'], tick, provider='drive', owner=OWNER)
