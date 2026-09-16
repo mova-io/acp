@@ -3914,6 +3914,17 @@ class Store:
                 "FROM scan_inventory WHERE scan_id=%s ORDER BY file", (scan_id,))
             return self._db.fetchall(cur)
 
+    def queued_source_lifecycle_context(self, scan_id: str, filename: str) -> dict | None:
+        """Read authoritative ownership and current source binding without ledger writes."""
+        with self._db.cursor() as cur:
+            self._db.execute(cur, "SELECT owner_email,source FROM scan_runs WHERE id=%s", (scan_id,))
+            run = self._db.fetchone(cur)
+            if not run:
+                return None
+            self._db.execute(cur, f"SELECT {self._INV_COLS} FROM scan_inventory WHERE scan_id=%s AND file=%s",
+                             (scan_id, filename))
+            return {**run, "inventory": self._db.fetchone(cur)}
+
     def count_inventory(self, scan_id: str) -> int:
         with self._db.cursor() as cur:
             self._db.execute(cur, "SELECT COUNT(*) AS n FROM scan_inventory WHERE scan_id=%s", (scan_id,))
@@ -4943,6 +4954,8 @@ class Store:
                 rid = rule["id"]
                 fc, rc = fail_counts.get(rid, 0), review_counts.get(rid, 0)
                 outcome = _rule_outcome(rid, fmt, fc, rc, target, scope)
+                if (f.get("status") or "").lower() == "skipped":
+                    outcome = "NOT_EVALUATED"
                 count = fc if fc else rc
                 trace_rows.append((scan_id, f["file"], rid, rule["name"], rule.get("plain"), rule["level"],
                                    rule["fix_mode"], outcome, count))
@@ -4952,6 +4965,15 @@ class Store:
                 "outcome=EXCLUDED.outcome,finding_count=EXCLUDED.finding_count",
                 trace_rows)
             self._save_file_manifest(cur, scan_id, f, catalog)
+            if f.get("engine") == "lifecycle" and f.get("lifecycle_exclusion"):
+                excluded = f["lifecycle_exclusion"]
+                reason = str(excluded["status"]) + (": " + str(excluded["reason"]) if excluded.get("reason") else "")
+                self._db.execute(cur,
+                    "UPDATE scan_inventory SET exclusion_reason=%s WHERE scan_id=%s AND file=%s",
+                    (reason, scan_id, f["file"]))
+            if (f.get("status") or "").lower() == "skipped":
+                self._db.execute(cur, "DELETE FROM pii_findings WHERE scan_id=%s AND file=%s",
+                                 (scan_id, f["file"]))
             for pf in (f.get("pii") or {}).get("findings", []):
                 self._db.execute(cur,
                     "INSERT INTO pii_findings(scan_id,file,pii_type,label,count,severity,samples) "
@@ -5160,7 +5182,7 @@ class Store:
         with self._db.cursor() as cur:
             self._db.execute(cur,
                 "UPDATE scan_runs SET status='done', completed_at=%s, "
-                "files=(SELECT COUNT(*) FROM file_records WHERE scan_id=%s), "
+                "files=(SELECT COUNT(*) FROM file_records WHERE scan_id=%s AND NOT (COALESCE(engine,'')='lifecycle' AND status='skipped')), "
                 "certifiable=(SELECT COALESCE(SUM(compliant),0) FROM file_records WHERE scan_id=%s), "
                 "uncertain=(SELECT COUNT(*) FROM file_records WHERE scan_id=%s AND status='uncertain'), "
                 "error=(SELECT COUNT(*) FROM file_records WHERE scan_id=%s AND status='error'), "
@@ -5807,13 +5829,15 @@ class Store:
             excluded_count = (self._db.fetchone(cur) or {}).get("n") or 0
 
             self._db.execute(cur,
-                "SELECT status, COUNT(*) AS n FROM file_records WHERE scan_id=%s GROUP BY status",
+                "SELECT status, COUNT(*) AS n FROM file_records WHERE scan_id=%s "
+                "AND NOT (COALESCE(engine,'')='lifecycle' AND status='skipped') GROUP BY status",
                 (scan_id,))
             by_status = {r["status"]: r["n"] for r in self._db.fetchall(cur)}
             assessed_count = sum(by_status.values())
 
             self._db.execute(cur,
-                "SELECT engine, COUNT(*) AS n FROM file_records WHERE scan_id=%s GROUP BY engine",
+                "SELECT engine, COUNT(*) AS n FROM file_records WHERE scan_id=%s "
+                "AND NOT (COALESCE(engine,'')='lifecycle' AND status='skipped') GROUP BY engine",
                 (scan_id,))
             file_type_distribution = {(r["engine"] or "unknown"): r["n"] for r in self._db.fetchall(cur)}
 

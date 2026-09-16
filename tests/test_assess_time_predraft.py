@@ -50,6 +50,13 @@ _LF = SimpleNamespace(
 )
 
 
+@pytest.fixture(autouse=True)
+def isolate_lifecycle_boundary(monkeypatch):
+    # These wiring fixtures have no durable scan/inventory. Lifecycle ownership and terminal
+    # behavior are exercised against real Store rows in test_queued_terminal_content_gate.
+    monkeypatch.setattr(handlers, "_queued_terminal_exclusion", lambda *args: None)
+
+
 def _patch_all(monkeypatch, *, ai_enabled=True, dedup=None, status="done"):
     """Monkeypatch the minimal set of collaborators for _analyse_and_persist_one_impl.
 
