@@ -47,7 +47,8 @@ def test_redeploy_stamps_gateway_settings_only_on_both_api_rollout_paths():
     assert '[ "$CAPACITY_APPLY_REQUESTED" = 1 ]' in script
     assert '"WORKER_APP_NAMES=$DISCOVERY_WORKER,$ASSESS_WORKER,$REMEDIATE_WORKER${RELEASE_WORKER:+,$RELEASE_WORKER}"' in script
     assert '"CAPACITY_APPLY_APP_NAMES=$APP,$DISCOVERY_WORKER,$ASSESS_WORKER,$REMEDIATE_WORKER,$GPU_APP"' in script
-    assert script.count('--set-env-vars "${API_ENV_VARS[@]}"') == 2
+    assert script.count('--env "${API_ENV_VARS[@]}"') == 2
+    assert script.count('deploy/public/update_api_image.py') == 2
     assert "ACP_PG_RESERVED_CONNECTIONS must be smaller" in script
     for worker_update in script.split('for a in "${LANE_WORKERS[@]}"; do')[1:3]:
         assert 'API_ENV_VARS' not in worker_update.split("done", 1)[0]
