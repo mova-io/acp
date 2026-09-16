@@ -19,6 +19,16 @@ OBSERVATION_SECONDS = 120
 class StartupFailure(RuntimeError):
     """A proved process failure that retries must never turn into success."""
 
+    REASONS = {'container_restart', 'container_not_ready', 'system_terminated',
+               'liveness_restart', 'console_phase_failed', 'durable_failure',
+               'revision_changed'}
+
+    def __init__(self, reason):
+        if reason not in self.REASONS:
+            raise ValueError('invalid startup failure reason')
+        self.reason = reason
+        super().__init__(reason)
+
 
 def read(subscription, *args, lines=False, deadline=None):
     """Retry Azure's eventually consistent read endpoints within a small budget."""
@@ -136,19 +146,12 @@ def receipt(app, replicas, system, console, image, durable=None):
             'phase_history_complete': False}  # No claim to recover deleted prior-container stderr.
 
 
-def _fatal(receipt_row):
-    return (any(container.get('restart_count', 0) not in (0, None)
-                for container in receipt_row.get('containers', []))
-            or any(event.get('reason') == 'ContainerTerminated'
-                   or event.get('liveness_restart')
-                   or event.get('state') == 'failed'
-                   for event in receipt_row.get('events', [])))
-
-
-def _fatal_events(events):
-    return any(event.get('reason') == 'ContainerTerminated'
-               or event.get('liveness_restart')
-               or event.get('state') == 'failed' for event in events)
+def _system_failure(events):
+    if any(event.get('reason') == 'ContainerTerminated' for event in events):
+        return 'system_terminated'
+    if any(event.get('liveness_restart') for event in events):
+        return 'liveness_restart'
+    return None
 
 
 def _post_ready_containers(replicas):
@@ -156,12 +159,23 @@ def _post_ready_containers(replicas):
             for container in replica.get('properties', {}).get('containers', [])]
     if not rows:
         return False
-    if any(container.get('ready') is not True
-           or container.get('started') is not True
-           or type(container.get('restartCount')) is not int
-           or container.get('restartCount') != 0 for container in rows):
-        raise StartupFailure('post-ready container startup failure observed')
-    return True
+    incomplete = False
+    for container in rows:
+        ready = container.get('ready')
+        started = container.get('started')
+        restart = container.get('restartCount')
+        if ready is False or started is False:
+            raise StartupFailure('container_not_ready')
+        if ready is not None and ready is not True:
+            raise StartupFailure('container_not_ready')
+        if started is not None and started is not True:
+            raise StartupFailure('container_not_ready')
+        if restart is not None:
+            if type(restart) is not int or restart < 0 or restart > 0:
+                raise StartupFailure('container_restart')
+        if ready is None or started is None or restart is None:
+            incomplete = True
+    return not incomplete
 
 
 def _logs_complete(receipt_row):
@@ -184,7 +198,7 @@ def collect(subscription, group, name, image, *, timeout=OBSERVATION_SECONDS):
             if revision is None:
                 revision = current
             elif current != revision:
-                raise StartupFailure('startup target revision changed during observation')
+                raise StartupFailure('revision_changed')
             replicas = read(subscription, 'containerapp', 'replica', 'list', '-g', group,
                             '-n', name, '--revision', revision, deadline=deadline)
             post_ready = app['properties'].get('latestReadyRevisionName') == revision
@@ -194,17 +208,19 @@ def collect(subscription, group, name, image, *, timeout=OBSERVATION_SECONDS):
                 system = read(subscription, 'containerapp', 'logs', 'show', '-g', group,
                               '-n', name, '--type', 'system', '--tail', '300',
                               '--format', 'json', lines=True, deadline=deadline)
-                if _fatal_events(sanitized_events(system, [], revision)):
-                    raise StartupFailure('system startup failure evidence observed')
+                system_failure = _system_failure(sanitized_events(system, [], revision))
+                if system_failure:
+                    raise StartupFailure(system_failure)
                 console = read(subscription, 'containerapp', 'logs', 'show', '-g', group,
                                '-n', name, '--revision', revision, '--tail', '100',
                                '--format', 'json', lines=True, deadline=deadline)
-                if _fatal_events(sanitized_events([], console, revision)):
-                    raise StartupFailure('console startup failure evidence observed')
+                if any(event.get('state') == 'failed'
+                       for event in sanitized_events([], console, revision)):
+                    raise StartupFailure('console_phase_failed')
                 final = read(subscription, 'containerapp', 'show', '-g', group, '-n', name,
                              deadline=deadline)
                 if final['properties']['latestRevisionName'] != revision:
-                    raise StartupFailure('startup target revision changed during observation')
+                    raise StartupFailure('revision_changed')
                 replicas = read(subscription, 'containerapp', 'replica', 'list', '-g', group,
                                 '-n', name, '--revision', revision, deadline=deadline)
                 # This revision was already observed post-ready above. A later
@@ -212,11 +228,9 @@ def collect(subscription, group, name, image, *, timeout=OBSERVATION_SECONDS):
                 # back into a retryable pre-ready state.
                 _post_ready_containers(replicas)
                 persisted = durable_failure(final, subscription, group, name, revision)
-                if persisted is not None and _fatal_events([persisted]):
-                    raise StartupFailure('durable startup failure evidence observed')
+                if persisted is not None and persisted.get('state') == 'failed':
+                    raise StartupFailure('durable_failure')
                 result = receipt(final, replicas, system, console, image, persisted)
-                if _fatal(result):
-                    raise StartupFailure('startup failure evidence observed')
                 if result['ok'] and _logs_complete(result):
                     return result
         except StartupFailure:
@@ -247,6 +261,8 @@ def main(argv=None):
         for name, future in futures:
             try:
                 rows.append(future.result())
+            except StartupFailure as exc:
+                rows.append({'app': name, 'ok': False, 'reason': exc.reason})
             except Exception:
                 rows.append({'app': name, 'ok': False, 'reason': 'startup_evidence_unavailable'})
     output = Path(args.output)

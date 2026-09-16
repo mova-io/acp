@@ -338,6 +338,85 @@ def test_each_fatal_source_is_latched_before_a_later_transient_read(monkeypatch,
     assert state['transient_sent'] is False
 
 
+def test_missing_post_ready_container_fields_retry_then_complete(monkeypatch):
+    row = app()
+    healthy_replicas, system, console = _complete_startup_reads(row)
+    replica_reads = 0
+
+    def read(_subscription, *args, **_kwargs):
+        nonlocal replica_reads
+        if args[1] == 'show':
+            return row
+        if args[1:3] == ('replica', 'list'):
+            replica_reads += 1
+            if replica_reads == 1:
+                return [{'properties': {'containers': [{'ready': True}]}}]
+            return healthy_replicas
+        if '--type' in args:
+            return system
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: None)
+    monkeypatch.setattr(evidence.time, 'sleep', lambda _seconds: None)
+    result = evidence.collect('sub', 'group', 'api-staging', 'old', timeout=20)
+    assert result['ok'] is True
+    assert replica_reads == 3  # incomplete initial read, then initial+final complete snapshot
+
+
+@pytest.mark.parametrize('container,reason', [
+    ({'ready': False, 'started': True, 'restartCount': 0}, 'container_not_ready'),
+    ({'ready': True, 'started': False, 'restartCount': 0}, 'container_not_ready'),
+    ({'ready': True, 'started': True, 'restartCount': 2}, 'container_restart'),
+    ({'ready': True, 'started': True, 'restartCount': False}, 'container_restart'),
+    ({'ready': True, 'started': True, 'restartCount': -1}, 'container_restart'),
+])
+def test_explicit_post_ready_container_failure_never_retries_to_later_healthy(
+        monkeypatch, container, reason):
+    row = app()
+    healthy_replicas, system, console = _complete_startup_reads(row)
+    replica_reads = 0
+
+    def read(_subscription, *args, **_kwargs):
+        nonlocal replica_reads
+        if args[1] == 'show':
+            return row
+        if args[1:3] == ('replica', 'list'):
+            replica_reads += 1
+            return ([{'properties': {'containers': [container]}}]
+                    if replica_reads == 1 else healthy_replicas)
+        if '--type' in args:
+            return system
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: None)
+    monkeypatch.setattr(evidence.time, 'sleep', lambda _seconds: pytest.fail('fatal evidence retried'))
+    with pytest.raises(evidence.StartupFailure) as caught:
+        evidence.collect('sub', 'group', 'api-staging', 'old', timeout=20)
+    assert caught.value.reason == reason
+    assert replica_reads == 1
+
+
+def test_main_artifact_records_only_allowlisted_fatal_reason(monkeypatch, tmp_path):
+    output = tmp_path / 'startup.json'
+
+    def fail(*_args, **_kwargs):
+        raise evidence.StartupFailure('container_restart')
+
+    monkeypatch.setattr(evidence, 'collect', fail)
+    assert evidence.main(['--subscription', 'sub', '--group', 'group', '--image', 'image',
+                          '--output', str(output), 'api-staging']) == 1
+    saved = json.loads(output.read_text())
+    assert saved['roles'] == [
+        {'app': 'api-staging', 'ok': False, 'reason': 'container_restart'}]
+    assert 'exception' not in output.read_text().lower()
+
+
 @pytest.mark.parametrize('blue_green,active_override', [('0', '0'), ('1', '0'), ('0', '1')])
 def test_real_shell_failure_gate_stops_both_rollout_paths(tmp_path, blue_green, active_override):
     script = (ROOT / 'deploy/public/redeploy.sh').read_text()
