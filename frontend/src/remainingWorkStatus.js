@@ -85,5 +85,12 @@ export function remainingWorkStatus({ events = [], rows = [], decisions = {}, sn
     else grouped.set(key, { ...notice })
   }
   const consolidated = [...grouped.values()].map(notice => notice.affectedDocuments ? { ...notice, responsibility: `${notice.affectedDocuments} documents affected. ${notice.responsibility}` } : notice)
+    .map(notice => ({ ...notice, presentation:
+      notice.tone === 'automatic'
+      || notice.population === 'status'
+      || ['missing-proposals', 'status-checks'].includes(notice.key)
+      || notice.label === 'AI usage confirmation pending'
+      || notice.label === 'AI generation needs checking'
+        ? 'detail' : 'action' }))
   return { notices: consolidated, checkpoint, recovery, stalled, counts, humanCounts, statusCounts, humanTotal: humanRows.length, statusTotal: statusRows.length }
 }

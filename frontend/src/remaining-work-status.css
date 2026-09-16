@@ -6,4 +6,11 @@
 .remaining-work-status .remaining-work-review, .remaining-work-status .remaining-work-waiting { border-left-color: var(--warn-fg, #986300); background: var(--warn-bg, #fff8e6); }
 .remaining-work-status .remaining-work-manual { border-left-color: var(--error-fg, #b13226); background: var(--error-bg, #fff4f3); }
 .remaining-work-stalled { color: var(--warn-fg, #986300); }
+.remaining-work-details { margin-top: 10px; border-top: 1px solid var(--border, #e6e0eb); padding-top: 8px; }
+.remaining-work-details > summary { cursor: pointer; font-size: 12.5px; font-weight: 650; color: var(--muted); }
+.remaining-work-details .remaining-work-status-groups { display: block; }
+.remaining-work-details .remaining-work-status-groups > details { margin-top: 5px; }
+.remaining-work-details .remaining-work-status-groups > details > summary { cursor: pointer; color: var(--muted); }
+.remaining-work-details .remaining-work-status-groups ul { margin: 6px 0 0; }
+.remaining-work-details .remaining-work-status-groups li { display: block; border-left: 0; background: transparent; padding: 6px 0; }
 @media (max-width: 650px) { .remaining-work-status li { grid-template-columns: 1fr; gap: 4px; } }

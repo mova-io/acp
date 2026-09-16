@@ -28,6 +28,13 @@ function primaryOutcome(model) {
   return `${model.domain?.accounted ?? model.accounted ?? '—'} of ${model.domain?.total ?? model.total ?? '—'} ${model.domain?.unit || model.unit}`
 }
 
+function unresolvedRemediation(snapshot) {
+  if (snapshot?.stage !== 'remediate') return false
+  const total = snapshot.domain_reconciliation?.total
+  const verified = snapshot.domain_reconciliation?.buckets?.resolved_verified
+  return Number.isSafeInteger(total) && Number.isSafeInteger(verified) && verified < total
+}
+
 /** The sole outer shell for all four workflow stages. Detail nodes stay mounted under `hidden`
  * so disclosure changes do not end live subscriptions or reset rolling heartbeat history. */
 export default function WorkflowStageStack({ lineage, onNavigate, receivedAt = null,
@@ -69,7 +76,9 @@ export default function WorkflowStageStack({ lineage, onNavigate, receivedAt = n
         const isCompleted = completed(displayState)
         // Only running work on its own tab opens automatically. Other tabs retain
         // live status in the collapsed header; users can still open details.
-        const defaultOpen = !defaultCollapsed && activeStage === stage && ['processing', 'running'].includes(displayState)
+        const unresolved = isCurrent && unresolvedRemediation(snapshot)
+        const defaultOpen = !defaultCollapsed && activeStage === stage
+          && (['processing', 'running'].includes(displayState) || unresolved)
         const overrideKey = `${stage}:${snapshot.execution_id}:${isCompleted ? 'complete' : terminal(displayState) ? 'stopped' : 'live'}`
         const open = overrides[overrideKey] ?? defaultOpen
         const detail = isCurrent ? stageDetails[stage] : null
@@ -97,6 +106,9 @@ export default function WorkflowStageStack({ lineage, onNavigate, receivedAt = n
               <span className="workflow-stage-stack__affordance" aria-hidden="true">{open ? '−' : '+'}</span>
             </button>
             <div id={bodyId} className="workflow-stage-stack__body" hidden={!open}>
+              {unresolved && isCompleted && <p role="status" className="workflow-stage-stack__remaining">
+                <b>Processing finished; unresolved work remains.</b> Verified fixes and remaining dispositions are shown separately below.
+              </p>}
               {detail && !(stage === 'remediate' && progressHostId) ? <div className="workflow-stage-stack__live-detail" data-detail-owner="current">{detail}</div>
                 : isCompleted && ['discover', 'assess'].includes(stage)
                   ? <CompletedStageDetails snapshot={snapshot} />
