@@ -1277,7 +1277,12 @@ def _lifecycle_drive_doc(doc_id: str | None, owner: str) -> dict | None:
     if ref is None:
         return None
     scan_id, file = ref
-    fid = core.store.drive_targets_for_files(scan_id, [file], owner).get(file)
+    item = core.store.lifecycle_source_item(scan_id, file, owner)
+    # drive_file_id is a shared inventory field: Graph adapters also put their item ids here.
+    # An opaque id alone must never authorize a Google Drive operation on another provider.
+    if not item or str(item.get("source") or "").lower() != "drive":
+        return None
+    fid = item.get("drive_file_id")
     return _drive_doc(fid, file) if fid else None
 
 
