@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import time
 
-from schema_preflight import connection_string
+from schema_preflight import azure, connection_string
 
 
 def wait_for_budget(dsn: str, ceiling: int, timeout: float = 120) -> int:
@@ -35,8 +35,16 @@ def main(argv=None) -> int:
     parser.add_argument('--app', required=True)
     parser.add_argument('--ceiling', type=int, required=True)
     args = parser.parse_args(argv)
-    dsn = connection_string({}, args.subscription, args.group, args.app)
-    count = wait_for_budget(dsn, args.ceiling)
+    try:
+        app = azure(args.subscription, 'containerapp', 'show', '-g', args.group,
+                    '-n', args.app)
+        dsn = connection_string(app, args.subscription, args.group, args.app)
+        count = wait_for_budget(dsn, args.ceiling)
+    except BaseException:
+        # Azure documents and secret values are untrusted configuration. Refuse
+        # without echoing an exception whose text could contain the DSN.
+        print('database session gate refused', flush=True)
+        return 1
     print(f"database client sessions fit quiesced envelope ({count}<={args.ceiling})")
     return 0
 

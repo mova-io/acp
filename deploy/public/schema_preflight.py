@@ -43,20 +43,43 @@ def azure(subscription, *args):
 
 
 def connection_string(app, subscription, group, name):
-    env = {entry['name']: entry for entry in named_container(app, name).get('env', [])}
-    entry = env.get('DATABASE_URL', {})
-    value = entry.get('value')
-    if entry.get('secretRef'):
-        secrets = azure(subscription, 'containerapp', 'secret', 'list', '-g', group,
-                        '-n', name, '--show-values')
-        value = next((s.get('value') for s in secrets if s['name'] == entry['secretRef']), None)
-    if not value:
-        raise PreflightRefused('postgresql_connection_required')
-    return value
+    try:
+        entries = named_container(app, name).get('env', [])
+        if not isinstance(entries, list) or any(not isinstance(entry, dict) or
+                                                not isinstance(entry.get('name'), str)
+                                                for entry in entries):
+            raise PreflightRefused('container_configuration_unreadable')
+        env = {entry['name']: entry for entry in entries}
+        entry = env.get('DATABASE_URL', {})
+        value = entry.get('value')
+        if entry.get('secretRef'):
+            secrets = azure(subscription, 'containerapp', 'secret', 'list', '-g', group,
+                            '-n', name, '--show-values')
+            if not isinstance(secrets, list) or any(not isinstance(secret, dict)
+                                                    for secret in secrets):
+                raise PreflightRefused('container_configuration_unreadable')
+            value = next((secret.get('value') for secret in secrets
+                          if secret.get('name') == entry['secretRef']), None)
+        if not isinstance(value, str) or not value:
+            raise PreflightRefused('postgresql_connection_required')
+        return value
+    except PreflightRefused:
+        raise
+    except (KeyError, TypeError, AttributeError):
+        raise PreflightRefused('container_configuration_unreadable') from None
 
 
 def named_container(app, name):
-    containers = app['properties']['template'].get('containers', [])
+    try:
+        properties = app.get('properties') if isinstance(app, dict) else None
+        template = properties.get('template') if isinstance(properties, dict) else None
+        containers = template.get('containers') if isinstance(template, dict) else None
+        if not isinstance(containers, list) or any(not isinstance(c, dict) for c in containers):
+            raise PreflightRefused('container_configuration_unreadable')
+    except PreflightRefused:
+        raise
+    except (TypeError, AttributeError):
+        raise PreflightRefused('container_configuration_unreadable') from None
     selected = [c for c in containers if c.get('name') == name]
     if len(selected) != 1:
         raise PreflightRefused('role_container_selection_refused')

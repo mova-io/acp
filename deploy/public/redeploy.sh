@@ -801,6 +801,39 @@ _require_empty_staging_queue() {
     || die "staging bootstrap requires an empty queue before any mutation; found $active active job(s)"
 }
 
+_capture_staging_recovery_state() {
+  local name=""
+  local index=""
+  STAGING_OLD_IMAGES=()
+  STAGING_OLD_MINS=()
+  STAGING_OLD_REVISIONS=()
+  STAGING_OLD_API_IMAGE="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" \
+    --query properties.template.containers[0].image -o tsv)"
+  STAGING_OLD_API_REVISION="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" \
+    --query properties.latestRevisionName -o tsv)"
+  [ -n "$STAGING_OLD_API_IMAGE" ] || die "could not capture the pre-rollout API image"
+  [ -n "$STAGING_OLD_API_REVISION" ] || die "could not capture the pre-rollout API revision"
+  for index in "${!LANE_WORKERS[@]}"; do
+    name="${LANE_WORKERS[$index]}"
+    STAGING_OLD_IMAGES[$index]="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
+      --query properties.template.containers[0].image -o tsv)"
+    STAGING_OLD_MINS[$index]="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
+      --query properties.template.scale.minReplicas -o tsv)"
+    STAGING_OLD_REVISIONS[$index]="$(az containerapp revision list "${AZ[@]}" -g "$RG" -n "$name" --all \
+      --query "[?properties.active==\`true\`].name | [0]" -o tsv)"
+    [ -n "${STAGING_OLD_IMAGES[$index]}" ] || die "could not capture $name's pre-rollout image"
+    [[ "${STAGING_OLD_MINS[$index]}" =~ ^[0-9]+$ ]] \
+      || die "could not capture $name's numeric pre-rollout minimum replicas"
+    [ -n "${STAGING_OLD_REVISIONS[$index]}" ] \
+      || die "could not resolve $name's pre-rollout active revision"
+  done
+}
+
+_arm_staging_recovery() {
+  STAGING_WORKERS_QUIESCED=1
+  trap _staging_bootstrap_exit EXIT
+}
+
 _quiesce_staging_workers() {
   local name=""
   local revision=""
@@ -816,33 +849,10 @@ _quiesce_staging_workers() {
   local index=""
   local -a candidate_revisions=()
   local -a candidate_args=()
-  STAGING_OLD_IMAGES=()
-  STAGING_OLD_MINS=()
-  STAGING_OLD_REVISIONS=()
-  STAGING_OLD_API_IMAGE="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" \
-    --query properties.template.containers[0].image -o tsv)"
-  STAGING_OLD_API_REVISION="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" \
-    --query properties.latestRevisionName -o tsv)"
-  [ -n "$STAGING_OLD_API_IMAGE" ] || die "could not capture the pre-bootstrap API image"
-  [ -n "$STAGING_OLD_API_REVISION" ] || die "could not capture the pre-bootstrap API revision"
   # Capture and validate the whole fleet before the first mutation. A partial
   # snapshot cannot restore a coherent old fleet if a later read fails.
-  for index in "${!LANE_WORKERS[@]}"; do
-    name="${LANE_WORKERS[$index]}"
-    STAGING_OLD_IMAGES[$index]="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
-      --query properties.template.containers[0].image -o tsv)"
-    STAGING_OLD_MINS[$index]="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
-      --query properties.template.scale.minReplicas -o tsv)"
-    STAGING_OLD_REVISIONS[$index]="$(az containerapp revision list "${AZ[@]}" -g "$RG" -n "$name" --all \
-      --query "[?properties.active==\`true\`].name | [0]" -o tsv)"
-    [ -n "${STAGING_OLD_IMAGES[$index]}" ] || die "could not capture $name's pre-bootstrap image"
-    [[ "${STAGING_OLD_MINS[$index]}" =~ ^[0-9]+$ ]] \
-      || die "could not capture $name's numeric pre-bootstrap minimum replicas"
-    [ -n "${STAGING_OLD_REVISIONS[$index]}" ] \
-      || die "could not resolve $name's pre-update active revision"
-  done
-  STAGING_WORKERS_QUIESCED=1
-  trap _staging_bootstrap_exit EXIT
+  _capture_staging_recovery_state
+  _arm_staging_recovery
   for index in "${!LANE_WORKERS[@]}"; do
     name="${LANE_WORKERS[$index]}"
     revision="${STAGING_OLD_REVISIONS[$index]}"
@@ -939,6 +949,8 @@ _prepare_schema_for_rollout() {
     # schema-before-image ordering, then normalize revision mode for rollout.
     _schema_preflight
     _ensure_single_revision_mode
+    _capture_staging_recovery_state
+    _arm_staging_recovery
     return
   fi
   # Production retains the original invariant: schema verification completes

@@ -189,6 +189,155 @@ def test_durable_failed_process_receipt_cannot_be_hidden_by_recovered_process():
     assert not result['ok'] and result['events'] == [durable]
 
 
+def _complete_startup_reads(row, *, restart=0):
+    replicas = [{'properties': {'containers': [
+        {'ready': True, 'started': True, 'restartCount': restart}]}}]
+    system = [{'RevisionName': 'new', 'Reason': 'ContainerStarted',
+               'Msg': 'started', 'TimeStamp': 'now', 'Count': 1}]
+    console = [
+        {'Log': '{"event":"schema.boot","state":"completed","version":57}',
+         'TimeStamp': 'now'},
+        {'Log': '{"event":"startup.phase","phase":"workers_start","state":"completed"}',
+         'TimeStamp': 'now'},
+    ]
+    return replicas, system, console
+
+
+def test_complete_post_ready_snapshot_retries_when_logs_arrive_late(monkeypatch):
+    row = app()
+    replicas, system, console = _complete_startup_reads(row)
+    system_reads = 0
+
+    def read(_subscription, *args, **_kwargs):
+        nonlocal system_reads
+        if args[1] == 'show':
+            return row
+        if args[1:3] == ('replica', 'list'):
+            return replicas
+        if '--type' in args:
+            system_reads += 1
+            if system_reads == 1:
+                raise RuntimeError('logs not indexed yet')
+            return system
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: None)
+    monkeypatch.setattr(evidence.time, 'sleep', lambda _seconds: None)
+    result = evidence.collect('sub', 'group', 'api-staging', 'old', timeout=20)
+    assert result['ok'] is True and system_reads == 2
+
+
+def test_permanently_missing_post_ready_logs_exhaust_one_deadline(monkeypatch):
+    row = app()
+    replicas, _, console = _complete_startup_reads(row)
+    clock = [0.0]
+
+    def read(_subscription, *args, **_kwargs):
+        if args[1] == 'show':
+            return row
+        if args[1:3] == ('replica', 'list'):
+            return replicas
+        if '--type' in args:
+            raise RuntimeError('logs unavailable')
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: None)
+    monkeypatch.setattr(evidence.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(evidence.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    with pytest.raises(RuntimeError, match='within observation budget'):
+        evidence.collect('sub', 'group', 'api-staging', 'old', timeout=6)
+    assert clock[0] == 6
+
+
+@pytest.mark.parametrize('failure', ['restart', 'durable'])
+def test_proved_startup_failure_is_never_retried_into_success(monkeypatch, failure):
+    row = app()
+    replicas, system, console = _complete_startup_reads(
+        row, restart=1 if failure == 'restart' else 0)
+    reads = 0
+
+    def read(_subscription, *args, **_kwargs):
+        nonlocal reads
+        reads += 1
+        if args[1] == 'show':
+            return row
+        if args[1:3] == ('replica', 'list'):
+            return replicas
+        if '--type' in args:
+            return system
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    durable = ({'reason': 'startup.failure', 'state': 'failed', 'phase': 'workers_start',
+                'error_type': 'RuntimeError', 'sqlstate': None}
+               if failure == 'durable' else None)
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: durable)
+    monkeypatch.setattr(evidence.time, 'sleep', lambda _seconds: pytest.fail('fatal evidence retried'))
+    with pytest.raises(evidence.StartupFailure):
+        evidence.collect('sub', 'group', 'api-staging', 'old', timeout=20)
+    assert reads == (2 if failure == 'restart' else 6)
+
+
+@pytest.mark.parametrize('source', ['replica', 'system', 'console', 'durable'])
+def test_each_fatal_source_is_latched_before_a_later_transient_read(monkeypatch, source):
+    row = app()
+    healthy_replicas, healthy_system, healthy_console = _complete_startup_reads(row)
+    state = {'fatal_returned': False, 'transient_sent': False, 'durable_calls': 0}
+
+    def maybe_transient():
+        if state['fatal_returned'] and not state['transient_sent']:
+            state['transient_sent'] = True
+            raise RuntimeError('later Azure read was transient')
+
+    def read(_subscription, *args, **_kwargs):
+        maybe_transient()
+        if args[1] == 'show':
+            return row
+        if args[1:3] == ('replica', 'list'):
+            if source == 'replica' and not state['fatal_returned']:
+                state['fatal_returned'] = True
+                return [{'properties': {'containers': [
+                    {'ready': True, 'started': True, 'restartCount': 1}]}}]
+            return healthy_replicas
+        if '--type' in args:
+            if source == 'system' and not state['fatal_returned']:
+                state['fatal_returned'] = True
+                return [{'RevisionName': 'new', 'Reason': 'ContainerTerminated',
+                         'Msg': "exit code '1'", 'TimeStamp': 'now'}]
+            return healthy_system
+        if args[1:3] == ('logs', 'show'):
+            if source == 'console' and not state['fatal_returned']:
+                state['fatal_returned'] = True
+                return [{'Log': '{"event":"startup.phase","phase":"workers_start","state":"failed"}',
+                         'TimeStamp': 'now'}]
+            return healthy_console
+        raise AssertionError(args)
+
+    def durable(*_args):
+        state['durable_calls'] += 1
+        if source == 'durable' and not state['fatal_returned']:
+            state['fatal_returned'] = True
+            return {'reason': 'startup.failure', 'state': 'failed', 'phase': 'workers_start',
+                    'error_type': 'RuntimeError', 'sqlstate': None}
+        return None
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', durable)
+    monkeypatch.setattr(evidence.time, 'sleep', lambda _seconds: None)
+    with pytest.raises(evidence.StartupFailure):
+        evidence.collect('sub', 'group', 'api-staging', 'old', timeout=20)
+    assert state['fatal_returned'] is True
+    assert state['transient_sent'] is False
+
+
 @pytest.mark.parametrize('blue_green,active_override', [('0', '0'), ('1', '0'), ('0', '1')])
 def test_real_shell_failure_gate_stops_both_rollout_paths(tmp_path, blue_green, active_override):
     script = (ROOT / 'deploy/public/redeploy.sh').read_text()

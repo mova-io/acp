@@ -13,14 +13,23 @@ import time
 
 STARTUP_PHASES = {'scheduler_reload', 'scheduler_start', 'capacity_reconcile_start',
                   'workers_start', 'worker_reporter_start'}
+OBSERVATION_SECONDS = 120
 
 
-def read(subscription, *args, lines=False):
+class StartupFailure(RuntimeError):
+    """A proved process failure that retries must never turn into success."""
+
+
+def read(subscription, *args, lines=False, deadline=None):
     """Retry Azure's eventually consistent read endpoints within a small budget."""
     for attempt in range(3):
+        remaining = 30 if deadline is None else deadline - time.monotonic()
+        if remaining <= 0:
+            break
         result = subprocess.run(['az', *args, '--subscription', subscription,
                                  '--only-show-errors', '-o', 'json'],
-                                capture_output=True, text=True, timeout=30)
+                                capture_output=True, text=True,
+                                timeout=max(.1, min(30, remaining)))
         if not result.returncode:
             if lines:
                 rows = []
@@ -35,7 +44,11 @@ def read(subscription, *args, lines=False):
             except ValueError:
                 pass
         if attempt < 2:
-            time.sleep(2 ** attempt)
+            delay = 2 ** attempt
+            if deadline is not None:
+                delay = min(delay, max(0, deadline - time.monotonic()))
+            if delay:
+                time.sleep(delay)
     raise RuntimeError('startup evidence unavailable')
 
 
@@ -123,31 +136,100 @@ def receipt(app, replicas, system, console, image, durable=None):
             'phase_history_complete': False}  # No claim to recover deleted prior-container stderr.
 
 
-def collect(subscription, group, name, image):
-    deadline = time.monotonic() + 120
+def _fatal(receipt_row):
+    return (any(container.get('restart_count', 0) not in (0, None)
+                for container in receipt_row.get('containers', []))
+            or any(event.get('reason') == 'ContainerTerminated'
+                   or event.get('liveness_restart')
+                   or event.get('state') == 'failed'
+                   for event in receipt_row.get('events', [])))
+
+
+def _fatal_events(events):
+    return any(event.get('reason') == 'ContainerTerminated'
+               or event.get('liveness_restart')
+               or event.get('state') == 'failed' for event in events)
+
+
+def _post_ready_containers(replicas):
+    rows = [container for replica in replicas
+            for container in replica.get('properties', {}).get('containers', [])]
+    if not rows:
+        return False
+    if any(container.get('ready') is not True
+           or container.get('started') is not True
+           or type(container.get('restartCount')) is not int
+           or container.get('restartCount') != 0 for container in rows):
+        raise StartupFailure('post-ready container startup failure observed')
+    return True
+
+
+def _logs_complete(receipt_row):
+    events = receipt_row.get('events', [])
+    return (any(event.get('reason') == 'ContainerStarted' for event in events)
+            and any(event.get('reason') == 'schema.boot'
+                    and event.get('state') == 'completed' for event in events)
+            and any(event.get('reason') == 'startup.phase'
+                    and event.get('state') == 'completed' for event in events))
+
+
+def collect(subscription, group, name, image, *, timeout=OBSERVATION_SECONDS):
+    deadline = time.monotonic() + timeout
+    revision = None
     while True:
-        app = read(subscription, 'containerapp', 'show', '-g', group, '-n', name)
-        revision = app['properties']['latestRevisionName']
-        replicas = read(subscription, 'containerapp', 'replica', 'list', '-g', group,
-                        '-n', name, '--revision', revision)
-        if (app['properties'].get('latestReadyRevisionName') == revision
-                and replicas and all(c.get('ready') for r in replicas
-                                     for c in r.get('properties', {}).get('containers', []))):
-            break
-        if time.monotonic() >= deadline:
-            raise RuntimeError('startup did not become ready within observation budget')
-        time.sleep(min(5, max(0, deadline - time.monotonic())))
-    system = read(subscription, 'containerapp', 'logs', 'show', '-g', group, '-n', name,
-                  '--type', 'system', '--tail', '300', '--format', 'json', lines=True)
-    console = read(subscription, 'containerapp', 'logs', 'show', '-g', group, '-n', name,
-                   '--revision', revision, '--tail', '100', '--format', 'json', lines=True)
-    final = read(subscription, 'containerapp', 'show', '-g', group, '-n', name)
-    if final['properties']['latestRevisionName'] != revision:
-        raise RuntimeError('startup target revision changed during observation')
-    replicas = read(subscription, 'containerapp', 'replica', 'list', '-g', group,
-                    '-n', name, '--revision', revision)
-    persisted = durable_failure(final, subscription, group, name, revision)
-    return receipt(final, replicas, system, console, image, persisted)
+        try:
+            app = read(subscription, 'containerapp', 'show', '-g', group, '-n', name,
+                       deadline=deadline)
+            current = app['properties']['latestRevisionName']
+            if revision is None:
+                revision = current
+            elif current != revision:
+                raise StartupFailure('startup target revision changed during observation')
+            replicas = read(subscription, 'containerapp', 'replica', 'list', '-g', group,
+                            '-n', name, '--revision', revision, deadline=deadline)
+            post_ready = app['properties'].get('latestReadyRevisionName') == revision
+            containers_complete = _post_ready_containers(replicas) if post_ready else False
+            ready = post_ready and containers_complete
+            if ready:
+                system = read(subscription, 'containerapp', 'logs', 'show', '-g', group,
+                              '-n', name, '--type', 'system', '--tail', '300',
+                              '--format', 'json', lines=True, deadline=deadline)
+                if _fatal_events(sanitized_events(system, [], revision)):
+                    raise StartupFailure('system startup failure evidence observed')
+                console = read(subscription, 'containerapp', 'logs', 'show', '-g', group,
+                               '-n', name, '--revision', revision, '--tail', '100',
+                               '--format', 'json', lines=True, deadline=deadline)
+                if _fatal_events(sanitized_events([], console, revision)):
+                    raise StartupFailure('console startup failure evidence observed')
+                final = read(subscription, 'containerapp', 'show', '-g', group, '-n', name,
+                             deadline=deadline)
+                if final['properties']['latestRevisionName'] != revision:
+                    raise StartupFailure('startup target revision changed during observation')
+                replicas = read(subscription, 'containerapp', 'replica', 'list', '-g', group,
+                                '-n', name, '--revision', revision, deadline=deadline)
+                # This revision was already observed post-ready above. A later
+                # control-plane wobble cannot downgrade bad container evidence
+                # back into a retryable pre-ready state.
+                _post_ready_containers(replicas)
+                persisted = durable_failure(final, subscription, group, name, revision)
+                if persisted is not None and _fatal_events([persisted]):
+                    raise StartupFailure('durable startup failure evidence observed')
+                result = receipt(final, replicas, system, console, image, persisted)
+                if _fatal(result):
+                    raise StartupFailure('startup failure evidence observed')
+                if result['ok'] and _logs_complete(result):
+                    return result
+        except StartupFailure:
+            raise
+        except Exception:
+            # Azure log/control-plane reads and an absent durable receipt can
+            # lag a ready revision. Retry the complete snapshot under one
+            # deadline; no partial observation authorizes success.
+            pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError('startup evidence unavailable within observation budget')
+        time.sleep(min(5, remaining))
 
 
 def main(argv=None):
