@@ -438,9 +438,22 @@ it('keeps a new-release permission failure out of saved-destination recovery', a
   const c = await mount({ run: { ...run, source: 'sharepoint' }, files: [verified('ready.pdf')] })
   publishAllFiles.mockRejectedValueOnce(Object.assign(new Error('[object Object]'), { status: 409, detail: { code: 'release_destination_not_ready', preflight: { message: 'Folder permission denied' } } }))
   await click(button(c, 'Publish batch (1)'))
-  expect(c.textContent).toContain('Folder permission denied')
+  expect(c.textContent).toContain('release service did not complete the request')
+  expect(c.textContent).not.toContain('Folder permission denied')
   expect(c.textContent).not.toContain('Refresh the saved release destination')
   expect(button(c, 'Publish batch (1)').disabled).toBe(false)
+})
+it('does not expose or blindly retry a missing saved destination', async () => {
+  const c = await mount({ run: { ...run, source: 'sharepoint' }, files: [verified('ready.pdf')] })
+  const raw = "HTTPStatusError: 404 Not Found https://graph.microsoft.com/v1.0/drives/b!sensitive/items/01secret"
+  publishAllFiles.mockRejectedValueOnce(Object.assign(new Error(raw), { status: 404 }))
+  await click(button(c, 'Publish batch (1)'))
+  const recovery = c.querySelector('.release-recovery')
+  expect(recovery.textContent).toMatch(/moved or deleted/i)
+  expect(recovery.textContent).toContain('destination_not_found')
+  expect(recovery.textContent).not.toMatch(/graph\.microsoft\.com|b!sensitive|01secret|HTTPStatusError/)
+  expect(button(recovery, 'Retry')).toBeUndefined()
+  expect(publishAllFiles).toHaveBeenCalledTimes(1)
 })
 it('shows completion if the background release already delivered the requested copies', async () => {
   const c = await mount({ run: { ...run, source: 'sharepoint' }, files: [verified('ready.pdf')] })
