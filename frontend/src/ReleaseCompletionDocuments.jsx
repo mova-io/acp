@@ -20,6 +20,11 @@ export default function ReleaseCompletionDocuments({ files = [], states = [], pr
     && (publication === 'all' || state.status === publication)
     && (verification === 'all' || verificationState.key === verification))
   const statuses = [...new Set(rows.map(({ state }) => state.status))]
+  const rowHasAction = ({ file, state, result }) => Boolean(
+    (state.status === 'released' && (urls[file.file] || result?.published_url))
+    || (!coveredFiles.includes(file.file) && result?.status === 'failed' && ['ready', 'failed'].includes(state.status))
+    || reportsByFile[file.file])
+  const showActions = visible.some(rowHasAction)
   const filtered = format !== 'all' || search || publication !== 'all' || verification !== 'all' || filter !== 'all'
   const clear = () => { setFormat('all'); setSearch(''); setPublication('all'); setVerification('all'); if (filter !== 'all') onFilter?.('all') }
   return <section className="panel release-completion-documents" aria-label="Publication outcomes" data-scope-id={scopeId} data-snapshot-revision={revision}>
@@ -33,14 +38,15 @@ export default function ReleaseCompletionDocuments({ files = [], states = [], pr
       {filtered && <button className="ghost" onClick={clear}>Clear filters</button>}
     </div>
     <p className="release-documents-count" role="status">{visible.length} of {rows.length} documents shown{filter !== 'all' ? ' · Selected file queue' : ''}</p>
-    <div className="release-documents-scroll" role="region" aria-label="Publication documents" tabIndex={0}><table><thead><tr><th scope="col">Document</th><th scope="col">Corrected copy</th><th scope="col">Saved-copy verification</th><th scope="col">Publication and remaining work</th><th scope="col">Action</th></tr></thead>
+    <div className="release-documents-scroll" role="region" aria-label="Publication documents" tabIndex={0}><table><thead><tr><th scope="col">Document</th><th scope="col">Corrected copy</th><th scope="col">Saved-copy verification</th><th scope="col">Publication and remaining work</th>{showActions && <th scope="col" className="release-documents-action">Action</th>}</tr></thead>
       <tbody>{visible.map(({ file, state, result, verificationState }) => <tr key={file.file}>
         <th scope="row">{file.file}</th>
         <td>{file.remediated_at ? 'Saved in ACP' : 'Not saved yet'}</td>
         <td>{verificationState.label}<small style={{ display: 'block', marginTop: 6 }}>{verificationState.reason}</small></td>
         <td><strong>{state.label}</strong><p>{state.reason}</p>{result?.published_at && <small>Receipt recorded: {new Date(result.published_at).toLocaleString()}</small>}</td>
-        <td>{state.status === 'released' && (urls[file.file] || result?.published_url) ? <a href={urls[file.file] || result.published_url} target="_blank" rel="noopener noreferrer">Open published copy</a>
+        {showActions && <td className="release-documents-action">{state.status === 'released' && (urls[file.file] || result?.published_url) ? <a href={urls[file.file] || result.published_url} target="_blank" rel="noopener noreferrer">Open published copy</a>
           : !coveredFiles.includes(file.file) && result?.status === 'failed' && ['ready', 'failed'].includes(state.status) ? <button disabled={readOnly || publishing} onClick={() => onRetry([file.file])}>Retry delivery</button> : null}{reportsByFile[file.file]}</td>
+        }
       </tr>)}</tbody>
     </table></div>
     {!visible.length && <p>{rows.length ? 'No documents match these filters.' : 'No documents to show yet.'}</p>}

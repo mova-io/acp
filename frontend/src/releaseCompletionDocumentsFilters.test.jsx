@@ -1,4 +1,6 @@
 import { act, createElement } from 'react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { createTestRoot, unmountAll } from './testRoots.js'
 import Documents from './ReleaseCompletionDocuments.jsx'
@@ -61,6 +63,30 @@ it('retains published copy and retry actions while report introduction remains a
   expect(region.tabIndex).toBe(0)
   expect(region.className).toBe('release-documents-scroll')
   expect(region.querySelectorAll('thead th[scope="col"]')).toHaveLength(5)
+  expect(region.querySelector('thead .release-documents-action').textContent).toBe('Action')
+  expect(region.querySelectorAll('tbody .release-documents-action')).toHaveLength(3)
+})
+it('omits the action column when visible rows have no supported per-file action',async()=>{
+  const readyFiles=Array.from({length:3},(_,index)=>({file:`ready-${index}.docx`,remediated_at:'now',compliant:true}))
+  const readyStates=readyFiles.map(()=>({status:'ready',label:'Ready to publish',reason:'Use the publication batch controls'}))
+  const {container:c}=await mount({files:readyFiles,states:readyStates})
+  expect([...c.querySelectorAll('thead th')].map(cell=>cell.textContent)).toEqual([
+    'Document','Corrected copy','Saved-copy verification','Publication and remaining work'])
+  expect(c.querySelectorAll('tbody tr')[0].children).toHaveLength(4)
+  expect(c.textContent).not.toContain('Action')
+})
+it('shows the column for a mixed visible set and hides it when filtering to rows without actions',async()=>{
+  const {container:c}=await mount({urls:{'Alpha.docx':'https://example.com/copy'}})
+  expect(c.querySelector('thead .release-documents-action')).not.toBeNull()
+  await change(c.querySelector('input'),'Gamma')
+  expect(c.querySelector('thead .release-documents-action')).toBeNull()
+  expect(c.querySelector('tbody tr').children).toHaveLength(4)
+})
+it('keeps the action header readable in horizontally scrollable narrow layouts',()=>{
+  const releaseDocumentsCss=readFileSync(resolve(process.cwd(),'src/release-completion-documents.css'),'utf8')
+  expect(releaseDocumentsCss).toMatch(/release-documents-action[^}]*min-width:\s*9rem/)
+  expect(releaseDocumentsCss).toMatch(/release-documents-action[^}]*white-space:\s*nowrap/)
+  expect(releaseDocumentsCss).toMatch(/release-documents-scroll[^}]*overflow:\s*auto/)
 })
 it('shows honest verification and an initial empty state',async()=>{
   const {root,container:c}=await mount()

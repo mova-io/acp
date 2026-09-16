@@ -16,6 +16,7 @@
 .release-completion-documents th,.release-completion-documents td { padding:12px; text-align:left; vertical-align:top; border-bottom:1px solid var(--line); overflow-wrap:anywhere; }
 .release-completion-documents td p { margin:4px 0; color:var(--muted); font-size:13px; }
 .release-completion-documents tbody th { max-width:280px; }
+.release-completion-documents .release-documents-action { min-width:9rem; width:1%; white-space:nowrap; overflow-wrap:normal; }
 .release-file-reports { display:grid; gap:6px; padding-left:16px; margin:10px 0 0; font-size:12px; }
 .release-file-reports button { font:inherit; }
 
