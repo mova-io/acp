@@ -114,10 +114,10 @@ jobs:
           for ATTEMPT in 1 2 3 4 5; do
             RUN_ID="$(gh run list --commit "$TOOLING_SHA" --workflow CI --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
             [ -n "$RUN_ID" ] && break
-            [ "$ATTEMPT" = 5 ] || sleep 15
+            [ "$ATTEMPT" = 5 ] || sleep 60
           done
           [ -n "$RUN_ID" ] || { echo "::error::No CI run for exact deployment tooling commit"; exit 1; }
-          gh run watch "$RUN_ID" --exit-status
+          gh run watch "$RUN_ID" --interval 60 --exit-status
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -173,12 +173,13 @@ jobs:
 
       - name: Confirm staging reports the new build
         env:
-          ACP_EXPECTED_PIN: ${{ github.event.workflow_run.head_sha || inputs.pin }}
+          ACP_EXPECTED_PIN: ${{ steps.staging_deploy.outputs.staging_pin }}
         if: steps.staging_deploy.outputs.staging_deployed == 'true'
         run: |
           set -euo pipefail
           FQDN="${{ vars.STAGING_FQDN }}"
-          EXPECTED="$(git rev-parse --verify "${ACP_EXPECTED_PIN:-origin/main}^{commit}")"
+          EXPECTED="$ACP_EXPECTED_PIN"
+          [[ "$EXPECTED" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Missing resolved deployment pin"; exit 1; }
           H="$(curl -fsS --max-time 20 "https://$FQDN/healthz")"
           R="$(curl -fsS --max-time 20 "https://$FQDN/readyz")"
           python3 -c 'import json,sys; h=json.load(sys.stdin); assert h.get("commit") == sys.argv[1], "staging commit differs from requested pin"' "$EXPECTED" <<<"$H"

@@ -80,7 +80,7 @@ def test_tooling_ci_is_separate_and_has_no_manual_or_skip_exemption():
     workflow=(ROOT/'.github/workflows/deploy-staging.yml').read_text()
     block=workflow.split('      - name: Verify deployment tooling CI',1)[1].split('      - uses: actions/setup-dotnet',1)[0]
     assert 'TOOLING_SHA: ${{ github.workflow_sha }}' in block
-    assert 'gh run watch "$RUN_ID" --exit-status' in block
+    assert 'gh run watch "$RUN_ID" --interval 60 --exit-status' in block
     assert '--commit "$TOOLING_SHA"' in block
     assert 'skip_ci_gate' not in block and 'allow_rollback' not in block
     assert workflow.index('Verify deployment tooling CI') < workflow.index('Azure login (OIDC)')
@@ -100,3 +100,25 @@ def test_actual_tooling_gate_rejects_failed_ci(history,tmp_path,ci_exit):
     result=subprocess.run(['bash','-c',run+'\necho DEPLOY_REACHED\n'],cwd=repo,env=env,text=True,capture_output=True)
     assert result.returncode==ci_exit,result.stderr
     assert ('DEPLOY_REACHED' in result.stdout)==(ci_exit==0)
+
+
+def test_confirmation_uses_resolved_pin_even_if_branch_moves(history):
+    repo,old,new,_=history
+    subprocess.run(['git','-C',repo,'branch','deploy-ref',old],check=True)
+    frozen=subprocess.check_output(['git','-C',repo,'rev-parse','deploy-ref'],text=True).strip()
+    subprocess.run(['git','-C',repo,'branch','-f','deploy-ref',new],check=True)
+    assert subprocess.check_output(['git','-C',repo,'rev-parse','deploy-ref'],text=True).strip()!=frozen
+    workflow=(ROOT/'.github/workflows/deploy-staging.yml').read_text()
+    confirm=workflow.split('      - name: Confirm staging reports the new build',1)[1]
+    assert 'ACP_EXPECTED_PIN: ${{ steps.staging_deploy.outputs.staging_pin }}' in confirm
+    assert 'git rev-parse' not in confirm
+    script=(ROOT/'deploy/public/redeploy.sh').read_text()
+    assert 'echo "staging_pin=$PIN"' in script
+
+
+def test_rollback_rejects_ci_bypass_before_authorization():
+    script=(ROOT/'deploy/public/redeploy.sh').read_text()
+    block=script.split('  if [ "${ACP_STAGING_ALLOW_ROLLBACK:-0}" = 1 ]; then',1)[1].split('  fi',1)[0]
+    result=subprocess.run(['bash','-c','set -eu; die(){ echo "$*" >&2; exit 1; }; '+block],env={'ACP_PIN':'a'*40,'ACP_SKIP_CI_GATE':'1'},text=True,capture_output=True)
+    assert result.returncode==1
+    assert 'cannot bypass image CI' in result.stderr

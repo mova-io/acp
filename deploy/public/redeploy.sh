@@ -166,6 +166,7 @@ if [ "$DEPLOY_TARGET_ENV" = staging ] && [ -n "${ACP_STAGING_DEPLOY_MODE:-}" ]; 
   GUARD_ARGS=(--repo "$SRC_ROOT" --pin "$PIN" --mode "$ACP_STAGING_DEPLOY_MODE")
   if [ "${ACP_STAGING_ALLOW_ROLLBACK:-0}" = 1 ]; then
     [ -n "${ACP_PIN:-}" ] || die "manual rollback/recovery requires an explicit pin"
+    [ "${ACP_SKIP_CI_GATE:-0}" != 1 ] || die "manual rollback/recovery cannot bypass image CI"
     GUARD_ARGS+=(--rollback)
   fi
   GUARD_DECISION="$(python3 "$SRC_ROOT/deploy/public/staging_pin_guard.py" "${GUARD_ARGS[@]}" <<<"$GUARD_HEALTH")" \
@@ -175,7 +176,10 @@ if [ "$DEPLOY_TARGET_ENV" = staging ] && [ -n "${ACP_STAGING_DEPLOY_MODE:-}" ]; 
     [ -z "${GITHUB_OUTPUT:-}" ] || echo 'staging_deployed=false' >> "$GITHUB_OUTPUT"
     exit 0
   fi
-  [ -z "${GITHUB_OUTPUT:-}" ] || echo 'staging_deployed=true' >> "$GITHUB_OUTPUT"
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then
+    echo 'staging_deployed=true' >> "$GITHUB_OUTPUT"
+    echo "staging_pin=$PIN" >> "$GITHUB_OUTPUT"
+  fi
 fi
 
 # The CI gate, ENFORCED rather than described. This step's own comment has always said "check CI
