@@ -159,7 +159,7 @@ def test_postgres_v57_to_v58_preserves_existing_rows_and_records_checksum(monkey
     with migrated.cursor() as cur:
         migrated.execute(cur, "SELECT value FROM app_settings WHERE key='chunk-migration-sentinel'")
         assert migrated.fetchone(cur)['value'] == 'preserve'
-        migrated.execute(cur, 'SELECT version,checksum FROM acp_schema_version')
+        migrated.execute(cur, 'SELECT version,checksum FROM acp_schema_version ORDER BY version DESC LIMIT 1')
         marker = migrated.fetchone(cur)
         assert marker == {'version':58,'checksum':store_mod._PgAdapter._SCHEMA_CHECKSUM_AT_VERSION}
         migrated.execute(cur, "SELECT to_regclass('public.document_wide_chunk_plans') AS plans,to_regclass('public.document_wide_chunks') AS chunks")
