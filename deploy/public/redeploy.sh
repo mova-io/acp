@@ -78,6 +78,21 @@ source "$(cd "$(dirname "$0")" && pwd)/readiness_probe.sh"
 say() { printf '\n\033[1m▸ %s\033[0m\n' "$*"; }
 die() { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
+# A resource group can contain several Container Apps environments. The revision hostname must
+# use THIS app's environment; taking env-list[0] sent a production green smoke test to staging's
+# domain and left a healthy green revision unpromoted. Follow the app's exact resource ID so list
+# ordering can never cross that boundary.
+app_environment_domain() {
+  local environment_id domain
+  environment_id="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" \
+    --query properties.managedEnvironmentId -o tsv)"
+  [ -n "$environment_id" ] || die "cannot resolve $APP's Container Apps environment"
+  domain="$(az containerapp env show "${AZ[@]}" --ids "$environment_id" \
+    --query properties.defaultDomain -o tsv)"
+  [ -n "$domain" ] || die "cannot resolve $APP's Container Apps environment domain"
+  printf '%s' "$domain"
+}
+
 # Names are an isolation boundary. Staging once passed retired ACP_WORKER while this script read
 # the three lane variables, so all three silently fell back to PRODUCTION names. Refuse that
 # class of mistake before subscription reads, builds, queue probes, or Container App mutations.
@@ -394,7 +409,7 @@ if [ "$DRY" = 1 ]; then
   # moves production traffic — as the only part nobody ever rehearses. So walk it here using
   # READS ONLY, and print the revisions it would actually touch, resolved live.
   if [ "$BG" = 1 ]; then
-    ENV_DOMAIN="$(az containerapp env list "${AZ[@]}" -g "$RG" --query '[0].properties.defaultDomain' -o tsv)"
+    ENV_DOMAIN="$(app_environment_domain)"
     MODE="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" --query properties.configuration.activeRevisionsMode -o tsv)"
     BLUE="$(az containerapp ingress traffic show "${AZ[@]}" -g "$RG" -n "$APP" \
               --query "[?weight>\`0\`] | [0].revisionName" -o tsv 2>/dev/null || true)"
@@ -545,7 +560,7 @@ _verify_startup() {
 _prepare_remediation_worker_patch
 
 if [ "$BG" = 1 ]; then
-  ENV_DOMAIN="$(az containerapp env list "${AZ[@]}" -g "$RG" --query '[0].properties.defaultDomain' -o tsv)"
+  ENV_DOMAIN="$(app_environment_domain)"
 
   # Multiple-revision mode, idempotently. Switching Single -> Multiple leaves the running revision
   # on 100%, so it is safe against a live app, and it is a no-op once set.
