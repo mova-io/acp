@@ -388,8 +388,9 @@ def exhausted_tick(store, job, *, worker_id, attempt):
             reference = store._db.fetchone(cur)
         if not reference:
             return False
-        row = get(store, reference['owner_email'], reference['occurrence_key'], lock=True)
         claim = {**job, 'locked_by': worker_id, 'attempts': attempt}
+        _held(store, claim)  # Match handoff's job-before-occurrence lock order.
+        row = get(store, reference['owner_email'], reference['occurrence_key'], lock=True)
         finish(store, row, claim, result='failed', error='scheduled_tick_attempts_exhausted')
         with store._db.cursor() as cur:
             store._db.execute(cur, "UPDATE jobs SET status='dead',last_error=%s WHERE id=%s "
