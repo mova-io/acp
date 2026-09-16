@@ -1919,8 +1919,10 @@ from ai_review_chain import SCHEMA as _AI_REVIEW_SCHEMA
 from remediation_run_insights import SCHEMA as _AI_PROPOSAL_SNAPSHOT_SCHEMA
 from remediation_contribution import SCHEMA as _CONTRIBUTION_SCHEMA
 from automatic_release_store import SCHEMA as _AUTOMATIC_RELEASE_SCHEMA
+from document_wide_chunk_store import SCHEMA as _DOCUMENT_WIDE_CHUNK_SCHEMA
 _SCHEMA.extend([*_AI_SPENDING_SCHEMA, _AI_RUN_POLICY_SCHEMA,
-                *_AI_ATTEMPT_HISTORY_SCHEMA, *_AI_LOCAL_ACTIVITY_SCHEMA, *_AI_REVIEW_SCHEMA, *_AI_PROPOSAL_SNAPSHOT_SCHEMA, *_CONTRIBUTION_SCHEMA, *_AUTOMATIC_RELEASE_SCHEMA])
+                *_AI_ATTEMPT_HISTORY_SCHEMA, *_AI_LOCAL_ACTIVITY_SCHEMA, *_AI_REVIEW_SCHEMA, *_AI_PROPOSAL_SNAPSHOT_SCHEMA, *_CONTRIBUTION_SCHEMA, *_AUTOMATIC_RELEASE_SCHEMA,
+                *_DOCUMENT_WIDE_CHUNK_SCHEMA])
 
 # v56 adds bounded scheduled execution to the existing occurrence ledger.
 from scheduled_scan_store import SCHEMA as _SCHEDULED_EXECUTION_SCHEMA
@@ -2529,8 +2531,10 @@ class _PgAdapter:
     # under version 56. Keeping the same number makes the deployment preflight correctly refuse
     # the checksum collision but leaves no additive migration path. Advancing the marker lets the
     # idempotent union DDL fill the missing columns and records one unambiguous schema identity.
-    _SCHEMA_VERSION = 57
-    _SCHEMA_CHECKSUM_AT_VERSION = "4a3338134fdc573bcaa2062935c2711d"
+    # v58 adds feature-disabled immutable document-wide chunk plans and child
+    # receipt slots. No dispatch path reads these tables.
+    _SCHEMA_VERSION = 58
+    _SCHEMA_CHECKSUM_AT_VERSION = "bcaed9350aa98abb6695f7057e157f63"
     # Namespaced so it cannot collide with an advisory lock taken anywhere else. Session-scoped
     # (pg_advisory_lock, not _xact) because the migration spans several transactions.
     _MIGRATION_ADVISORY_KEY = 0x4143500001          # 'ACP' + slot 1
@@ -5319,6 +5323,7 @@ class Store:
                          "org_memory", "remediation_state", "finding_disposition",
                          "finding_disposition_event", "remediation_diff", "applied_fixes",
                          "ai_calls", "ai_validation_outcomes", "second_opinion_reservations",
+                         "document_wide_chunks", "document_wide_chunk_plans",
                          "remediation_contribution_runs", "remediation_contribution_proposals",
                          "ai_local_call_execution_links", "ai_proposal_snapshots", "ai_attempt_trace_links", "ai_review_receipts", "ai_attempt_history",
                          "ai_spending_attempts", "ai_spending_run_policies", "ai_spending_budgets",
@@ -5421,6 +5426,7 @@ class Store:
                                # Both are scan_id-keyed, so the standard subquery scopes them to
                                # this owner's runs exactly as it does the rest.
                                "remediation_delivery", "remediation_run_hold",
+                               "document_wide_chunk_plans",
                                "remediation_run_policy_snapshot", "release_continuations", "automatic_release_authorizations"]
     # Tables that key on doc_id (not scan_id), scoped via a documents.owner_email join.
     _RESET_USER_DOC_TABLES = ["disposition_audit", "remediation_state"]
@@ -5491,6 +5497,10 @@ class Store:
             self._db.execute(cur, "DELETE FROM release_executions WHERE LOWER(TRIM(owner_email))=%s",
                              (owner_email,))
             cleared.append("release_executions")
+            self._db.execute(cur, """DELETE FROM document_wide_chunks WHERE (owner_id,run_id,plan_id) IN
+                (SELECT owner_id,run_id,plan_id FROM document_wide_chunk_plans
+                 WHERE scan_id IN (SELECT id FROM scan_runs WHERE LOWER(TRIM(owner_email))=%s))""", (owner_email,))
+            cleared.append("document_wide_chunks")
             for t in self._RESET_USER_SCAN_TABLES:
                 self._db.execute(cur,
                     f"DELETE FROM {t} WHERE scan_id IN (SELECT id FROM scan_runs WHERE LOWER(TRIM(owner_email))=%s)",
@@ -5603,6 +5613,9 @@ class Store:
             self._db.execute(cur,
                 "DELETE FROM release_executions WHERE scan_id=%s AND owner_email=%s",
                 (scan_id, owner_email))
+            self._db.execute(cur, """DELETE FROM document_wide_chunks WHERE (owner_id,run_id,plan_id) IN
+                (SELECT owner_id,run_id,plan_id FROM document_wide_chunk_plans WHERE scan_id=%s)""",
+                (scan_id,))
             self._db.execute(cur, 'DELETE FROM ai_attempt_trace_links WHERE owner_id=%s AND run_id IN '
                              '(SELECT run_id FROM ai_attempt_history WHERE owner_id=%s AND scan_id=%s)',
                              (owner_email, owner_email, scan_id))
