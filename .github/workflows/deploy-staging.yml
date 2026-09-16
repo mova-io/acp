@@ -50,7 +50,7 @@ on:
   workflow_dispatch:
     inputs:
       pin:
-        description: "Commit to deploy to staging (default: current main)"
+        description: "Image commit (default: current main); recovery also selects a known CI-green guarded workflow ref"
         required: false
         type: string
       allow_rollback:
@@ -96,9 +96,28 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # Execute the current guard even when an older CI completion triggers this run.
+          # Execute the exact workflow-source guard even when an older CI completion triggers this run.
           # redeploy.sh separately resolves ACP_PIN and builds its isolated pinned clone.
-          ref: main
+          ref: ${{ github.workflow_sha }}
+
+      # The tooling commit and image pin are distinct. Both require CI, including
+      # explicit manual recovery; choose a known-green guarded workflow ref for recovery.
+      - name: Verify deployment tooling CI
+        timeout-minutes: 25
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOOLING_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TOOLING_SHA"
+          RUN_ID=""
+          for ATTEMPT in 1 2 3 4 5; do
+            RUN_ID="$(gh run list --commit "$TOOLING_SHA" --workflow CI --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+            [ -n "$RUN_ID" ] && break
+            [ "$ATTEMPT" = 5 ] || sleep 15
+          done
+          [ -n "$RUN_ID" ] || { echo "::error::No CI run for exact deployment tooling commit"; exit 1; }
+          gh run watch "$RUN_ID" --exit-status
 
       - uses: actions/setup-dotnet@v4
         with:
@@ -153,12 +172,16 @@ jobs:
         run: bash deploy/public/redeploy.sh
 
       - name: Confirm staging reports the new build
+        env:
+          ACP_EXPECTED_PIN: ${{ github.event.workflow_run.head_sha || inputs.pin }}
         if: steps.staging_deploy.outputs.staging_deployed == 'true'
         run: |
           set -euo pipefail
           FQDN="${{ vars.STAGING_FQDN }}"
+          EXPECTED="$(git rev-parse --verify "${ACP_EXPECTED_PIN:-origin/main}^{commit}")"
           H="$(curl -fsS --max-time 20 "https://$FQDN/healthz")"
           R="$(curl -fsS --max-time 20 "https://$FQDN/readyz")"
+          python3 -c 'import json,sys; h=json.load(sys.stdin); assert h.get("commit") == sys.argv[1], "staging commit differs from requested pin"' "$EXPECTED" <<<"$H"
           echo "healthz: $H"
           echo "readyz:  $R"
           case "$H" in *'"version_stamped":true'*) ;; *) echo "::error::staging is not version-stamped"; exit 1 ;; esac

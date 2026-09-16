@@ -50,7 +50,8 @@ def test_guard_runs_before_ci_build_or_mutation_and_workflow_executes_current_co
     script=(ROOT/'deploy/public/redeploy.sh').read_text()
     assert script.index('GUARD_DECISION=')<script.index('# The CI gate, ENFORCED')
     workflow=(ROOT/'.github/workflows/deploy-staging.yml').read_text()
-    assert 'ref: main' in workflow
+    assert 'ref: ${{ github.workflow_sha }}' in workflow
+    assert 'staging commit differs from requested pin' in workflow
     assert "if: steps.staging_deploy.outputs.staging_deployed == 'true'" in workflow
     assert "ACP_PIN: ${{ github.event.workflow_run.head_sha || inputs.pin }}" in workflow
     assert "github.event_name == 'workflow_dispatch' && inputs.allow_rollback" in workflow
@@ -73,3 +74,29 @@ def test_real_shell_guard_skips_without_reaching_ci_or_build(history,tmp_path):
     assert result.returncode==0,result.stderr
     assert 'CI_OR_BUILD_REACHED' not in result.stdout
     assert output.read_text()=='staging_deployed=false\n'
+
+
+def test_tooling_ci_is_separate_and_has_no_manual_or_skip_exemption():
+    workflow=(ROOT/'.github/workflows/deploy-staging.yml').read_text()
+    block=workflow.split('      - name: Verify deployment tooling CI',1)[1].split('      - uses: actions/setup-dotnet',1)[0]
+    assert 'TOOLING_SHA: ${{ github.workflow_sha }}' in block
+    assert 'gh run watch "$RUN_ID" --exit-status' in block
+    assert '--commit "$TOOLING_SHA"' in block
+    assert 'skip_ci_gate' not in block and 'allow_rollback' not in block
+    assert workflow.index('Verify deployment tooling CI') < workflow.index('Azure login (OIDC)')
+
+@pytest.mark.parametrize('ci_exit',[0,1])
+def test_actual_tooling_gate_rejects_failed_ci(history,tmp_path,ci_exit):
+    import os
+    import textwrap
+    repo,_,_,toolsha=history
+    workflow=(ROOT/'.github/workflows/deploy-staging.yml').read_text()
+    block=workflow.split('      - name: Verify deployment tooling CI',1)[1].split('      - uses: actions/setup-dotnet',1)[0]
+    run=textwrap.dedent(block.split('        run: |\n',1)[1])
+    tools=tmp_path/'gate-bin';tools.mkdir()
+    (tools/'gh').write_text('#!/bin/sh\nif [ "$2" = list ]; then echo 123; else exit '+str(ci_exit)+'; fi\n')
+    (tools/'gh').chmod(0o755)
+    env=dict(os.environ,PATH=str(tools)+os.pathsep+os.environ['PATH'],TOOLING_SHA=toolsha)
+    result=subprocess.run(['bash','-c',run+'\necho DEPLOY_REACHED\n'],cwd=repo,env=env,text=True,capture_output=True)
+    assert result.returncode==ci_exit,result.stderr
+    assert ('DEPLOY_REACHED' in result.stdout)==(ci_exit==0)
