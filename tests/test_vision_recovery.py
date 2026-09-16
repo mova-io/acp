@@ -234,7 +234,7 @@ def test_activity_detail_has_no_document_content_or_raw_error(isolated_store):
     ([{'reason': 'attempts_exhausted', 'kind': 'text'}], False, 100, 'vision_generated_output_unusable'),
     ([{'reason': 'attempts_exhausted'}, {'reason': 'provider_usage_unknown'}], False, 100, 'vision_spending_reconciliation_required'),
     ([{'reason': 'attempts_exhausted'}], True, 100, 'vision_spending_reconciliation_required'),
-    ([{'reason': 'attempts_exhausted'}], False, 0, 'vision_permission_or_budget_blocked'),
+    ([{'reason': 'attempts_exhausted'}], False, 0, 'vision_budget_exhausted'),
     ([{'reason': 'vision_timeout'}], False, 100, None),
 ])
 def test_settled_unusable_generation_is_not_a_spending_block(reasons, blocked, available, expected):
@@ -334,7 +334,7 @@ def test_successful_paid_recovery_can_save_draft_after_spending_last_available_u
     from types import SimpleNamespace
     context = SimpleNamespace(enabled=True, local_drafting=False, deferred=[], owner_id=OWNER, run_id='run',
         ledger=SimpleNamespace(snapshot=lambda *_: {'blocked': False, 'available_units': 0}))
-    assert recovery._recovery_block(context) == 'vision_permission_or_budget_blocked'
+    assert recovery._recovery_block(context) == 'vision_budget_exhausted'
     assert recovery._recovery_block(context, [], check_admission=False) is None
     context.ledger.snapshot = lambda *_: {'blocked': True, 'available_units': 0}
     assert recovery._recovery_block(context, [], check_admission=False) == 'vision_spending_reconciliation_required'

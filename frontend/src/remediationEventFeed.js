@@ -81,6 +81,14 @@ export function remediationEventLine(event) {
     case 'remediate.vision_retry_blocked':
       if (detail.reason_code === 'vision_spending_reconciliation_required') return `Image description for ${file(event)} paused · awaiting confirmation of previous AI usage before another paid request`
       if (detail.reason_code === 'vision_permission_or_budget_blocked') return `Image description for ${file(event)} paused · saved AI permission or spending limit needs attention`
+      if (detail.reason_code === 'vision_provider_access_denied') return `Image description for ${file(event)} paused · saved AI provider access was denied`
+      if (detail.reason_code === 'vision_budget_admission_denied') return `Image description for ${file(event)} paused · the spending ledger did not admit another request`
+      if (detail.reason_code === 'vision_budget_exhausted') return `Image description for ${file(event)} paused · the saved AI spending allowance is exhausted`
+      if (detail.reason_code === 'vision_run_permission_unavailable') return `Image description for ${file(event)} paused · the saved run does not authorize another AI request`
+      if (detail.reason_code === 'vision_ai_disabled_or_budget_zero') return `Image description for ${file(event)} paused · AI is disabled or the saved allowance is zero`
+      if (detail.reason_code === 'vision_pricing_not_verified') return `Image description for ${file(event)} paused · model pricing is not verified`
+      if (detail.reason_code === 'vision_provider_limit_exceeded') return `Image description for ${file(event)} paused · the AI provider limit was reached`
+      if (detail.reason_code === 'vision_provider_request_rejected') return `Image description for ${file(event)} paused · the AI provider rejected the request`
       if (detail.reason_code === 'vision_local_endpoint_required') return `Local AI for ${file(event)} unavailable · the saved local-only plan requires a private endpoint; cloud processing was not authorized`
       if (detail.reason_code === 'vision_response_empty') return `AI returned no image description for ${file(event)} · automatic prompt retry exhausted; provide the description or retry after checking local AI`
       if (detail.reason_code === 'vision_generated_output_unusable') return `AI response for ${file(event)} could not be used · automatic generation attempts stopped; check AI activity for the validation reason`
@@ -135,7 +143,7 @@ export function addRemediationEvent(previous, event, id, limit = MAX_VISIBLE_REM
             // added. Absent (an older server, or a replayed row) reads as unknown — which is
             // neither true nor false, and is why this is `?? null` rather than `|| false`.
             material: event.material == null ? null : !!event.material,
-            reasonCode: ['vision_spending_reconciliation_required', 'vision_permission_or_budget_blocked', 'vision_generated_output_unusable', 'vision_local_endpoint_required', 'vision_recovery_unresolved', 'vision_response_empty'].includes(event.detail?.reason_code) ? event.detail.reason_code : null,
+            reasonCode: ['vision_spending_reconciliation_required', 'vision_permission_or_budget_blocked', 'vision_generated_output_unusable', 'vision_local_endpoint_required', 'vision_recovery_unresolved', 'vision_response_empty', 'vision_provider_access_denied', 'vision_budget_admission_denied', 'vision_budget_exhausted', 'vision_run_permission_unavailable', 'vision_ai_disabled_or_budget_zero', 'vision_pricing_not_verified', 'vision_provider_limit_exceeded', 'vision_provider_request_rejected'].includes(event.detail?.reason_code) ? event.detail.reason_code : null,
             attempt: event.attempt == null ? null : Number(event.attempt),
             evidenceIds: typeof event.detail?.evidence_id === 'string' && /^[a-f0-9]{12}$/.test(event.detail.evidence_id) ? [event.detail.evidence_id] : [],
             evidenceAvailable: typeof event.detail?.evidence_id === 'string' && /^[a-f0-9]{12}$/.test(event.detail.evidence_id),

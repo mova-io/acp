@@ -7,6 +7,14 @@ const actions = {
   vision_local_endpoint_required: 'Check the private AI endpoint before retrying local generation.',
   vision_spending_reconciliation_required: 'Wait for recorded usage confirmation before another paid request.',
   vision_permission_or_budget_blocked: 'Check the saved AI permission and readiness before retrying.',
+  vision_provider_access_denied: 'Check access to the saved AI provider before retrying.',
+  vision_budget_admission_denied: 'Check the recorded spending decision before retrying.',
+  vision_budget_exhausted: 'Create a new approved plan with sufficient allowance before retrying.',
+  vision_run_permission_unavailable: 'Review or replace the saved plan before retrying.',
+  vision_ai_disabled_or_budget_zero: 'Enable AI through an approved plan with a spending allowance before retrying.',
+  vision_pricing_not_verified: 'Select a model with verified pricing before retrying.',
+  vision_provider_limit_exceeded: 'Check provider capacity or limits before retrying.',
+  vision_provider_request_rejected: 'Check AI activity for the recorded rejection before retrying.',
 }
 
 export function activityEventSummary(event = {}) {

@@ -55,6 +55,20 @@ describe('remaining work responsibility', () => {
     const [unknown] = addRemediationEvent([], {kind:'remediate.vision_retry_blocked',detail:{reason_code:'private error'}},2)
     expect(unknown.reasonCode).toBeNull()
   })
+  it.each([
+    ['vision_provider_access_denied','AI provider access denied',/will not repeat/],
+    ['vision_budget_admission_denied','AI request not admitted by budget',/will not send another paid request/],
+    ['vision_budget_exhausted','AI spending allowance exhausted',/new approved plan/],
+    ['vision_run_permission_unavailable','Saved run does not permit another AI request',/will not broaden/],
+    ['vision_pricing_not_verified','AI model pricing not verified',/verified pricing/],
+  ])('keeps %s distinct with its actual required action',(reason,label,action)=>{
+    const [row]=addRemediationEvent([], {kind:'remediate.vision_retry_blocked',document_ref:'ref',detail:{reason_code:reason,raw:'private'}},1)
+    const notice=remainingWorkStatus({events:[row]}).notices[0]
+    expect(row.reasonCode).toBe(reason)
+    expect(notice.label).toBe(label)
+    expect(notice.responsibility).toMatch(action)
+    expect(JSON.stringify({row,notice})).not.toContain('private')
+  })
   it('explains waiting separately from stopped automatic attempts', () => {
     const waiting = remainingWorkStatus({events:[{...event(1,'remediate.vision_retry_blocked','vision_spending_reconciliation_required'),occurredAt:'2026-09-13T20:00:00Z'}],snapshot:{generated_at:'2026-09-13T20:05:00Z'}}).notices[0]
     expect(waiting.label).toBe('AI usage confirmation pending')

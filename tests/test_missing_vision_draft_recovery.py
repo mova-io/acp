@@ -35,8 +35,11 @@ def test_complete_drafts_are_not_sent_again(isolated_store):
 @pytest.mark.parametrize('reason,code', [
     ('provider_usage_unknown', 'vision_spending_reconciliation_required'),
     ('existing_draft_attempt_requires_reconciliation', 'vision_spending_reconciliation_required'),
-    ('provider_access_denied', 'vision_permission_or_budget_blocked'),
-    ('budget_admission_denied', 'vision_permission_or_budget_blocked'),
+    ('provider_access_denied', 'vision_provider_access_denied'),
+    ('budget_admission_denied', 'vision_budget_admission_denied'),
+    ('run_dispatch_permission_unavailable', 'vision_run_permission_unavailable'),
+    ('verified_model_pricing_unavailable', 'vision_pricing_not_verified'),
+    ('provider_limit_exceeded', 'vision_provider_limit_exceeded'),
 ])
 def test_missing_draft_exposes_block_without_dispatch(isolated_store, reason, code):
     job, _ = seed(isolated_store)
@@ -60,7 +63,7 @@ def test_durable_spending_uncertainty_blocks_even_without_captured_reason():
 def test_exhausted_budget_does_not_queue_another_paid_call():
     context = SimpleNamespace(enabled=True, deferred=[], owner_id=OWNER, run_id='run',
         ledger=SimpleNamespace(snapshot=lambda *args: {'blocked':False, 'available_units':0}))
-    assert recovery._recovery_block(context) == 'vision_permission_or_budget_blocked'
+    assert recovery._recovery_block(context) == 'vision_budget_exhausted'
 
 
 def test_reconciliation_waits_without_generation_then_resumes_same_allowance(isolated_store, monkeypatch):
