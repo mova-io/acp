@@ -86,6 +86,10 @@ def _prepare_release_package(payload: dict, job: dict) -> None:
 @handler("scheduled_sweep")
 def _scheduled_sweep(payload: dict, job: dict) -> None:
     """Execute the one durable occurrence elected from all scheduler replicas."""
+    if (getattr(core.get_store(), '_db', None) and job.get('id')
+            and job.get('locked_by') and job.get('attempts')):
+        from scheduled_scan_execution import run_tick
+        return run_tick(payload, job)
     if payload.get("owner_email"):
         decision = core._scheduled_scan_admission(payload)
         # Admission counts active owner jobs. At handler time that population includes this
@@ -151,7 +155,7 @@ def _defer_analysis_to_assess() -> bool:
 
 def _enqueue_analysis(scan_id: str, source: str, items: list[dict], *, ai: bool, pii: bool,
                       user: str | None, incremental: bool, exclude_remediated: bool,
-                      force_batch: bool = False) -> None:
+                      force_batch: bool = False, parent_job: dict | None = None) -> None:
     """Fan out the download+analyse work over `items` — one scan_file per file, or scan_batch
     chunks for large estates (ADR 0008). Shared by the immediate scan path and the deferred
     Assess path so both enqueue identical work; the last completing job finalizes (ADR 0013)."""
@@ -175,11 +179,17 @@ def _enqueue_analysis(scan_id: str, source: str, items: list[dict], *, ai: bool,
     name_counts: dict[str, int] = {}
     for it in items:
         name_counts[_logical_name(it["file"])] = name_counts.get(_logical_name(it["file"]), 0) + 1
+    pending = []
+    def dispatch(kind, payload):
+        if parent_job:
+            pending.append((kind, payload))
+        else:
+            core.store.enqueue_job(kind, payload, scan_id=scan_id)
     use_batch = force_batch or len(items) >= SCAN_BATCH_THRESHOLD
     if use_batch:
         for i in range(0, len(items), SCAN_BATCH_SIZE):
             chunk = items[i:i + SCAN_BATCH_SIZE]
-            core.store.enqueue_job("scan_batch", {
+            dispatch("scan_batch", {
                 "scan_id": scan_id, "source": source, "ai": ai, "pii": pii, "user": user,
                 "incremental": incremental,
                 "items": [{"file": it["file"], "drive_file_id": it.get("drive_file_id"),
@@ -190,10 +200,10 @@ def _enqueue_analysis(scan_id: str, source: str, items: list[dict], *, ai: bool,
                            "size_kb": it.get("size_kb"),
                            "shadow_candidate": name_counts[_logical_name(it["file"])] > 1,
                            "exclude_remediated": exclude_remediated} for it in chunk],
-            }, scan_id=scan_id)
+            })
     else:
         for it in items:
-            core.store.enqueue_job("scan_file", {
+            dispatch("scan_file", {
                 "scan_id": scan_id, "source": source, "file": it["file"],
                 "drive_file_id": it.get("drive_file_id"), "mime": it.get("mime"), "path": it.get("path"),
                 "checksum": it.get("checksum"), "drive_id": it.get("drive_id"),
@@ -202,7 +212,10 @@ def _enqueue_analysis(scan_id: str, source: str, items: list[dict], *, ai: bool,
                 "size_kb": it.get("size_kb"),
                 "shadow_candidate": name_counts[_logical_name(it["file"])] > 1,
                 "exclude_remediated": exclude_remediated,
-                "ai": ai, "pii": pii, "user": user, "incremental": incremental}, scan_id=scan_id)
+                "ai": ai, "pii": pii, "user": user, "incremental": incremental})
+    if parent_job:
+        from scheduled_scan_store import enqueue_contents
+        enqueue_contents(core.store, parent_job, pending)
 from remediate import remediate_html
 
 
@@ -2931,13 +2944,20 @@ def _scan_discover(payload: dict, job: dict) -> None:
     drive_token = payload.get("drive_token") or toks.get("drive")
     sp_tok = payload.get("sp_token") or toks.get("sp")
     rb = Rubric.load_active(ACP / "config")
-    if source not in ("local", "sharepoint") and not drive_token:
+    from scheduled_scan_execution import services_for_job
+    scheduled_services = services_for_job(core.store, scan_id, job, source=source, user=user)
+    scheduled_context = scheduled_services[2] if scheduled_services else None
+    if scheduled_services:
+        svc, sp_tok, _ = scheduled_services
+        drive_token = None  # Accepted scheduled Drive reads its server ADC identity.
+    if source not in ("local", "sharepoint") and not drive_token and not scheduled_services:
         raise RuntimeError(
             f"scan_id={scan_id!r}: Drive token missing from job payload and SCAN_TOKENS store. "
             "The session token was not forwarded, expired, or this worker replica has no Redis "
             "access to the shared token. Re-authenticate and start a new scan."
         )
-    svc = None if source in ("local", "sharepoint") else _drive_service(drive_token)
+    if not scheduled_services:
+        svc = None if source in ("local", "sharepoint") else _drive_service(drive_token)
     effective_folder = folder if folder else (None if folders else ("root" if drive_token else None))
     scope: dict = {}
     # `inventory` collects per-file rows for the NON-scannable estate (media / unsupported /
@@ -2946,7 +2966,7 @@ def _scan_discover(payload: dict, job: dict) -> None:
     # (PRD Phase A2) while only the assessable subset is ever downloaded and analysed.
     inventory: list[dict] = []
     started = _dt.datetime.now(_dt.timezone.utc).isoformat()
-    defer = _defer_analysis_to_assess()
+    defer = bool(scheduled_context) or _defer_analysis_to_assess()
     # ── Checkpoint: skip listing if inventory already persisted (retry resume) ──
     # A previous attempt that completed listing + add_inventory but crashed during lifecycle
     # evaluation or tracing already persisted the estate.  Re-listing the entire Drive API
@@ -3168,10 +3188,10 @@ def _scan_discover(payload: dict, job: dict) -> None:
         # to the same flag meant it could never fire for a real interactive scan: the UI that
         # sets it removed its own toggle for this group the same day and never sends true. So
         # eligibility here is the whole-source shape check alone, independent of `incremental`.
-        drive_delta = None
-        sp_delta = None
+        drive_delta = scheduled_context.get('delta_plan') if scheduled_context and source == 'drive' else None
+        sp_delta = scheduled_context.get('delta_plan') if scheduled_context and source == 'sharepoint' else None
         sp_delta_plan = None
-        if user:
+        if user and not scheduled_context:
             if source == "drive" and drive_token and not folder and not folders:
                 drive_delta = core._interactive_drive_sync_plan(user, svc)
             elif source == "sharepoint" and sp_tok:
@@ -3814,6 +3834,11 @@ def _scan_assess(payload: dict, job: dict) -> None:
     except Exception:
         params = {}
     source = params.get("source", payload.get("source", "drive"))
+    from scheduled_scan_execution import context_for_job
+    scheduled_context = context_for_job(core.store, scan_id, job, source=payload.get('source', source), user=user)
+    if scheduled_context:
+        source = scheduled_context['source']
+        params = dict((core.store.get_scan_inputs(scan_id) or {}).get('scan_options') or {}, source=source)
     ai = bool(params.get("ai", True)) and core.store.get_ai_enabled()
     pii = bool(params.get("pii", False))
     incremental = bool(params.get("incremental", True))
@@ -3824,6 +3849,8 @@ def _scan_assess(payload: dict, job: dict) -> None:
     # owner (get_scan owner=...), so being present in the payload is the owner-gate.
     include_flagged = bool(payload.get("include_lifecycle_flagged")
                            or params.get("include_lifecycle_flagged"))
+    if scheduled_context:
+        include_flagged = False
     core.store.set_scan_status(scan_id, "running")
     # CRITICAL — the inventory now records the WHOLE estate, including media / unsupported /
     # extensionless files that must NEVER be downloaded or analysed. Rebuild the fan-out from the
@@ -3924,7 +3951,8 @@ def _scan_assess(payload: dict, job: dict) -> None:
     core.store.set_scan_files(scan_id, len(items))
     _enqueue_analysis(scan_id, source, items, ai=ai, pii=pii, user=user,
                       incremental=incremental, exclude_remediated=exclude_rem,
-                      force_batch=bool(params.get("batch")))
+                      force_batch=bool(params.get("batch")),
+                      parent_job=job if scheduled_context and source in ("drive", "sharepoint") else None)
 
 
 def _analyse_and_persist_one(scan_id, item, source, pii, svc, toks, now, _lf, user=None,
@@ -4575,6 +4603,15 @@ def _make_svc(source, toks):
         return None
 
 
+def _analysis_services(scan_id, source, toks, job, user, *, item=None):
+    from scheduled_scan_execution import services_for_job
+    scheduled = services_for_job(core.store, scan_id, job, source=source, user=user, item=item)
+    if scheduled:
+        svc, sp_token, _ = scheduled
+        return svc, {**toks, 'sp': sp_token}
+    return _make_svc(source, toks), toks
+
+
 @handler("scan_batch")
 def _scan_batch(payload: dict, job: dict) -> None:
     """Analyse + persist a CHUNK of files in one durable job (ADR 0008), then bump the
@@ -4589,7 +4626,7 @@ def _scan_batch(payload: dict, job: dict) -> None:
     items = payload.get("items", [])
     toks = core.get_scan_tokens(scan_id)
     now = _dt.datetime.now(_dt.timezone.utc).isoformat()
-    svc = _make_svc(source, toks)
+    svc, toks = _analysis_services(scan_id, source, toks, job, user)
     rubric_hash = core.active_rubric().hash
     incremental = bool(payload.get("incremental", True))
     try:
@@ -4650,7 +4687,7 @@ def _scan_file(payload: dict, job: dict) -> None:
     user = payload.get("user")
     toks = core.get_scan_tokens(scan_id)
     now = _dt.datetime.now(_dt.timezone.utc).isoformat()
-    svc = _make_svc(source, toks)
+    svc, toks = _analysis_services(scan_id, source, toks, job, user, item=payload)
     # ADR 0038 — same checkpoint as _scan_batch's _run_one: a job not yet started when pause
     # fires is skipped entirely (no row), leaving it for resume's re-dispatch to pick up.
     if not scan_paused(scan_id):
