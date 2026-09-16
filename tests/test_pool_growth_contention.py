@@ -213,3 +213,89 @@ def test_keyed_checkout_reuses_pending_socket_without_blocking_returns(monkeypat
     assert borrowed[0] is borrowed[1]
     pool.putconn(borrowed[0], 'shared')
     pool.closeall()
+
+
+@pytest.mark.parametrize('replacement_fails', [False, True])
+def test_keyed_turnover_cleanup_cannot_remove_new_generation(monkeypatch, replacement_fails):
+    from responsive_connection_pool import ResponsiveConnectionPool
+    published, resume_first = threading.Event(), threading.Event()
+    replacing, resume_second = threading.Event(), threading.Event()
+    connections, errors, borrowed = [], [], []
+
+    def connect(*args, **kwargs):
+        conn = Connection()
+        connections.append(conn)
+        if len(connections) == 2:
+            replacing.set()
+            assert resume_second.wait(3)
+            if replacement_fails:
+                conn.close()
+                raise psycopg2.OperationalError('controlled replacement failure')
+        return conn
+
+    monkeypatch.setattr(psycopg2, 'connect', connect)
+    pool = ResponsiveConnectionPool(0, 1, 'postgresql://offline')
+
+    class ScheduledLock:
+        """Yield after first publication, before that caller's finally reacquires."""
+        def __init__(self, lock):
+            self.lock, self.first_exits = lock, 0
+
+        def acquire(self, *args, **kwargs):
+            return self.lock.acquire(*args, **kwargs)
+
+        def release(self):
+            return self.lock.release()
+
+        def __enter__(self):
+            self.lock.acquire()
+            return self
+
+        def __exit__(self, *args):
+            first = threading.current_thread().name == 'first-generation'
+            if first:
+                self.first_exits += 1
+            self.lock.release()
+            if first and self.first_exits == 2:
+                published.set()
+                assert resume_first.wait(3)
+
+    pool._lock = ScheduledLock(pool._lock)
+
+    def checkout():
+        try:
+            borrowed.append(pool.getconn('same'))
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=checkout, name='first-generation')
+    second = threading.Thread(target=checkout, name='replacement-generation')
+    first.start()
+    try:
+        assert published.wait(1)
+        # A second keyed caller can reuse and close the published lease legally.
+        original = pool.getconn('same')
+        pool.putconn(original, 'same', close=True)
+        second.start()
+        assert replacing.wait(1)
+        replacement = pool._connecting['same']
+        resume_first.set()
+        first.join(1)
+        assert not first.is_alive()
+        assert pool._connecting.get('same') is replacement
+        with pytest.raises(psycopg2.pool.PoolError):
+            pool.getconn('overflow')
+        assert sum(not conn.closed for conn in connections) == 1
+    finally:
+        resume_first.set(); resume_second.set()
+        first.join(2)
+        if second.ident is not None:
+            second.join(2)
+        pool.closeall()
+    assert not pool._connecting
+    assert all(conn.closed for conn in connections)
+    if replacement_fails:
+        assert len(errors) == 1 and isinstance(errors[0], psycopg2.OperationalError)
+    else:
+        assert not errors
+        assert len(borrowed) == 2

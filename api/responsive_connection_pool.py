@@ -41,7 +41,7 @@ class ResponsiveConnectionPool(ThreadedConnectionPool):
             # Preserve keyed-lease reuse without parking under the pool lock.
             pending.wait()
 
-        conn = None
+        reservation = pending
         try:
             conn = psycopg2.connect(*self._args, **self._kwargs)
             with self._lock:
@@ -49,13 +49,15 @@ class ResponsiveConnectionPool(ThreadedConnectionPool):
                 if not closed:
                     self._used[key] = conn
                     self._rused[id(conn)] = key
-                self._connecting.pop(key).set()
+                if self._connecting.get(key) is reservation:
+                    self._connecting.pop(key)
+                    reservation.set()
             if closed:
                 conn.close()
                 raise PoolError('connection pool is closed')
             return conn
         finally:
             with self._lock:
-                pending = self._connecting.pop(key, None)
-                if pending is not None:
-                    pending.set()
+                if self._connecting.get(key) is reservation:
+                    self._connecting.pop(key)
+                    reservation.set()

@@ -16,7 +16,7 @@ The overlap is consistent with psycopg2's ThreadedConnectionPool holding its boo
 
 ## Proposed change
 
-Use a narrow ThreadedConnectionPool subclass that reserves pending sockets under the existing bookkeeping lock, establishes them outside that lock, and registers or releases them under the lock. Existing leases can be returned and reused while another socket opens. In-flight reservations count toward the same maximum; keyed callers wait outside the lock for their shared lease. Shutdown rejects and closes a late socket.
+Use a narrow ThreadedConnectionPool subclass that reserves pending sockets under the existing bookkeeping lock, establishes them outside that lock, and registers or releases them under the lock. Existing leases can be returned and reused while another socket opens. In-flight reservations count toward the same maximum; keyed callers wait outside the lock for their shared lease. Shutdown rejects and closes a late socket. Cleanup checks the original reservation Event identity, so an older keyed caller cannot delete a newer generation.
 
 Only the adapter's pool factory changes. Its ordinary/mutation admission gates, minimum/maximum connection counts, idle retention, SELECT1 probe, one-check-in-flight gate, HTTP deadline, transaction handling and failure responses remain unchanged. Physical connection establishment still has the existing driver behavior; this proposal does not claim a new connect timeout or cancellation guarantee.
 

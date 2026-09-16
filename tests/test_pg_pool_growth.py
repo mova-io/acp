@@ -253,3 +253,91 @@ def test_real_keyed_checkout_reuses_socket_and_rollback_leaves_it_healthy(pg_ada
     healthy.commit()
     pool.putconn(healthy)
     assert_permits_returned(adapter)
+
+
+@pytest.mark.parametrize('replacement_fails', [False, True])
+def test_real_keyed_turnover_keeps_replacement_reservation(pg_adapter, monkeypatch, replacement_fails):
+    adapter = pg_adapter
+    adapter._MIN_CONN, adapter._MAX_CONN = 0, 1
+    pool = adapter._get_pool()
+    published, resume_first = threading.Event(), threading.Event()
+    replacing, resume_second = threading.Event(), threading.Event()
+    actual_connect = psycopg2.connect
+    connections, borrowed, errors = [], [], []
+
+    def connect(*args, **kwargs):
+        conn = actual_connect(*args, **kwargs)
+        connections.append(conn)
+        if len(connections) == 2:
+            replacing.set()
+            if not resume_second.wait(3):
+                conn.close()
+                raise AssertionError('test socket was not released')
+            if replacement_fails:
+                conn.close()
+                raise psycopg2.OperationalError('controlled replacement failure')
+        return conn
+
+    monkeypatch.setattr(psycopg2, 'connect', connect)
+
+    class ScheduledLock:
+        def __init__(self, lock):
+            self.lock, self.first_exits = lock, 0
+
+        def acquire(self, *args, **kwargs):
+            return self.lock.acquire(*args, **kwargs)
+
+        def release(self):
+            return self.lock.release()
+
+        def __enter__(self):
+            self.lock.acquire()
+            return self
+
+        def __exit__(self, *args):
+            first = threading.current_thread().name == 'first-generation'
+            if first:
+                self.first_exits += 1
+            self.lock.release()
+            if first and self.first_exits == 2:
+                published.set()
+                assert resume_first.wait(3)
+
+    pool._lock = ScheduledLock(pool._lock)
+
+    def checkout():
+        try:
+            borrowed.append(pool.getconn('same'))
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=checkout, name='first-generation')
+    second = threading.Thread(target=checkout, name='replacement-generation')
+    first.start()
+    try:
+        assert published.wait(1)
+        original = pool.getconn('same')
+        pool.putconn(original, 'same', close=True)
+        second.start()
+        assert replacing.wait(1)
+        replacement = pool._connecting['same']
+        resume_first.set(); first.join(1)
+        assert not first.is_alive()
+        assert pool._connecting.get('same') is replacement
+        with pytest.raises(psycopg2.pool.PoolError):
+            pool.getconn('overflow')
+        assert sum(not conn.closed for conn in connections) == 1
+    finally:
+        resume_first.set(); resume_second.set()
+        first.join(2)
+        if second.ident is not None:
+            second.join(2)
+        monkeypatch.setattr(psycopg2, 'connect', actual_connect)
+        pool.closeall()
+    assert not pool._connecting
+    assert all(conn.closed for conn in connections)
+    if replacement_fails:
+        assert len(errors) == 1 and isinstance(errors[0], psycopg2.OperationalError)
+    else:
+        assert not errors
+        assert len(borrowed) == 2
