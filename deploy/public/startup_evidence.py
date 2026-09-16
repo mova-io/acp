@@ -234,7 +234,8 @@ def _requires_startup_phase(document, name):
         raise RuntimeError('revision startup contract unavailable') from None
 
 
-def collect(subscription, group, name, image, *, timeout=OBSERVATION_SECONDS):
+def collect(subscription, group, name, image, *, timeout=OBSERVATION_SECONDS,
+            exclude_revision=None):
     deadline = time.monotonic() + timeout
     revision = None
     require_startup_phase = True
@@ -249,7 +250,7 @@ def collect(subscription, group, name, image, *, timeout=OBSERVATION_SECONDS):
                                      deadline=deadline)
             current_image = _revision_image(revision_document, name)
             if revision is None:
-                if current_image == image:
+                if current_image == image and current != exclude_revision:
                     revision = current
                     require_startup_phase = _requires_startup_phase(revision_document, name)
                 else:
@@ -337,11 +338,13 @@ def main(argv=None):
     parser.add_argument('--image', required=True)
     parser.add_argument('--output', required=True)
     parser.add_argument('--known-app', action='append', default=[])
+    parser.add_argument('--exclude-revision')
     parser.add_argument('apps', nargs='+')
     args = parser.parse_args(argv)
     rows = []
     with ThreadPoolExecutor(max_workers=min(5, len(args.apps))) as executor:
-        futures = [(name, executor.submit(collect, args.subscription, args.group, name, args.image))
+        futures = [(name, executor.submit(collect, args.subscription, args.group, name, args.image,
+                                          exclude_revision=args.exclude_revision))
                    for name in args.apps]
         for name, future in futures:
             try:

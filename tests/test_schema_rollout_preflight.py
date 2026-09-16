@@ -522,7 +522,7 @@ def test_later_role_attempt_cannot_overwrite_first_failed_receipt(monkeypatch, t
     output.write_text(json.dumps({'image': 'image', 'roles': [
         {'app': 'assess-staging', 'ok': False, 'reason': 'console_logs_incomplete'}]}))
 
-    def collect(_subscription, _group, name, _image):
+    def collect(_subscription, _group, name, _image, **_kwargs):
         if name == 'release-staging':
             raise evidence.EvidenceUnavailable('azure_read_unavailable')
         return {'app': name, 'ok': True, 'revision': 'new'}
@@ -624,6 +624,62 @@ def test_prior_image_visibility_exhausts_deadline_without_false_revision_latch(m
         evidence.collect('sub', 'group', 'api-staging', 'target-image', timeout=6)
     assert caught.value.reason == 'target_not_visible'
     assert clock[0] == 6
+
+
+def test_same_image_prior_revision_termination_is_not_attributed_to_new_target(monkeypatch):
+    prior = _revision_app('old-revision', 'target-image')
+    target = _revision_app('new-revision', 'target-image')
+    replicas, system, console = _complete_startup_reads(target)
+    old_terminated = [{'RevisionName': 'old-revision', 'Reason': 'ContainerTerminated',
+                       'Msg': "exit code '0' reason 'ManuallyStopped'", 'TimeStamp': 'now'}]
+    latest_reads = 0
+
+    def read(_subscription, *args, **_kwargs):
+        nonlocal latest_reads
+        if args[1] == 'show':
+            latest_reads += 1
+            return prior if latest_reads == 1 else target
+        if args[1:3] == ('revision', 'show'):
+            revision = args[args.index('--revision') + 1]
+            return prior if revision == 'old-revision' else target
+        if args[1:3] == ('replica', 'list'):
+            return replicas
+        if '--type' in args:
+            return old_terminated + system
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: None)
+    monkeypatch.setattr(evidence.time, 'sleep', lambda _seconds: None)
+    result = evidence.collect('sub', 'group', 'api-staging', 'target-image', timeout=20,
+                              exclude_revision='old-revision')
+    assert result['revision'] == 'new-revision' and result['ok'] is True
+
+
+def test_termination_on_new_target_revision_remains_fatal(monkeypatch):
+    target = _revision_app('new-revision', 'target-image')
+    replicas, _system, console = _complete_startup_reads(target)
+
+    def read(_subscription, *args, **_kwargs):
+        if args[1] == 'show' or args[1:3] == ('revision', 'show'):
+            return target
+        if args[1:3] == ('replica', 'list'):
+            return replicas
+        if '--type' in args:
+            return [{'RevisionName': 'new-revision', 'Reason': 'ContainerTerminated',
+                     'Msg': "exit code '1'", 'TimeStamp': 'now'}]
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence.time, 'sleep', lambda _seconds: pytest.fail('fatal retried'))
+    with pytest.raises(evidence.StartupFailure) as caught:
+        evidence.collect('sub', 'group', 'api-staging', 'target-image', timeout=20,
+                         exclude_revision='old-revision')
+    assert caught.value.reason == 'system_terminated'
 
 
 @pytest.mark.parametrize('drift,reason', [('revision', 'revision_changed'),

@@ -612,7 +612,7 @@ _wait_rollout_cohort() {
   local revision=""
   local revisions_json=""
   local valid=""
-  _verify_startup "$name"
+  _verify_startup --exclude-revision "$prior" "$name"
   for _ in $(seq 1 120); do
     latest="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
       --query properties.latestRevisionName -o tsv 2>/dev/null || true)"
