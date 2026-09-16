@@ -24,14 +24,28 @@ def test_current_pool_defaults_are_role_specific():
 
 
 def test_overbudget_migration_quiesces_and_proves_database_drain_before_api():
-    branch = SCRIPT.split('if [ "$DEPLOY_TARGET_ENV" = staging ]; then\n  if [ "$STAGING_DB_BOOTSTRAP" = 1 ]', 1)[1]
-    assert branch.index('_quiesce_staging_workers') < branch.index('_update_api_normal')
+    prepare = SCRIPT.split('_prepare_schema_for_rollout() {', 1)[1].split('\n}', 1)[0]
+    rollout = SCRIPT.split('_prepare_remediation_worker_patch\n', 1)[1]
+    assert prepare.index('_require_empty_staging_queue') < prepare.index('_require_single_revision_mode')
+    assert prepare.index('_require_single_revision_mode') < prepare.index('_quiesce_staging_workers')
+    assert prepare.index('_quiesce_staging_workers') < prepare.index('_schema_preflight')
+    assert rollout.index('_prepare_schema_for_rollout') < rollout.index('_update_api_normal')
     quiesce = SCRIPT.split('_quiesce_staging_workers() {', 1)[1].split('\n}', 1)[0]
     assert '--min-replicas 0' in quiesce
     assert 'revision deactivate' in quiesce
     assert 'revision_replica_gate.py' in quiesce and '"$active" = 0' in quiesce
     assert 'db_session_gate.py' in quiesce
     assert quiesce.index('db_session_gate.py') < quiesce.index('_queue_active_after_quiescence')
+
+
+def test_normal_staging_and_production_preflight_before_image_mutation():
+    prepare = SCRIPT.split('_prepare_schema_for_rollout() {', 1)[1].split('\n}', 1)[0]
+    staging_normal = prepare.split('if [ "$STAGING_DB_BOOTSTRAP" = 1 ]; then', 1)[1].split('return', 1)[1]
+    assert staging_normal.index('_schema_preflight') < staging_normal.index('_ensure_single_revision_mode')
+    assert prepare.rsplit('_schema_preflight', 1)[1].strip() == ''
+    rollout = SCRIPT.split('_prepare_remediation_worker_patch\n', 1)[1]
+    assert rollout.index('_prepare_schema_for_rollout') < rollout.index('if [ "$BG" = 1 ]')
+    assert rollout.index('_prepare_schema_for_rollout') < rollout.index('_update_api_normal')
 
 
 def test_each_staging_cohort_converges_before_the_next_update():
@@ -61,7 +75,8 @@ def test_interrupted_bootstrap_restores_old_worker_images_and_floors():
 def test_quiescence_targets_pre_update_revision_and_accounts_for_new_active_revision():
     quiesce = SCRIPT.split('_quiesce_staging_workers() {', 1)[1].split('\n}', 1)[0]
     before_update = quiesce.split('--min-replicas 0', 1)[0]
-    assert 'revision="$(az containerapp revision list' in before_update
+    assert 'STAGING_OLD_REVISIONS[$index]="$(az containerapp revision list' in before_update
+    assert 'revision="${STAGING_OLD_REVISIONS[$index]}"' in before_update
     after_update = quiesce.split('--min-replicas 0', 1)[1]
     assert '--revision "$revision"' in after_update
     assert 'while read -r active_revision' in after_update

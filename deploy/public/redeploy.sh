@@ -580,14 +580,16 @@ print("  ✓ staging database rollout budget verified (target {} + overlap {} + 
     <<<"$CAPACITY_PLAN"
 fi
 
-# Schema-changing releases elect one bounded migrator before any app/worker image
-# mutation. A held reader or active queue refuses this attempt; no customer work
-# is cancelled, and the existing deployment continues on its prior images.
-say "preparing the exact pinned schema before worker cutover"
-python3 "$SRC_ROOT/deploy/public/schema_preflight.py" \
-  --subscription "$SUB" --group "$RG" --environment "$DEPLOY_TARGET_ENV" \
-  --api-path "$PWD/api" "$APP" "${LANE_WORKERS[@]}" \
-  || die "schema preflight failed; no API or worker image update started"
+_schema_preflight() {
+  # Schema-changing releases elect one bounded migrator before any app/worker image
+  # mutation. A held reader or active queue refuses this attempt; no customer work
+  # is cancelled, and the existing deployment continues on its prior images.
+  say "preparing the exact pinned schema before worker cutover"
+  python3 "$SRC_ROOT/deploy/public/schema_preflight.py" \
+    --subscription "$SUB" --group "$RG" --environment "$DEPLOY_TARGET_ENV" \
+    --api-path "$PWD/api" "$APP" "${LANE_WORKERS[@]}" \
+    || die "schema preflight failed; no API or worker image update started"
+}
 
 STARTUP_EVIDENCE_PATH="${ACP_STARTUP_EVIDENCE_PATH:-$(mktemp -t acp-startup-evidence-XXXX)}"
 _verify_startup() {
@@ -693,9 +695,22 @@ _ensure_single_revision_mode() {
   done
 }
 
+_require_single_revision_mode() {
+  local name mode
+  for name in "$APP" "${LANE_WORKERS[@]}"; do
+    mode="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
+      --query properties.configuration.activeRevisionsMode -o tsv)"
+    [ "$mode" = Single ] \
+      || die "staging database bootstrap requires $name to already use Single revision mode before any mutation"
+  done
+}
+
 STAGING_OLD_IMAGES=()
 STAGING_OLD_MINS=()
+STAGING_OLD_REVISIONS=()
 STAGING_OLD_API_IMAGE=""
+STAGING_OLD_API_REVISION=""
+STAGING_API_MUTATION_ATTEMPTED=0
 STAGING_API_TARGET_READY=0
 STAGING_WORKERS_QUIESCED=0
 _staging_old_min() {
@@ -721,11 +736,18 @@ _restore_staging_workers() {
     return "$failed"
   fi
   echo "  restoring the prior staging API and workers after an interrupted bootstrap" >&2
-  revision="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" \
-    --query properties.latestRevisionName -o tsv 2>/dev/null || true)"
-  _aca_retry python3 "$SRC_ROOT/deploy/public/update_api_image.py" \
-    --subscription "$SUB" --group "$RG" --app "$APP" --image "$STAGING_OLD_API_IMAGE" \
-    --env "${API_ENV_VARS[@]}" || failed=1
+  if [ "$STAGING_API_MUTATION_ATTEMPTED" = 1 ]; then
+    revision="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" \
+      --query properties.latestRevisionName -o tsv 2>/dev/null || true)"
+    _aca_retry python3 "$SRC_ROOT/deploy/public/update_api_image.py" \
+      --subscription "$SUB" --group "$RG" --app "$APP" --image "$STAGING_OLD_API_IMAGE" \
+      --env "${API_ENV_VARS[@]}" || failed=1
+  else
+    # Schema preflight failed before any API mutation. Verify the exact captured
+    # cohort in place; creating an unnecessary API revision here would expand
+    # the recovery surface and briefly consume another database pool.
+    revision="$STAGING_OLD_API_REVISION"
+  fi
   if ! ( _wait_recovery_cohort "$APP" "$revision" "$STAGING_OLD_API_IMAGE" 1 ); then
     echo "  recovery failed for $APP; manual API restoration is required" >&2
     failed=1
@@ -794,20 +816,36 @@ _quiesce_staging_workers() {
   local index=""
   local -a candidate_revisions=()
   local -a candidate_args=()
-  STAGING_WORKERS_QUIESCED=1
+  STAGING_OLD_IMAGES=()
+  STAGING_OLD_MINS=()
+  STAGING_OLD_REVISIONS=()
   STAGING_OLD_API_IMAGE="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" \
     --query properties.template.containers[0].image -o tsv)"
+  STAGING_OLD_API_REVISION="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" \
+    --query properties.latestRevisionName -o tsv)"
   [ -n "$STAGING_OLD_API_IMAGE" ] || die "could not capture the pre-bootstrap API image"
-  trap _staging_bootstrap_exit EXIT
+  [ -n "$STAGING_OLD_API_REVISION" ] || die "could not capture the pre-bootstrap API revision"
+  # Capture and validate the whole fleet before the first mutation. A partial
+  # snapshot cannot restore a coherent old fleet if a later read fails.
   for index in "${!LANE_WORKERS[@]}"; do
     name="${LANE_WORKERS[$index]}"
     STAGING_OLD_IMAGES[$index]="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
       --query properties.template.containers[0].image -o tsv)"
     STAGING_OLD_MINS[$index]="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
       --query properties.template.scale.minReplicas -o tsv)"
-    revision="$(az containerapp revision list "${AZ[@]}" -g "$RG" -n "$name" --all \
+    STAGING_OLD_REVISIONS[$index]="$(az containerapp revision list "${AZ[@]}" -g "$RG" -n "$name" --all \
       --query "[?properties.active==\`true\`].name | [0]" -o tsv)"
-    [ -n "$revision" ] || die "could not resolve $name's pre-update active revision"
+    [ -n "${STAGING_OLD_IMAGES[$index]}" ] || die "could not capture $name's pre-bootstrap image"
+    [[ "${STAGING_OLD_MINS[$index]}" =~ ^[0-9]+$ ]] \
+      || die "could not capture $name's numeric pre-bootstrap minimum replicas"
+    [ -n "${STAGING_OLD_REVISIONS[$index]}" ] \
+      || die "could not resolve $name's pre-update active revision"
+  done
+  STAGING_WORKERS_QUIESCED=1
+  trap _staging_bootstrap_exit EXIT
+  for index in "${!LANE_WORKERS[@]}"; do
+    name="${LANE_WORKERS[$index]}"
+    revision="${STAGING_OLD_REVISIONS[$index]}"
     # min=0 prevents a replacement replica while the exact pre-update revision receives SIGTERM and its
     # existing 540/600-second drain contract. Deactivation is explicit; KEDA cooldown is not a
     # completion signal.
@@ -882,6 +920,32 @@ EOF
     || die "queue activity changed while staging workers drained; restoring prior workers without touching the API"
 }
 
+_prepare_schema_for_rollout() {
+  if [ "$DEPLOY_TARGET_ENV" = staging ]; then
+    if [ "$STAGING_DB_BOOTSTRAP" = 1 ]; then
+      # The old worker pools can themselves exhaust the ordinary PostgreSQL
+      # connection budget. Prove the queue empty, capture recoverable state and
+      # drain them before asking the bounded migrator to connect. The EXIT trap
+      # installed by quiescence restores the old API and worker fleet if schema
+      # verification refuses or fails.
+      _require_empty_staging_queue
+      _require_single_revision_mode
+      say "quiescing staging workers for the one-time database-pool bootstrap"
+      _quiesce_staging_workers
+      _schema_preflight
+      return
+    fi
+    # An already-budgeted staging fleet needs no bootstrap mutation. Preserve
+    # schema-before-image ordering, then normalize revision mode for rollout.
+    _schema_preflight
+    _ensure_single_revision_mode
+    return
+  fi
+  # Production retains the original invariant: schema verification completes
+  # before blue-green or ordinary image mutation begins.
+  _schema_preflight
+}
+
 # ── 8-BG. blue-green (ACP_BLUE_GREEN=1) ────────────────────────────────────────────────────
 #
 # WHAT IS AND IS NOT PROTECTED — read this before trusting the word "blue-green".
@@ -907,6 +971,7 @@ EOF
 # plus the job table), not a deploy-script change, and it is deliberately out of scope here.
 # Validate and prepare before the first service mutation in either rollout path.
 _prepare_remediation_worker_patch
+_prepare_schema_for_rollout
 
 _update_api_normal() {
   _aca_retry python3 "$SRC_ROOT/deploy/public/update_api_image.py" \
@@ -1045,16 +1110,9 @@ fi
 # A refusal is a STATE, not a fault — the same command succeeds once the in-flight operation
 # settles — so `_aca_retry` waits it out and fails fast on anything else. See readiness_probe.sh.
 if [ "$DEPLOY_TARGET_ENV" = staging ]; then
-  if [ "$STAGING_DB_BOOTSTRAP" = 1 ]; then
-    _require_empty_staging_queue
-  fi
-  _ensure_single_revision_mode
-  if [ "$STAGING_DB_BOOTSTRAP" = 1 ]; then
-    say "quiescing staging workers for the one-time database-pool bootstrap"
-    _quiesce_staging_workers
-  fi
   say "updating staging API within the PostgreSQL rollout budget"
   PRIOR_REVISION="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" --query properties.latestRevisionName -o tsv)"
+  STAGING_API_MUTATION_ATTEMPTED=1
   _update_api_normal
   _wait_rollout_cohort "$APP" "$PRIOR_REVISION"
   STAGING_API_TARGET_READY=1

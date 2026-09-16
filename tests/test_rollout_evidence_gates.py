@@ -1,5 +1,6 @@
 import io
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -58,13 +59,84 @@ touch "$1/mutated"
     assert 'before any mutation' in result.stderr
 
 
-def test_api_convergence_failure_restores_and_verifies_old_api(tmp_path):
+def test_schema_preparation_orders_bootstrap_and_recovers_on_preflight_failure(tmp_path):
+    source = (ROOT / 'deploy/public/redeploy.sh').read_text()
+    function = source.split('_prepare_schema_for_rollout() {', 1)[1].split('\n}', 1)[0]
+    harness = tmp_path / 'schema-order.sh'
+    harness.write_text(f'''#!/usr/bin/env bash
+set -euo pipefail
+LOG="$2/order-log"
+DEPLOY_TARGET_ENV="$1"
+STAGING_DB_BOOTSTRAP="${{BOOTSTRAP:-0}}"
+say() {{ :; }}
+die() {{ exit 23; }}
+_require_empty_staging_queue() {{ echo queue >> "$LOG"; }}
+_require_single_revision_mode() {{ echo mode >> "$LOG"; }}
+_ensure_single_revision_mode() {{ echo ensure-mode >> "$LOG"; }}
+_staging_bootstrap_exit() {{ status=$?; trap - EXIT; echo recover >> "$LOG"; exit "$status"; }}
+_quiesce_staging_workers() {{ echo quiesce >> "$LOG"; trap _staging_bootstrap_exit EXIT; }}
+_schema_preflight() {{ echo schema >> "$LOG"; [ "${{SCHEMA_FAIL:-0}}" != 1 ] || die; }}
+_update_api_normal() {{ echo api >> "$LOG"; }}
+_prepare_schema_for_rollout() {{{function}
+}}
+_prepare_schema_for_rollout
+_update_api_normal
+''')
+    harness.chmod(0o755)
+
+    env = {**os.environ, 'BOOTSTRAP': '1'}
+    result = subprocess.run([str(harness), 'staging', str(tmp_path)], env=env)
+    assert result.returncode == 0
+    assert (tmp_path / 'order-log').read_text().splitlines() == [
+        'queue', 'mode', 'quiesce', 'schema', 'api', 'recover']
+
+    (tmp_path / 'order-log').unlink()
+    result = subprocess.run([str(harness), 'staging', str(tmp_path)],
+                            env={**env, 'SCHEMA_FAIL': '1'})
+    assert result.returncode == 23
+    assert (tmp_path / 'order-log').read_text().splitlines() == [
+        'queue', 'mode', 'quiesce', 'schema', 'recover']
+
+
+@pytest.mark.parametrize('environment', ['staging', 'production'])
+def test_nonbootstrap_schema_preflight_precedes_image_update(tmp_path, environment):
+    source = (ROOT / 'deploy/public/redeploy.sh').read_text()
+    function = source.split('_prepare_schema_for_rollout() {', 1)[1].split('\n}', 1)[0]
+    harness = tmp_path / 'normal-schema-order.sh'
+    harness.write_text(f'''#!/usr/bin/env bash
+set -euo pipefail
+LOG="$2/order-log"
+DEPLOY_TARGET_ENV="$1"
+STAGING_DB_BOOTSTRAP=0
+_require_empty_staging_queue() {{ echo queue >> "$LOG"; }}
+_quiesce_staging_workers() {{ echo quiesce >> "$LOG"; }}
+_require_single_revision_mode() {{ echo require-mode >> "$LOG"; }}
+_ensure_single_revision_mode() {{ echo mode >> "$LOG"; }}
+_schema_preflight() {{ echo schema >> "$LOG"; }}
+_update_api_normal() {{ echo api >> "$LOG"; }}
+_prepare_schema_for_rollout() {{{function}
+}}
+_prepare_schema_for_rollout
+_update_api_normal
+''')
+    harness.chmod(0o755)
+    result = subprocess.run([str(harness), environment, str(tmp_path)])
+    assert result.returncode == 0
+    expected = ['schema', 'mode', 'api'] if environment == 'staging' else ['schema', 'api']
+    assert (tmp_path / 'order-log').read_text().splitlines() == expected
+
+
+@pytest.mark.parametrize('api_attempted', [0, 1])
+def test_recovery_verifies_untouched_api_without_mutating_it_and_restores_workers(
+        tmp_path, api_attempted):
     source = (ROOT / 'deploy/public/redeploy.sh').read_text()
     function = source.split('_restore_staging_workers() {', 1)[1].split('\n_staging_bootstrap_exit()', 1)[0]
     harness = tmp_path / 'recover.sh'
     harness.write_text('set -euo pipefail\n_restore_staging_workers() {' + function + '''
 STAGING_WORKERS_QUIESCED=1; STAGING_API_TARGET_READY=0
-STAGING_OLD_API_IMAGE=old:image; LANE_WORKERS=(); STAGING_OLD_IMAGES=(); STAGING_OLD_MINS=()
+STAGING_API_MUTATION_ATTEMPTED=$3
+STAGING_OLD_API_IMAGE=old:image; STAGING_OLD_API_REVISION=oldrev
+LANE_WORKERS=(worker); STAGING_OLD_IMAGES=(old-worker:image); STAGING_OLD_MINS=(2)
 AZ=(fake); RG=g; APP=api; SUB=s; SRC_ROOT="$1"; API_ENV_VARS=(ACP_DB_MAX_CONN=8)
 LOG="$2/recovery-log"
 WORKER_TERMINATION_GRACE_SECONDS=600; WORKER_DRAIN_SECONDS=540; RELEASE_WORKER=release
@@ -73,22 +145,83 @@ _wait_recovery_cohort() { echo "$*" >> "$LOG"; return 0; }
 sleep() { :; }
 python3() { echo "$*" >> "$LOG"; }
 az() {
+  echo "az $*" >> "$LOG"
   case "$*" in
     *latestReadyRevisionName*) echo oldrev ;;
     *latestRevisionName*) echo oldrev ;;
     *"containers[0].image"*) echo old:image ;;
+    *"containerapp update"*) : ;;
     *"revision list"*) echo 1 ;;
     *"replica list"*) echo 1 ;;
     *) return 1 ;;
   esac
 }
 _restore_staging_workers
-grep -- '--image old:image' "$2/recovery-log"
 ''')
-    result = subprocess.run(['bash', str(harness), str(ROOT), str(tmp_path)],
+    result = subprocess.run(['bash', str(harness), str(ROOT), str(tmp_path), str(api_attempted)],
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    assert 'api oldrev old:image 1' in (tmp_path / 'recovery-log').read_text()
+    log = (tmp_path / 'recovery-log').read_text()
+    assert 'api oldrev old:image 1' in log
+    assert 'worker oldrev old-worker:image 2' in log
+    assert 'containerapp update' in log and '--image old-worker:image' in log
+    assert ('update_api_image.py' in log) is bool(api_attempted)
+
+
+def test_bootstrap_revision_mode_gate_is_read_only_and_fails_closed(tmp_path):
+    source = (ROOT / 'deploy/public/redeploy.sh').read_text()
+    function = source.split('_require_single_revision_mode() {', 1)[1].split('\n}', 1)[0]
+    assert '_aca_retry' not in function and 'set-mode' not in function
+    harness = tmp_path / 'mode-gate.sh'
+    harness.write_text(f'''#!/usr/bin/env bash
+set -euo pipefail
+APP=api; LANE_WORKERS=(worker); AZ=(fake); RG=g
+die() {{ echo "$*" >&2; exit 19; }}
+az() {{ case "$*" in *"-n worker"*) echo Multiple ;; *) echo Single ;; esac; }}
+_require_single_revision_mode() {{{function}
+}}
+_require_single_revision_mode
+touch "$1/mutated"
+''')
+    harness.chmod(0o755)
+    result = subprocess.run([str(harness), str(tmp_path)], capture_output=True, text=True)
+    assert result.returncode == 19
+    assert not (tmp_path / 'mutated').exists()
+    assert 'before any mutation' in result.stderr
+
+
+def test_late_worker_snapshot_failure_causes_zero_mutation(tmp_path):
+    source = (ROOT / 'deploy/public/redeploy.sh').read_text()
+    function = source.split('_quiesce_staging_workers() {', 1)[1].split('\n}', 1)[0]
+    harness = tmp_path / 'snapshot-failure.sh'
+    harness.write_text(f'''#!/usr/bin/env bash
+set -euo pipefail
+_quiesce_staging_workers() {{{function}
+}}
+WORK="$1"; APP=api; RG=g; AZ=(fake); LANE_WORKERS=(worker1 worker2)
+STAGING_OLD_IMAGES=(); STAGING_OLD_MINS=(); STAGING_OLD_REVISIONS=()
+STAGING_WORKERS_QUIESCED=0
+die() {{ echo "$*" >&2; exit 17; }}
+az() {{
+  case "$*" in
+    *"containerapp update"*|*"revision deactivate"*|*"revision set-mode"*) echo "$*" >> "$WORK/mutations" ;;
+  esac
+  case "$*" in
+    *"-n worker2"*"containers[0].image"*) echo '' ;;
+    *"containers[0].image"*) echo old:image ;;
+    *latestRevisionName*) echo api-old ;;
+    *scale.minReplicas*) echo 1 ;;
+    *"revision list"*) echo worker-old ;;
+    *) return 1 ;;
+  esac
+}}
+_quiesce_staging_workers
+''')
+    harness.chmod(0o755)
+    result = subprocess.run([str(harness), str(tmp_path)], capture_output=True, text=True)
+    assert result.returncode == 17
+    assert 'worker2' in result.stderr
+    assert not (tmp_path / 'mutations').exists()
 
 
 @pytest.mark.parametrize('old_replicas,expected', [(1, 1), (0, 0)])
@@ -109,6 +242,7 @@ az() {{
     *latestReadyRevisionName*) echo rev373 ;;
     *latestRevisionName*) echo rev373 ;;
     *"containers[0].image"*) echo old:image ;;
+    *latestRevisionName*) echo old ;;
     *"revision list"*) echo '[{{"name":"rev372","properties":{{"active":false,"replicas":'$OLD_REPLICAS'}}}},{{"name":"rev373","properties":{{"active":true,"replicas":1}}}}]' ;;
     *"replica list"*) echo 1 ;;
     *) return 1 ;;
@@ -239,6 +373,7 @@ az() {{
       n=$(cat "$WORK/show" 2>/dev/null || echo 0); echo $((n+1)) > "$WORK/show"
       if [ "$n" = 0 ]; then echo '{{"provisioning":"Succeeded","min_replicas":1,"revision":"old"}}'
       else echo '{{"provisioning":"Succeeded","min_replicas":0,"revision":"config"}}'; fi ;;
+    *latestRevisionName*) echo old ;;
     *"scale.minReplicas"*) echo 1 ;;
     *"revision deactivate"*) echo "$*" >> "$WORK/deactivated" ;;
     *"[?properties.active=="*"].name"*) printf 'old\\nconfig\\n' ;;
