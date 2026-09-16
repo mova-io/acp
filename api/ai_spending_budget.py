@@ -159,6 +159,66 @@ class BudgetLedger:
                 result = self._attempt(cur, owner_id, run_id, attempt_id)
         return result
 
+    def reserve_many(self, owner_id, run_id, attempts):
+        """Atomically reserve one bounded charge per attempt.
+
+        Exact full-batch replay returns the durable rows in request order. A
+        partially replayed batch may be completed only while every existing
+        row is still reserved; once any member has advanced, the batch cannot
+        authorize new reservations.
+        """
+        if not isinstance(attempts, (list, tuple)) or not attempts:
+            raise ValueError("attempts must be a nonempty list or tuple")
+        normalized = []
+        seen = set()
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                raise ValueError("each attempt must be a mapping")
+            attempt_id = attempt.get("attempt_id")
+            max_cost_units = attempt.get("max_cost_units")
+            pricing_ref = attempt.get("pricing_ref")
+            if max_cost_units is None or not pricing_ref:
+                raise UnknownPricing("a verified maximum charge and pricing reference are required")
+            _identifier(attempt_id)
+            _units(max_cost_units)
+            _identifier(pricing_ref)
+            if attempt_id in seen:
+                raise AttemptConflict("duplicate attempt ID in reservation batch")
+            seen.add(attempt_id)
+            normalized.append((attempt_id, max_cost_units, pricing_ref))
+
+        with self._locked(owner_id, run_id) as (cur, budget):
+            rows = []
+            new = []
+            for attempt_id, max_cost_units, pricing_ref in normalized:
+                row = self._attempt(cur, owner_id, run_id, attempt_id)
+                if row is not None:
+                    if (row["max_cost_units"], row["pricing_ref"]) != (max_cost_units, pricing_ref):
+                        raise AttemptConflict("attempt ID reused with a different bound or price")
+                    rows.append(row)
+                else:
+                    rows.append(None)
+                    new.append((attempt_id, max_cost_units, pricing_ref))
+
+            if new:
+                existing = [row for row in rows if row is not None]
+                if any(row["state"] != "reserved" for row in existing):
+                    raise AttemptConflict("advanced attempt cannot admit new batch reservations")
+                snapshot = self._snapshot(cur, budget)
+                if snapshot["blocked"]:
+                    raise BudgetError("unresolved charge or breached bound blocks admission")
+                exposure = sum(max_cost_units for _, max_cost_units, _ in new)
+                if exposure > snapshot["available_units"]:
+                    raise BudgetExceeded("maximum provider exposure exceeds remaining budget")
+                for attempt_id, max_cost_units, pricing_ref in new:
+                    self.db.execute(cur, """INSERT INTO ai_spending_attempts
+                        (owner_id,run_id,attempt_id,max_cost_units,pricing_ref,state)
+                        VALUES (%s,%s,%s,%s,%s,'reserved')""",
+                        (owner_id, run_id, attempt_id, max_cost_units, pricing_ref))
+                rows = [self._attempt(cur, owner_id, run_id, attempt_id)
+                        for attempt_id, _, _ in normalized]
+        return rows
+
     def claim_dispatch(self, owner_id, run_id, attempt_id):
         """True once, after durable commit. False is NEVER permission to send again."""
         with self._locked(owner_id, run_id) as (cur, budget):
