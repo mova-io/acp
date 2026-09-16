@@ -146,7 +146,7 @@ def test_postgres_v57_to_v58_preserves_existing_rows_and_records_checksum(monkey
     url = os.environ['DATABASE_URL']; require_disposable_postgres(url)
     adapter = store_mod._PgAdapter(url)
     adapter.init_schema()
-    with adapter.cursor() as cur:
+    with adapter.transaction(), adapter.cursor() as cur:
         require_disposable_postgres(url, conn=cur.connection)
         adapter.execute(cur, 'DROP TABLE IF EXISTS document_wide_chunks')
         adapter.execute(cur, 'DROP TABLE IF EXISTS document_wide_chunk_plans')
