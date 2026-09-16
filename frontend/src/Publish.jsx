@@ -30,6 +30,7 @@ import ReleaseTemplates from './ReleaseTemplates.jsx'
 import './release-plan-summary.css'
 import './release-clarity.css'
 import { hasCorrectedCopy, hasSavedCorrectedCopy, deliveryIsCurrent, releaseReadiness, canSelectRelease, releaseSourceState } from './releaseClarityModel.js'
+import { releaseErrorCopy } from './releaseErrorCopy.js'
 
 // Step 9 · Publish. Marks re-validated documents as published: the conformance status
 // is recorded in the audit trail and the fixed copy (already in Blob + the Drive
@@ -629,7 +630,12 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
       successful.forEach((row) => onPublish?.(row.file))
     } catch (error) {
       if (!ownsRelease(operation.context)) return
-      if (!await recoverReleaseDestination(error, pending)) setReleaseError({ summary: 'The selected copies could not be released.', details: error?.detail?.message || error?.detail?.preflight?.message || error?.message || 'The release service did not complete the request.', retry: () => publishAll(fileNames, preferredFolderName, exact) })
+      if (!await recoverReleaseDestination(error, pending)) {
+        const copy = releaseErrorCopy(error, sourceProduct)
+        setReleaseError({ summary: 'The selected copies could not be released.', details: copy.message,
+          diagnosticCode: copy.diagnosticCode,
+          retry: copy.retryable ? () => publishAll(fileNames, preferredFolderName, exact) : null })
+      }
     } finally {
       if (ownsRelease(operation.context) && publishLock.current === operation) {
         publishLock.current = false
@@ -996,12 +1002,12 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
           <div>
             <b id="release-error-title">{releaseError.summary}</b>
             <p>{releaseError.details}</p>
-            <details><summary>View details</summary><p>Scan {run?.id || 'unknown'} · {sourceProduct}. Completed copies remain safe and original files are unchanged.</p></details>
+            <details><summary>View details</summary><p>Scan {run?.id || 'unknown'} · {sourceProduct}{releaseError.diagnosticCode ? ` · Error code: ${releaseError.diagnosticCode}` : ''}. Completed copies remain safe and original files are unchanged.</p></details>
           </div>
           <div className="release-recovery__actions">
             {releaseError.retryFiles ? <button disabled={readOnly || publishing || destinationPending || !selectableReady.some(file => !done[file.file] && releaseError.retryFiles.includes(file.file))}
               onClick={() => { const names = releaseError.retryFiles; setReleaseError(null); publishAll(names, releaseFolder?.name || releaseFolderName, true) }}>Publish to saved destination</button>
-              : <button disabled={!releaseError.retry || publishing} onClick={() => { const retry = releaseError.retry; setReleaseError(null); retry?.() }}>{releaseError.retryLabel || 'Retry'}</button>}
+              : releaseError.retry ? <button disabled={publishing} onClick={() => { const retry = releaseError.retry; setReleaseError(null); retry() }}>{releaseError.retryLabel || 'Retry'}</button> : null}
             <button className="ghost" onClick={() => document.getElementById('workflow-tab-liveops')?.click()}>Open Live Operations</button>
             <button className="ghost" onClick={() => setReleaseError(null)}>Dismiss</button>
           </div>
