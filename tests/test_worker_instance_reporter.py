@@ -93,7 +93,7 @@ def test_draining_keeps_reporting_active_work_until_stopped(monkeypatch):
 def test_app_wires_the_same_reporter_around_embedded_workers():
     source = (Path(__file__).resolve().parent.parent / "api" / "app.py").read_text()
     assert "_embedded_worker_reporter = WorkerInstanceReporter(core)" in source
-    assert "_embedded_worker_reporter.start()" in source
+    assert ('_startup_phase.run("worker_reporter_start", _embedded_worker_reporter.start' in source)
     assert source.index("_embedded_worker_reporter.draining()") < source.index("core.stop_workers()")
     assert source.index("core.stop_workers()") < source.index("_embedded_worker_reporter.stop()")
     assert "_embedded_worker_reporter.stop()" in source
