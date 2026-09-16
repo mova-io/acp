@@ -1922,6 +1922,10 @@ from automatic_release_store import SCHEMA as _AUTOMATIC_RELEASE_SCHEMA
 _SCHEMA.extend([*_AI_SPENDING_SCHEMA, _AI_RUN_POLICY_SCHEMA,
                 *_AI_ATTEMPT_HISTORY_SCHEMA, *_AI_LOCAL_ACTIVITY_SCHEMA, *_AI_REVIEW_SCHEMA, *_AI_PROPOSAL_SNAPSHOT_SCHEMA, *_CONTRIBUTION_SCHEMA, *_AUTOMATIC_RELEASE_SCHEMA])
 
+# v56 adds bounded scheduled execution to the existing occurrence ledger.
+from scheduled_scan_store import SCHEMA as _SCHEDULED_EXECUTION_SCHEMA
+_SCHEMA.extend(_SCHEDULED_EXECUTION_SCHEMA)
+
 # ── Power BI read-only views (Postgres only) ────────────────────────────────
 # Three views that expose ACP scan data for Power BI DirectQuery. They are
 # created by _PgAdapter.init_schema() after the main _SCHEMA tables are ready.
@@ -2521,8 +2525,8 @@ class _PgAdapter:
     # v53 retains numeric-only GPU timing in nullable ai_calls.timing.
     # v54 binds local request telemetry to its authenticated execution without paid attempts.
     # v55 preserves tenant/provider/account/item lifecycle state across scan history pruning.
-    _SCHEMA_VERSION = 55
-    _SCHEMA_CHECKSUM_AT_VERSION = "a74c6aaaa10617e485145c1afc9fa388"
+    _SCHEMA_VERSION = 56
+    _SCHEMA_CHECKSUM_AT_VERSION = "4a3338134fdc573bcaa2062935c2711d"
     # Namespaced so it cannot collide with an advisory lock taken anywhere else. Session-scoped
     # (pg_advisory_lock, not _xact) because the migration spans several transactions.
     _MIGRATION_ADVISORY_KEY = 0x4143500001          # 'ACP' + slot 1
@@ -5433,7 +5437,9 @@ class Store:
         """
         owner_email=owner_email.strip().lower()
         cleared: list[str] = []
-        with self._db.cursor() as cur:
+        with self.transaction(), self._db.cursor() as cur:
+            from scheduled_scan_store import erase_owner
+            cleared.extend(erase_owner(self, owner_email))
             # Full tenant erasure clears source identifiers and all lifecycle projections in
             # this same transaction. This is not an undo and makes no provider call.
             for table in ('source_lifecycle_state','lifecycle_evaluation','effective_disposition','disposition_audit'):
@@ -6280,7 +6286,12 @@ class Store:
         whole time, rejecting every subsequent scan attempt for that source. The `jobs` table's
         own status is the one place that distinguishes genuinely-still-running from
         genuinely-done regardless of what scan_runs says."""
-        return self._end_running_scan(sid, owner=owner, terminal_status="cancelled")
+        with self.transaction():
+            changed = self._end_running_scan(sid, owner=owner, terminal_status="cancelled")
+            if changed:
+                from scheduled_scan_store import cancel_for_scan
+                cancel_for_scan(self, sid)
+            return changed
 
     def supersede_scan(self, sid: str, owner: str | None = None) -> bool:
         """Stop an in-flight scan because a NEW scan for the same owner is taking its place
@@ -6299,7 +6310,12 @@ class Store:
         previous_run_for_source() all now exclude, so an auto-superseded attempt never displaces a
         real result — unlike an explicit user Stop ('cancelled'), which is meant to stay visible
         in scan history exactly as it does today."""
-        return self._end_running_scan(sid, owner=owner, terminal_status="superseded")
+        with self.transaction():
+            changed = self._end_running_scan(sid, owner=owner, terminal_status="superseded")
+            if changed:
+                from scheduled_scan_store import cancel_for_scan
+                cancel_for_scan(self, sid)
+            return changed
 
     def _end_running_scan(self, sid: str, *, owner: str | None, terminal_status: str) -> bool:
         with self._db.cursor() as cur:
@@ -7568,7 +7584,7 @@ class Store:
                                      completed_at: str, changed: bool | None = None,
                                      error: str | None = None) -> dict | None:
         normalized = str(owner).strip().lower()
-        if result not in {"succeeded", "failed", "skipped"}:
+        if result not in {"succeeded", "failed", "skipped", "cancelled"}:
             raise ValueError("invalid schedule occurrence result")
         duration_ms = None
         with self._db.cursor() as cur:
@@ -7637,14 +7653,15 @@ class Store:
 
     def emit_schedule_notification_for_occurrence(self, owner: str, occurrence_key: str,
                                                   result: str, *, changed: bool = False,
-                                                  message: str | None = None) -> dict | None:
-        policy = self.get_user_scan_schedule(owner)["notification_policy"]
+                                                  message: str | None = None, policy: str | None = None) -> dict | None:
+        policy = policy or self.get_user_scan_schedule(owner)["notification_policy"]
         should_emit = (policy == "all" or
                        policy in {"failures", "changes_and_failures"} and result == "failed" or
                        policy == "changes_and_failures" and bool(changed))
         if not should_emit:
             return None
         title = ("Scheduled scan failed" if result == "failed" else
+                 "Scheduled scan cancelled" if result == "cancelled" else
                  "Scheduled scan found changes" if changed else "Scheduled scan completed")
         return self.create_schedule_notification(
             owner, occurrence_key, result, title, message or title)
@@ -13909,12 +13926,12 @@ class Store:
                     (job_id, encoded, job_priority("scheduled_sweep"), run_after or now,
                      now, now, owner, owner, occurrence_key))
             else:
-                # Legacy singleton schedules have no owner row or watermark. Preserve their
-                # original deterministic job-id behavior unchanged.
+                # Legacy interval/id behavior stays intact. The singleton fleet slot remains
+                # occupied while its metadata and assessment children advance.
                 self._db.execute(cur,
                     "INSERT INTO jobs(id,type,payload,status,priority,attempts,max_attempts,"
                     "run_after,created_at,updated_at,scheduled_owner) "
-                    "VALUES(%s,'scheduled_sweep',%s,'queued',%s,0,3,%s,%s,%s,NULL) "
+                    "VALUES(%s,'scheduled_sweep',%s,'queued',%s,0,3,%s,%s,%s,'__singleton__') "
                     "ON CONFLICT DO NOTHING",
                     (job_id, encoded, job_priority("scheduled_sweep"), run_after or now, now, now))
             admitted = (getattr(cur, "rowcount", 0) or 0) > 0
@@ -16349,6 +16366,9 @@ class Store:
             self.publish_worker_stage_event(job_id, worker_id, attempt, "attempt.cancelled",
                                             reason="worker_acknowledged")
             self._record_stage_terminal_if_ready(job)
+            if job and job.get('type') == 'scheduled_sweep':
+                from scheduled_scan_store import cancelled_tick
+                cancelled_tick(self, job)
         return won
 
     # A job that reached a terminal state because someone STOPPED it, not because it failed.
@@ -16722,6 +16742,10 @@ class Store:
             return "stale"
         now = datetime.now(timezone.utc)
         if force_dead or job["attempts"] >= job["max_attempts"]:
+            if job.get('type') == 'scheduled_sweep':
+                from scheduled_scan_store import exhausted_tick
+                if exhausted_tick(self, job, worker_id=worker_id, attempt=attempt):
+                    return 'dead'
             # BEFORE the payload is scrubbed — scrubbing is what removes the file names this needs.
             self._record_dead_scan_files(job, error, now.isoformat())
             scrubbed = self._scrub_payload_secrets(job_id)
