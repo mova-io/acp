@@ -166,3 +166,60 @@ def test_logging_failure_count_is_visible_on_recovery(diagnostics, monkeypatch):
         diag.run('db_ping', lambda: 42)
     assert events[-1]['diagnostic_failures'] == 1
     assert 'secret' not in json.dumps(events)
+
+
+@pytest.mark.parametrize('root_sink', [False, True])
+def test_default_uvicorn_subprocess_emission_is_opt_in_and_not_duplicated(root_sink):
+    import subprocess
+    import sys
+    from pathlib import Path
+    script = """
+import json, logging, logging.config, os
+from uvicorn.config import LOGGING_CONFIG
+logging.config.dictConfig(LOGGING_CONFIG)
+root = logging.getLogger()
+if ROOT_SINK:
+    root.addHandler(logging.StreamHandler())
+original_root_handlers = tuple(root.handlers)
+import readiness_phase_diagnostics as diag
+os.environ.pop('ACP_READINESS_PHASE_DIAGNOSTICS', None)
+with diag.request('full'):
+    diag.run('redis', lambda: None)
+assert not diag.LOGGER.handlers
+assert diag.LOGGER.propagate
+os.environ['ACP_READINESS_PHASE_DIAGNOSTICS'] = '1'
+for _ in range(2):
+    with diag.request('full'):
+        diag.run('redis', lambda: None)
+assert len(diag.LOGGER.handlers) == 1
+assert not diag.LOGGER.propagate
+assert tuple(root.handlers) == original_root_handlers
+print('verified')
+""".replace('ROOT_SINK', repr(root_sink))
+    result = subprocess.run([sys.executable, '-c', script],
+                            cwd=Path(__file__).resolve().parents[1] / 'api',
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == 'verified'
+    events = [json.loads(line) for line in result.stderr.splitlines()]
+    assert len(events) == 4
+    assert all(e['event'] == 'readiness.phase' for e in events)
+    assert sum(e['phase'] == 'redis' for e in events) == 2
+
+
+def test_output_setup_is_idempotent_under_concurrent_calls():
+    from concurrent.futures import ThreadPoolExecutor
+    handlers = list(diag.LOGGER.handlers)
+    propagation = diag.LOGGER.propagate
+    try:
+        diag.LOGGER.handlers.clear()
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            list(executor.map(lambda _: diag._ensure_output(), range(20)))
+        assert len(diag.LOGGER.handlers) == 1
+        assert not diag.LOGGER.propagate
+    finally:
+        for handler in diag.LOGGER.handlers:
+            if handler not in handlers:
+                handler.close()
+        diag.LOGGER.handlers[:] = handlers
+        diag.LOGGER.propagate = propagation

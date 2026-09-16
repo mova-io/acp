@@ -39,6 +39,17 @@ def _record_failure():
         DIAGNOSTIC_FAILURES = min(9999, DIAGNOSTIC_FAILURES + 1)
 
 
+def _ensure_output():
+    """Use this logger's sink, never depend on or modify the root configuration."""
+    with LOCK:
+        if not LOGGER.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(logging.Formatter('%(message)s'))
+            LOGGER.addHandler(handler)
+        # A dedicated sink must not duplicate records through an ancestor's handler.
+        LOGGER.propagate = False
+
+
 def _emit(record, phase, event, elapsed, now):
     global RATE_WINDOW, RATE_COUNT
     try:
@@ -49,6 +60,7 @@ def _emit(record, phase, event, elapsed, now):
                 return
             record['events'] += 1
             RATE_COUNT += 1
+        _ensure_output()
         # No caller-provided text, error objects, route parameters or dependency URLs.
         LOGGER.info(json.dumps({'event': 'readiness.phase', 'kind': record['kind'],
             'request_id': record['id'], 'phase': phase, 'state': event,
