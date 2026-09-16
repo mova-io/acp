@@ -93,9 +93,10 @@ def test_missing_drive_grant_requests_reconnect_without_upload(drive, monkeypatc
     monkeypatch.setattr(flow, 'request_for', lambda *a: SimpleNamespace(headers={}))
     row = tick(drive, row)
     assert flow.public(row)['requires_reconnect']
+    assert flow.public(row)['needs_attention']
     assert not drive.calls
     assert row['status'] == 'blocked'
-    assert row['progress']['_tick_revision'] == row['revision']
+    assert row['progress']['_tick_revision'] < row['revision']
 
 
 def test_resume_preserves_intent_and_cannot_revive_stopped_permission(drive):
