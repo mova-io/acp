@@ -157,3 +157,31 @@ def test_earliest_store_programming_failure_is_not_retried(monkeypatch, tmp_path
     with pytest.raises(ValueError):
         app_module._start_job_workers()
     assert len(attempts) == 1
+
+
+def test_diagnostic_replay_database_failure_cannot_crash_healthy_startup(
+        monkeypatch, tmp_path):
+    path = tmp_path / 'startup-failure.json'
+    path.write_text(json.dumps({
+        'revision': 'api--test', 'phase': 'store',
+        'error_type': 'OperationalError', 'sqlstate': None}))
+    monkeypatch.setattr(app_module, '_STARTUP_FAILURE_PATH', str(path))
+    store = FakeStore()
+    store.set_setting = lambda *_args: (_ for _ in ()).throw(
+        psycopg2.OperationalError('diagnostic replay unavailable'))
+    counts = {'scheduler': 0, 'workers': 0}
+    monkeypatch.setattr(core, 'store', store)
+    monkeypatch.setattr(core, 'get_store', lambda: store)
+    monkeypatch.setattr(core, 'reload_scheduler',
+                        lambda: counts.__setitem__('scheduler', counts['scheduler'] + 1))
+    monkeypatch.setattr(core, 'start_scheduler', lambda: None)
+    monkeypatch.setattr(core, 'start_workers',
+                        lambda: counts.__setitem__('workers', counts['workers'] + 1) or 0)
+    monkeypatch.setattr(capacity_reconcile, 'start', lambda *_args: None)
+    monkeypatch.setattr(app_module, '_announce_isolation_mode', lambda: None)
+    monkeypatch.setenv('CONTAINER_APP_REVISION', 'api--test')
+
+    app_module._start_job_workers()
+
+    assert counts == {'scheduler': 1, 'workers': 1}
+    assert path.exists()  # Retained for the next process; never silently discarded.

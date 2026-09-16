@@ -429,7 +429,7 @@ def _start_job_workers():
                          and re.fullmatch(r"[A-Z0-9]{5}", prior["sqlstate"])))):
             core.store.set_setting(f"startup_failure:{revision}", json.dumps(prior))
         path.unlink(missing_ok=True)
-    except (OSError, ValueError, TypeError, AttributeError):
+    except Exception:  # noqa: BLE001 — diagnostic replay cannot take healthy startup down.
         # Failure evidence must never replace a successful store startup.
         pass
     _announce_isolation_mode()
