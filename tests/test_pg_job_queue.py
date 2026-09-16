@@ -95,11 +95,23 @@ def test_lifecycle_source_state_projects_and_restores_on_real_postgres(pg):
         pg.add_inventory(scan,[{'file':file,'drive_file_id':'item-a','drive_account_id':'account-a'}])
     seed('lifecycle-old')
     seed('lifecycle-known','renamed.docx')
+    from lifecycle_identity import source_identity
+    source_item={'drive_file_id':'item-a','drive_account_id':'account-a'}
+    with pg._db.cursor() as cur:
+        pg._db.execute(cur,"UPDATE scan_inventory SET lifecycle_status='Deleted' WHERE scan_id='lifecycle-old'")
+    legacy=pg.get_source_lifecycle_states(owner,'drive',[source_item])
+    assert legacy['states'][source_identity(owner,'drive',source_item)]['origin']=='legacy_inventory'
+    with pg._db.cursor() as cur:
+        pg._db.execute(cur,'SELECT COUNT(*) AS n FROM source_lifecycle_state')
+        assert pg._db.fetchone(cur)['n']==0
     pg.create_disposition_audit('lifecycle-delete',doc_id='scan:lifecycle-old:a.docx',policy_id='rule',
         action='delete',result='applied',detail='synthetic verified provider receipt',owner_email=owner)
     pg.set_disposition_before_state('lifecycle-delete',{'action':'delete','lifecycle_status':'Active'})
     pg.set_lifecycle_status('lifecycle-old','a.docx','Deleted',evidence_id='lifecycle-delete')
     pg.set_lifecycle_status('lifecycle-old','a.docx','Deleted',exclusion_reason='excluded from Assess')
+    lookup=pg.get_source_lifecycle_states(owner,'drive',[source_item,{'drive_file_id':'item-a'}])
+    assert lookup['unavailable']==[1]
+    assert lookup['states'][source_identity(owner,'drive',source_item)]['lifecycle_status']=='Deleted'
     assert pg.get_lifecycle_status('lifecycle-known','renamed.docx')['lifecycle_status']=='Deleted'
     pg.bulk_upsert_effective_dispositions([('a.docx','lifecycle-old','stale','Archive Candidate',
         'late recommendation','pending_approval',None,pg._now(),owner)])

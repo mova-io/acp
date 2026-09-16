@@ -3805,6 +3805,7 @@ def _scan_assess(payload: dict, job: dict) -> None:
     exist (a prior assess ran), re-enqueuing is harmless (save_file_result upserts)."""
     scan_id = payload.get("scan_id") or job.get("scan_id")
     user = payload.get("user")
+    core.store.reconcile_source_lifecycle(scan_id)
     inv = core.store.list_inventory(scan_id)
     try:
         params = _json.loads(core.store.get_setting(f"assess_params:{scan_id}") or "{}")
@@ -3828,6 +3829,7 @@ def _scan_assess(payload: dict, job: dict) -> None:
     # rest stay inventory-only. Estate capability is re-derived from name + real MIME so the gate
     # holds regardless of what doc_class label a row happens to carry.
     import estate_inventory as _est
+    from lifecycle_identity import TERMINAL
     from scanner import EXPORT_MAP as _EXPORT_MAP
     items = []
     # ── What the lifecycle rules held back, COUNTED WHERE THE HOLDING BACK HAPPENS ────────────
@@ -3859,7 +3861,7 @@ def _scan_assess(payload: dict, job: dict) -> None:
         # exclusion reason that applied when this run was created (status/rule/reason preserved).
         if flagged:
             base = r.get("lifecycle_reason")
-            if include_flagged:
+            if include_flagged and lc not in TERMINAL:
                 excl = (f"included in Assess despite lifecycle status '{lc}' (authorized override)"
                         + (f" — {base}" if base else ""))
                 core.store.set_lifecycle_status(scan_id, r["file"], lc,
@@ -3868,6 +3870,7 @@ def _scan_assess(payload: dict, job: dict) -> None:
                 overridden += 1
             else:
                 excl = (f"excluded from Assess: lifecycle status '{lc}'"
+                        + (' — verified provider restoration is required before assessment' if lc in TERMINAL else '')
                         + (f" — {base}" if base else ""))
                 core.store.set_lifecycle_status(scan_id, r["file"], lc,
                                                 rule_id=r.get("lifecycle_rule_id"), reason=base,

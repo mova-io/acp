@@ -230,17 +230,43 @@ def test_unverified_provider_restore_retains_terminal_exclusion(gated_client,iso
     assert st.get_lifecycle_status('new','a.docx')['lifecycle_status']=='Deleted'
 
 
-@pytest.mark.parametrize('operation',['delete_scan','reset_analytics'])
-def test_source_tombstone_survives_scan_history_pruning(isolated_store,operation):
+def test_source_tombstone_survives_scan_history_pruning(isolated_store):
     st=isolated_store
     inventory(st,'old')
     st.set_lifecycle_status('old','a.docx','Deleted')
-    if operation=='delete_scan':
-        st.delete_scan('old',OWNER)
-    else:
-        st.reset_analytics()
+    st.delete_scan('old',OWNER)
     inventory(st,'new')
     assert st.get_lifecycle_status('new','a.docx')['lifecycle_status']=='Deleted'
+
+
+@pytest.mark.parametrize('operation',['reset_analytics','reset_user_data'])
+def test_explicit_full_reset_erases_source_identifiers_without_provider_restoration(isolated_store,operation):
+    st=isolated_store
+    inventory(st,'old')
+    st.set_lifecycle_status('old','a.docx','Deleted')
+    if operation=='reset_analytics':
+        st.reset_analytics()
+    else:
+        st.reset_user_data(OWNER)
+    with st._db.cursor() as cur:
+        st._db.execute(cur,'SELECT COUNT(*) AS n FROM source_lifecycle_state')
+        assert st._db.fetchone(cur)['n']==0
+    # A fresh authoritative listing is a new observation after explicit history erasure.
+    inventory(st,'new')
+    assert st.get_lifecycle_status('new','a.docx')['lifecycle_status']=='Active'
+
+
+def test_full_tenant_reset_erases_aliases_without_clearing_another_tenant(isolated_store):
+    st=isolated_store
+    inventory(st,'mine',owner='Owner@Example.Com')
+    st.set_lifecycle_status('mine','a.docx','Deleted')
+    inventory(st,'other',owner='other@example.com')
+    st.set_lifecycle_status('other','a.docx','Archived')
+    st.reset_user_data(OWNER)
+    inventory(st,'new-mine')
+    inventory(st,'new-other',owner='other@example.com')
+    assert st.get_lifecycle_status('new-mine','a.docx')['lifecycle_status']=='Active'
+    assert st.get_lifecycle_status('new-other','a.docx')['lifecycle_status']=='Archived'
 
 
 def test_missing_identity_is_reported_without_guessing_cross_scan_linkage(isolated_store):
@@ -327,3 +353,116 @@ def test_protected_inventory_rebinding_is_rejected_and_counted(isolated_store):
     assert st.list_inventory('old')[0]['drive_file_id']=='item-a'
     inventory(st,'new',item_id='different-item')
     assert st.get_lifecycle_status('new','a.docx')['lifecycle_status']=='Active'
+
+
+def test_readonly_source_lookup_is_exact_and_marks_missing_identity(isolated_store,monkeypatch):
+    from lifecycle_identity import source_identity
+    st=isolated_store
+    inventory(st,'old')
+    st.set_lifecycle_status('old','a.docx','Deleted')
+    exact={'file':'renamed.docx','drive_file_id':'item-a','drive_id':'drive-a'}
+    missing={'file':'a.docx','drive_file_id':'item-a'}
+    other={'file':'a.docx','drive_file_id':'item-a','drive_id':'drive-b'}
+    sql=[]
+    execute=st._db.execute
+    def record(cur,statement,params=()):
+        sql.append(statement)
+        return execute(cur,statement,params)
+    monkeypatch.setattr(st._db,'execute',record)
+    result=st.get_source_lifecycle_states(OWNER,'sharepoint',[exact,missing,other,exact])
+    identity=source_identity(OWNER,'sharepoint',exact)
+    assert result['states'][identity]['lifecycle_status']=='Deleted'
+    assert len(result['states'])==1 and result['unavailable']==[1]
+    assert all(statement.lstrip().startswith('SELECT') for statement in sql)
+    assert len(sql)==2  # Ledger plus exact legacy fallback for the unrecorded other namespace.
+    assert st.get_source_lifecycle_states('other@example.com','sharepoint',[exact])['states']=={}
+
+
+def test_readonly_source_lookup_is_bounded_and_deduplicated(isolated_store,monkeypatch):
+    st=isolated_store
+    items=[{'drive_file_id':f'item-{n}','drive_account_id':'account-a'} for n in range(1001)]
+    calls=[]
+    execute=st._db.execute
+    def record(cur,statement,params=()):
+        calls.append((statement,params))
+        return execute(cur,statement,params)
+    monkeypatch.setattr(st._db,'execute',record)
+    result=st.get_source_lifecycle_states(OWNER,'drive',items+items)
+    assert result=={'states':{},'unavailable':[]}
+    assert len(calls)==6 and all(len(params)<=803 for _,params in calls)
+    calls.clear()
+    assert st.get_source_lifecycle_states(OWNER,'drive',[{'file':'a.docx'}])['unavailable']==[0]
+    assert st.get_source_lifecycle_states(OWNER,'drive',[])=={'states':{},'unavailable':[]}
+    assert calls==[]
+
+
+def test_readonly_source_lookup_retains_restoration_as_known_nonterminal(gated_client,isolated_store,drive):
+    from lifecycle_identity import source_identity
+    st=isolated_store
+    inventory(st,'old',provider='drive',namespace='account-a')
+    governance(st)
+    client=gated_client(OWNER)
+    assert client.post('/disposition/approvals/governance-audit/approve').status_code==200
+    assert client.post('/disposition/approvals/governance-audit/undo').status_code==200
+    item={'drive_file_id':'item-a','drive_account_id':'account-a'}
+    result=st.get_source_lifecycle_states(OWNER,'drive',[item])
+    assert result['states'][source_identity(OWNER,'drive',item)]['lifecycle_status']=='Active'
+
+
+def test_readonly_source_lookup_blocks_first_legacy_rescan_without_ledger_write(isolated_store):
+    from lifecycle_identity import source_identity
+    st=isolated_store
+    inventory(st,'legacy')
+    with st._db.cursor() as cur:
+        st._db.execute(cur,"UPDATE scan_inventory SET lifecycle_status='Deleted' WHERE scan_id='legacy'")
+    item={'drive_file_id':'item-a','drive_id':'drive-a'}
+    result=st.get_source_lifecycle_states(OWNER,'sharepoint',[item])
+    state=result['states'][source_identity(OWNER,'sharepoint',item)]
+    assert state['lifecycle_status']=='Deleted' and state['origin']=='legacy_inventory'
+    with st._db.cursor() as cur:
+        st._db.execute(cur,'SELECT COUNT(*) AS n FROM source_lifecycle_state')
+        assert st._db.fetchone(cur)['n']==0
+
+
+def test_readonly_legacy_fallback_never_overrides_known_restoration(gated_client,isolated_store,drive):
+    from lifecycle_identity import source_identity
+    st=isolated_store
+    inventory(st,'old',provider='drive',namespace='account-a')
+    governance(st)
+    client=gated_client(OWNER)
+    assert client.post('/disposition/approvals/governance-audit/approve').status_code==200
+    assert client.post('/disposition/approvals/governance-audit/undo').status_code==200
+    with st._db.cursor() as cur:
+        st._db.execute(cur,"UPDATE scan_inventory SET lifecycle_status='Deleted' WHERE scan_id='old'")
+    item={'drive_file_id':'item-a','drive_account_id':'account-a'}
+    result=st.get_source_lifecycle_states(OWNER,'drive',[item])
+    assert result['states'][source_identity(OWNER,'drive',item)]['lifecycle_status']=='Active'
+
+
+@pytest.mark.parametrize('terminal',['Archived','Deleted','Already archived'])
+def test_deferred_include_flagged_never_overrides_terminal_state(isolated_store,monkeypatch,terminal):
+    import test_lifecycle_exclusion_recorded as fixture
+    st=isolated_store
+    fixture._wire(monkeypatch,st)
+    fixture._discover()
+    st.set_lifecycle_status('s1','old.docx',terminal)
+    fixture._assess(include_lifecycle_flagged=True)
+    assert fixture._enqueued(st)=={'older.docx','new.docx'}
+    scope=fixture._scope(st)
+    assert scope['lifecycle_eligible_excluded']==1 and scope['lifecycle_overridden']==0
+    state=st.get_lifecycle_status('s1','old.docx')
+    assert state['lifecycle_status']==terminal
+    assert 'verified provider restoration' in state['exclusion_reason']
+
+
+def test_deferred_include_flagged_overrides_candidates_only(isolated_store,monkeypatch):
+    import test_lifecycle_exclusion_recorded as fixture
+    st=isolated_store
+    fixture._wire(monkeypatch,st)
+    fixture._discover()
+    st.set_lifecycle_status('s1','old.docx','Deleted')
+    st.set_lifecycle_status('s1','older.docx','Archive Candidate')
+    fixture._assess(include_lifecycle_flagged=True)
+    assert fixture._enqueued(st)=={'older.docx','new.docx'}
+    scope=fixture._scope(st)
+    assert scope['lifecycle_eligible_excluded']==1 and scope['lifecycle_overridden']==1

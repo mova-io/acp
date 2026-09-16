@@ -975,8 +975,8 @@ _SCHEMA = [
       snapshot_id TEXT, owner_email TEXT, policy_json TEXT, created_at TEXT, scan_id TEXT,
       PRIMARY KEY (snapshot_id, owner_email)
     )""",
-    # Source lifecycle tombstones survive scan deletion and analytics reset. A rescan is not a
-    # provider restoration. Missing account/drive identity is intentionally never guessed.
+    # Source lifecycle tombstones survive ordinary scan deletion. Explicit full data reset
+    # erases them; neither operation restores provider files. Never guess account/drive identity.
     """CREATE TABLE IF NOT EXISTS source_lifecycle_state (
       owner_email TEXT, provider TEXT, account_namespace TEXT, source_item_id TEXT,
       lifecycle_status TEXT, evidence_id TEXT, reason TEXT, rule_id TEXT, updated_at TEXT,
@@ -4037,6 +4037,67 @@ class Store:
     # Statuses Assess excludes by default (PRD §4.5): archive/delete-flagged and terminal.
     LIFECYCLE_EXCLUDED_DEFAULT = ("Already archived", "Archive Candidate", "Archived", "Delete Candidate", "Deleted")
 
+    def get_source_lifecycle_states(self, owner: str, provider: str, items: list[dict]) -> dict:
+        """Read-only pre-analysis gate: exact retained identities plus unlinked input indices.
+
+        Callers supply inventory-shaped source metadata, not display filenames or raw URLs.
+        An absent state for a complete identity is distinct from unavailable source identity.
+        Callers exclude only terminal states; a retained restoration is known nonterminal state.
+        Queries are capped at 400 unique source identities per batch, including duplicates.
+        """
+        from lifecycle_identity import source_identity
+        identities=set()
+        unavailable=[]
+        for index,item in enumerate(items):
+            identity=source_identity(owner,provider,item)
+            if identity is None:
+                unavailable.append(index)
+            else:
+                identities.add(identity)
+        states={}
+        ordered=sorted(identities)
+        if ordered:
+            with self._db.cursor() as cur:
+                for offset in range(0,len(ordered),400):
+                    batch=ordered[offset:offset+400]
+                    pairs=','.join('(%s,%s)' for _ in batch)
+                    params=[batch[0][0],batch[0][1]]
+                    for identity in batch:
+                        params.extend(identity[2:])
+                    self._db.execute(cur,
+                        'SELECT * FROM source_lifecycle_state WHERE owner_email=%s AND provider=%s '
+                        f'AND (account_namespace,source_item_id) IN ({pairs})',tuple(params))
+                    for row in self._db.fetchall(cur):
+                        key=(row['owner_email'],row['provider'],row['account_namespace'],row['source_item_id'])
+                        states[key]=row
+                    # First v55 analysis can precede inventory reconciliation. Read legacy
+                    # terminal snapshots without writing, only for keys absent from the ledger.
+                    # Any retained restoration shadows legacy terminal history.
+                    missing=[identity for identity in batch if identity not in states]
+                    if missing:
+                        pairs=','.join('(%s,%s)' for _ in missing)
+                        params=[batch[0][0],batch[0][1],batch[0][1]]
+                        for identity in missing:
+                            params.extend(identity[2:])
+                        self._db.execute(cur,
+                            'SELECT si.scan_id,si.file,si.drive_file_id,si.drive_account_id,si.drive_id,'
+                            'si.lifecycle_status,si.lifecycle_reason,si.lifecycle_rule_id,sr.source '
+                            'FROM scan_inventory si JOIN scan_runs sr ON sr.id=si.scan_id '
+                            'WHERE LOWER(TRIM(sr.owner_email))=%s AND LOWER(TRIM(sr.source))=%s '
+                            f"AND (CASE WHEN %s='drive' THEN si.drive_account_id ELSE si.drive_id END,si.drive_file_id) IN ({pairs}) "
+                            "AND si.lifecycle_status IN ('Already archived','Archived','Deleted') "
+                            "ORDER BY CASE si.lifecycle_status WHEN 'Deleted' THEN 0 WHEN 'Archived' THEN 1 ELSE 2 END,"
+                            'si.discovered_at DESC,si.scan_id,si.file',tuple(params))
+                        for row in self._db.fetchall(cur):
+                            identity=source_identity(owner,provider,row)
+                            if identity and identity not in states:
+                                states[identity]={'owner_email':identity[0],'provider':identity[1],
+                                    'account_namespace':identity[2],'source_item_id':identity[3],
+                                    'lifecycle_status':row['lifecycle_status'],'reason':row.get('lifecycle_reason'),
+                                    'rule_id':row.get('lifecycle_rule_id'),
+                                    'evidence_id':f"legacy:{row['scan_id']}:{row['file']}",'origin':'legacy_inventory'}
+        return {'states':states,'unavailable':unavailable}
+
     def reconcile_source_lifecycle(self, scan_id: str) -> None:
         """Replay durable source state, including safely identified legacy terminal rows.
 
@@ -5192,7 +5253,7 @@ class Store:
                          "scan_decisions", "pii_findings", "hitl_queue", "hitl_events",
                          "disposition_audit", "decision_log", "inventory", "jobs", "documents",
                          "tenant_queue_state",
-                         "lifecycle_evaluation", "effective_disposition",
+                         "lifecycle_evaluation", "effective_disposition", "source_lifecycle_state",
                          "org_memory", "remediation_state", "finding_disposition",
                          "finding_disposition_event", "remediation_diff", "applied_fixes",
                          "ai_calls", "ai_validation_outcomes", "second_opinion_reservations",
@@ -5312,12 +5373,12 @@ class Store:
           - doc_id-keyed (_RESET_USER_DOC_TABLES): doc_id IN (SELECT doc_id FROM documents WHERE
             owner_email=%s) — disposition_audit/remediation_state key on doc_id, not scan_id.
           - owns owner_email directly: scan_decisions, documents, scan_runs, content_workspaces,
-            content_workspace_documents (ADR 0044 — WHERE owner_email=%s); org_memory
-            (WHERE org=%s — every call site sets `org` to the signed-in user's own email, so it
+            content_workspace_documents (ADR 0044 — WHERE LOWER(TRIM(owner_email))=%s); org_memory
+            (WHERE LOWER(TRIM(org))=%s — every call site sets `org` to the signed-in user's own email, so it
             is already per-user despite the name).
           - content_workspace_document_versions carries no owner_email of its own (see its
             migration comment) — scoped via document_id IN (SELECT id FROM
-            content_workspace_documents WHERE owner_email=%s), deleted BEFORE its parent
+            content_workspace_documents WHERE LOWER(TRIM(owner_email))=%s), deleted BEFORE its parent
             documents for the same "no real FK, but tidy child-before-parent order" reason
             _RESET_USER_DOC_TABLES's rows are deleted before `documents` below.
 
@@ -5348,31 +5409,37 @@ class Store:
         see stale bytes take extra storage until a real per-owner blob accounting exists; nothing
         product-visible references them once the DB rows are gone.
         """
+        owner_email=owner_email.strip().lower()
         cleared: list[str] = []
         with self._db.cursor() as cur:
+            # Full tenant erasure clears source identifiers and all lifecycle projections in
+            # this same transaction. This is not an undo and makes no provider call.
+            for table in ('source_lifecycle_state','lifecycle_evaluation','effective_disposition','disposition_audit'):
+                self._db.execute(cur,f'DELETE FROM {table} WHERE LOWER(TRIM(owner_email))=%s',(owner_email,))
+                cleared.append(table)
             # Release children key on release_id rather than scan_id. Remove them before their
             # owner-scoped executions, while the join can still identify this user's rows.
             for table in ("release_report_bundles", "release_documents", "release_roots", "release_root_claims"):
                 self._db.execute(cur,
                     f"DELETE FROM {table} WHERE release_id IN "
-                    "(SELECT id FROM release_executions WHERE owner_email=%s)", (owner_email,))
+                    "(SELECT id FROM release_executions WHERE LOWER(TRIM(owner_email))=%s)", (owner_email,))
                 cleared.append(table)
-            self._db.execute(cur, "DELETE FROM release_executions WHERE owner_email=%s",
+            self._db.execute(cur, "DELETE FROM release_executions WHERE LOWER(TRIM(owner_email))=%s",
                              (owner_email,))
             cleared.append("release_executions")
             for t in self._RESET_USER_SCAN_TABLES:
                 self._db.execute(cur,
-                    f"DELETE FROM {t} WHERE scan_id IN (SELECT id FROM scan_runs WHERE owner_email=%s)",
+                    f"DELETE FROM {t} WHERE scan_id IN (SELECT id FROM scan_runs WHERE LOWER(TRIM(owner_email))=%s)",
                     (owner_email,))
                 cleared.append(t)
             # orchestration_events' scan_id-less rows (worker/capacity/dependency events with no
             # scan involved) are invisible to the scan_id-IN-subquery pass above — this second
             # pass, scoped by the column the table carries directly, is what actually makes this
             # owner's log fully gone. Safe to re-run over rows the loop above already deleted.
-            self._db.execute(cur, "DELETE FROM orchestration_events WHERE owner_email=%s", (owner_email,))
+            self._db.execute(cur, "DELETE FROM orchestration_events WHERE LOWER(TRIM(owner_email))=%s", (owner_email,))
             for t in self._RESET_USER_DOC_TABLES:
                 self._db.execute(cur,
-                    f"DELETE FROM {t} WHERE doc_id IN (SELECT doc_id FROM documents WHERE owner_email=%s)",
+                    f"DELETE FROM {t} WHERE doc_id IN (SELECT doc_id FROM documents WHERE LOWER(TRIM(owner_email))=%s)",
                     (owner_email,))
                 cleared.append(t)
             # Archive executions carry owner_email directly and key on neither scan_id nor
@@ -5380,37 +5447,37 @@ class Store:
             # durable audit record), so the scan_id-IN-subquery pass above cannot reach one whose
             # scan has already been deleted. Same shape as orchestration_events' second pass.
             for t in ("archive_execution", "archive_policy_snapshot"):
-                self._db.execute(cur, f"DELETE FROM {t} WHERE owner_email=%s", (owner_email,))
+                self._db.execute(cur, f"DELETE FROM {t} WHERE LOWER(TRIM(owner_email))=%s", (owner_email,))
                 cleared.append(t)
             # Policy actions are idempotency/audit receipts for customer changes, not the live
             # policy itself. The policy remains configuration; its historical receipts do not.
             for t in ("remediation_contribution_runs", "remediation_contribution_proposals",
                          "ai_local_call_execution_links", "ai_proposal_snapshots", "ai_attempt_trace_links", "ai_review_receipts", "ai_attempt_history",
                       "ai_spending_attempts", "ai_spending_run_policies", "ai_spending_budgets"):
-                self._db.execute(cur, f"DELETE FROM {t} WHERE owner_id=%s", (owner_email,))
+                self._db.execute(cur, f"DELETE FROM {t} WHERE LOWER(TRIM(owner_id))=%s", (owner_email,))
                 cleared.append(t)
-            self._db.execute(cur, "DELETE FROM remediation_policy_action WHERE owner_email=%s",
+            self._db.execute(cur, "DELETE FROM remediation_policy_action WHERE LOWER(TRIM(owner_email))=%s",
                              (owner_email,))
             cleared.append("remediation_policy_action")
-            self._db.execute(cur, "DELETE FROM scan_decisions WHERE owner_email=%s", (owner_email,))
+            self._db.execute(cur, "DELETE FROM scan_decisions WHERE LOWER(TRIM(owner_email))=%s", (owner_email,))
             cleared.append("scan_decisions")
-            self._db.execute(cur, "DELETE FROM tenant_queue_state WHERE tenant_key=%s", (owner_email,))
+            self._db.execute(cur, "DELETE FROM tenant_queue_state WHERE LOWER(TRIM(tenant_key))=%s", (owner_email,))
             cleared.append("tenant_queue_state")
-            self._db.execute(cur, "DELETE FROM documents WHERE owner_email=%s", (owner_email,))
+            self._db.execute(cur, "DELETE FROM documents WHERE LOWER(TRIM(owner_email))=%s", (owner_email,))
             cleared.append("documents")
-            self._db.execute(cur, "DELETE FROM org_memory WHERE org=%s", (owner_email,))
+            self._db.execute(cur, "DELETE FROM org_memory WHERE LOWER(TRIM(org))=%s", (owner_email,))
             cleared.append("org_memory")
             self._db.execute(cur,
                 "DELETE FROM content_workspace_document_versions WHERE document_id IN "
-                "(SELECT id FROM content_workspace_documents WHERE owner_email=%s)", (owner_email,))
+                "(SELECT id FROM content_workspace_documents WHERE LOWER(TRIM(owner_email))=%s)", (owner_email,))
             cleared.append("content_workspace_document_versions")
             self._db.execute(cur,
-                "DELETE FROM content_workspace_documents WHERE owner_email=%s", (owner_email,))
+                "DELETE FROM content_workspace_documents WHERE LOWER(TRIM(owner_email))=%s", (owner_email,))
             cleared.append("content_workspace_documents")
-            self._db.execute(cur, "DELETE FROM content_workspaces WHERE owner_email=%s", (owner_email,))
+            self._db.execute(cur, "DELETE FROM content_workspaces WHERE LOWER(TRIM(owner_email))=%s", (owner_email,))
             cleared.append("content_workspaces")
             # scan_runs last — every scan_id-scoped subquery above depends on these rows existing.
-            self._db.execute(cur, "DELETE FROM scan_runs WHERE owner_email=%s", (owner_email,))
+            self._db.execute(cur, "DELETE FROM scan_runs WHERE LOWER(TRIM(owner_email))=%s", (owner_email,))
             cleared.append("scan_runs")
         return {"owner": owner_email, "cleared_tables": cleared}
 
