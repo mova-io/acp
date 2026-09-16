@@ -101,9 +101,30 @@ def test_future_lane_addition_requires_no_deploy_list_edit(tmp_path):
     assert "'release_continue'" in helper.remediation_query(tmp_path)
 
 
+def test_staging_remediation_patch_sets_reviewed_pool_and_preserves_scale(tmp_path):
+    live = {'id': '/subscriptions/test/resourceGroups/test/providers/Microsoft.App/containerApps/acp-remediate',
+            'properties': {'template': template()}}
+    source = tmp_path / 'live.json'
+    output = tmp_path / 'patch.json'
+    source.write_text(json.dumps(live))
+    result = subprocess.run([
+        'python3', str(ROOT / 'deploy/public/remediation_scaler.py'), str(source), str(output),
+        'new:image', '600', '540'], cwd=ROOT, env={**__import__('os').environ,
+                                                   'ACP_DEPLOY_TARGET_ENV': 'staging'},
+        capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    patch = json.loads(output.read_text())['properties']['template']
+    env = {entry['name']: entry.get('value') for entry in patch['containers'][0]['env']}
+    assert env['ACP_WORKERS'] == '2'
+    assert env['ACP_DB_MAX_CONN'] == '5'
+    assert patch['scale']['minReplicas'] == 5
+    assert patch['scale']['rules'][0] == template()['scale']['rules'][0]
+
+
 def test_both_paths_use_same_update_after_active_job_guard():
     script = (ROOT / 'deploy/public/redeploy.sh').read_text()
-    assert script.count('_update_lane_worker "$a"') == 2
+    # Blue-green, production concurrent, and staging sequential paths share one updater.
+    assert script.count('_update_lane_worker "$a"') == 3
     gate = script.index('if [ "$ACTIVE_JOBS" != 0 ]') if 'if [ "$ACTIVE_JOBS" != 0 ]' in script else script.index('queued/running')
     assert script.index('_prepare_remediation_worker_patch') > gate
     assert script.index('_prepare_remediation_worker_patch') < script.index('say "deploying green')

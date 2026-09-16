@@ -85,6 +85,11 @@ def main():
     env = patch['properties']['template']['containers'][0].setdefault('env', [])
     env[:] = [entry for entry in env if entry.get('name') != 'ACP_DEDICATED_RELEASE_WORKERS']
     env.append({'name': 'ACP_DEDICATED_RELEASE_WORKERS', 'value': '1' if dedicated else '0'})
+    if os.environ.get('ACP_DEPLOY_TARGET_ENV') == 'staging':
+        env[:] = [entry for entry in env if entry.get('name') not in
+                  ('ACP_WORKERS', 'ACP_DB_MAX_CONN')]
+        env.extend(({'name': 'ACP_WORKERS', 'value': '2'},
+                    {'name': 'ACP_DB_MAX_CONN', 'value': '5'}))
     Path(dest).write_text(json.dumps(patch))
 
 

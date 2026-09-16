@@ -70,6 +70,7 @@ CAPACITY_APPLY_REQUESTED="${ACP_CAPACITY_APPLY_ENABLED:-0}"
 ACA_VCPU_QUOTA="${ACP_ACA_VCPU_QUOTA:-}"
 PG_MAX_CONNECTIONS="${ACP_PG_MAX_CONNECTIONS:-}"
 PG_RESERVED_CONNECTIONS="${ACP_PG_RESERVED_CONNECTIONS:-}"
+STAGING_DB_EXTERNAL_CONNECTIONS="${ACP_STAGING_DB_EXTERNAL_CONNECTIONS:-3}"
 
 # Keep the gate installer shared with the first-deploy path. This script is what deploy.yml
 # actually executes for production releases.
@@ -153,6 +154,11 @@ API_ENV_VARS=(
   "ACP_DEDICATED_RELEASE_WORKERS=$DEDICATED_RELEASE"
   "CAPACITY_APPLY_APP_NAMES=$APP,$DISCOVERY_WORKER,$ASSESS_WORKER,$REMEDIATE_WORKER,$GPU_APP"
 )
+if [ "$DEPLOY_TARGET_ENV" = staging ]; then
+  # Staging's 40 ordinary PostgreSQL slots must also cover old/new revision overlap.
+  # Production keeps its independently measured 16-connection API pool.
+  API_ENV_VARS+=("ACP_DB_MAX_CONN=8")
+fi
 if [ "$CAPACITY_APPLY_ENABLED" = 1 ]; then
   API_ENV_VARS+=(
     "ACP_PG_MAX_CONNECTIONS=$PG_MAX_CONNECTIONS"
@@ -526,6 +532,54 @@ else
   say "WARNING: ACP_DEPLOY_WITH_ACTIVE_JOBS=1 — worker cutover may interrupt ${ACTIVE_JOBS:-unknown} active job(s)"
 fi
 
+# Staging's small PostgreSQL tier needs an explicit old->new transition budget. Pools are lazy,
+# so pg_stat_activity is useful evidence but not a safe ceiling: a startup burst can allocate the
+# rest at once. Read the declared ceiling from every current revision and compare it with the
+# reviewed target before any image mutation.
+STAGING_DB_BOOTSTRAP=0
+if [ "$DEPLOY_TARGET_ENV" = staging ]; then
+  [[ "$PG_MAX_CONNECTIONS" =~ ^[0-9]+$ && "$PG_RESERVED_CONNECTIONS" =~ ^[0-9]+$ ]] \
+    || die "staging rollout requires measured ACP_PG_MAX_CONNECTIONS and ACP_PG_RESERVED_CONNECTIONS"
+  [[ "$STAGING_DB_EXTERNAL_CONNECTIONS" =~ ^[0-9]+$ ]] \
+    || die "ACP_STAGING_DB_EXTERNAL_CONNECTIONS must be a non-negative integer"
+  _current_pool() {
+    local name="$1"
+    local role="$2"
+    local env_json=""
+    local default_workers=""
+    case "$role" in api) default_workers=0 ;; release) default_workers=3 ;; *) default_workers=2 ;; esac
+    env_json="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
+      --query properties.template.containers[0].env -o json)"
+    python3 -c 'import json,sys
+env={e.get("name"):e.get("value") for e in json.load(sys.stdin) if e.get("name")}
+default=int(sys.argv[1])
+workers=int(env["ACP_WORKERS"]) if env.get("ACP_WORKERS") not in (None,"") else default
+print(max(2,int(env["ACP_DB_MAX_CONN"])) if env.get("ACP_DB_MAX_CONN") else max(2,max(0,workers)+16))' \
+      "$default_workers" <<<"$env_json"
+  }
+  CURRENT_API_POOL="$(_current_pool "$APP" api)"
+  CURRENT_DISCOVERY_POOL="$(_current_pool "$DISCOVERY_WORKER" discovery)"
+  CURRENT_ASSESS_POOL="$(_current_pool "$ASSESS_WORKER" assess)"
+  CURRENT_REMEDIATE_POOL="$(_current_pool "$REMEDIATE_WORKER" remediate)"
+  CURRENT_RELEASE_POOL=0
+  [ "$DEDICATED_RELEASE" = 0 ] || CURRENT_RELEASE_POOL="$(_current_pool "$RELEASE_WORKER" release)"
+  CURRENT_POOLS="$(printf '{"api":%s,"discovery":%s,"assess":%s,"remediate":%s%s}' \
+    "$CURRENT_API_POOL" "$CURRENT_DISCOVERY_POOL" "$CURRENT_ASSESS_POOL" "$CURRENT_REMEDIATE_POOL" \
+    "$([ "$DEDICATED_RELEASE" = 1 ] && printf ',"release":%s' "$CURRENT_RELEASE_POOL")")"
+  TARGET_POOLS="$(printf '{"api":8,"discovery":5,"assess":5,"remediate":5%s}' \
+    "$([ "$DEDICATED_RELEASE" = 1 ] && printf ',"release":6')")"
+  CAPACITY_PLAN="$(python3 "$SRC_ROOT/deploy/public/rollout_capacity.py" \
+    --maximum "$PG_MAX_CONNECTIONS" --reserved "$PG_RESERVED_CONNECTIONS" \
+    --external "$STAGING_DB_EXTERNAL_CONNECTIONS" --current "$CURRENT_POOLS" --target "$TARGET_POOLS")" \
+    || die "staging database rollout does not fit the measured ordinary-connection budget"
+  STAGING_DB_BOOTSTRAP="$(python3 -c 'import json,sys; print(1 if json.load(sys.stdin)["bootstrap_required"] else 0)' \
+    <<<"$CAPACITY_PLAN")"
+  python3 -c 'import json,sys
+p=json.load(sys.stdin)
+print("  ✓ staging database rollout budget verified (target {} + overlap {} + external {} <= ordinary {})".format(p["target_steady"],p["largest_cohort"],p["external"],p["usable"]))' \
+    <<<"$CAPACITY_PLAN"
+fi
+
 # Schema-changing releases elect one bounded migrator before any app/worker image
 # mutation. A held reader or active queue refuses this attempt; no customer work
 # is cancelled, and the existing deployment continues on its prior images.
@@ -541,6 +595,269 @@ _verify_startup() {
     --subscription "$SUB" --group "$RG" --image "$IMG" \
     --output "$STARTUP_EVIDENCE_PATH" "$@" \
     || die "new revision startup failed or restarted; inspect the sanitized startup receipt"
+}
+
+_wait_rollout_cohort() {
+  local name="$1"
+  local prior="$2"
+  local active=""
+  local latest=""
+  local old_replicas=""
+  local revision=""
+  local revisions_json=""
+  local valid=""
+  _verify_startup "$name"
+  for _ in $(seq 1 120); do
+    latest="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
+      --query properties.latestRevisionName -o tsv 2>/dev/null || true)"
+    revisions_json="$(az containerapp revision list "${AZ[@]}" -g "$RG" -n "$name" --all \
+      -o json 2>/dev/null || true)"
+    read -r valid active <<EOF
+$(python3 -c 'import json,sys
+try:
+ rows=json.load(sys.stdin); latest=sys.argv[1]; prior=sys.argv[2]
+ assert latest and prior and isinstance(rows,list) and rows
+ assert any(r.get("name")==latest for r in rows) and any(r.get("name")==prior for r in rows)
+ assert all(isinstance(r.get("name"),str) and isinstance(r.get("properties",{}).get("active"),bool) for r in rows)
+ active=[r["name"] for r in rows if r["properties"]["active"]]
+ print("true",1 if active==[latest] else -1)
+except Exception: print("false",-1)' "$latest" "$prior" <<<"$revisions_json")
+EOF
+    [ "$valid" = true ] || { sleep 5; continue; }
+    read -r valid _ old_replicas <<EOF
+$(python3 "$SRC_ROOT/deploy/public/revision_replica_gate.py" \
+  --subscription "$SUB" --group "$RG" --app "$name" \
+  --revision "$prior" --revision "$latest" --exclude-revision "$latest" \
+  <<<"$revisions_json" || printf 'false -1 -1')
+EOF
+    [ "$valid" = true ] && [ "$active" = 1 ] && [ "$old_replicas" = 0 ] && return 0
+    sleep 5
+  done
+  die "$name did not converge to one active revision with zero prior-revision replicas"
+}
+
+_ensure_single_revision_mode() {
+  local name mode
+  for name in "$APP" "${LANE_WORKERS[@]}"; do
+    mode="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
+      --query properties.configuration.activeRevisionsMode -o tsv)"
+    if [ "$mode" != Single ]; then
+      _aca_retry az containerapp revision set-mode "${AZ[@]}" -g "$RG" -n "$name" --mode single -o none
+    fi
+  done
+}
+
+STAGING_OLD_IMAGES=()
+STAGING_OLD_MINS=()
+STAGING_OLD_API_IMAGE=""
+STAGING_API_TARGET_READY=0
+STAGING_WORKERS_QUIESCED=0
+_staging_old_min() {
+  local wanted="$1" index
+  for index in "${!LANE_WORKERS[@]}"; do
+    [ "${LANE_WORKERS[$index]}" != "$wanted" ] || { printf '%s' "${STAGING_OLD_MINS[$index]}"; return 0; }
+  done
+  return 1
+}
+_restore_staging_workers() {
+  local name expected active replicas image index failed=0
+  local ready=""
+  local revision=""
+  [ "$STAGING_WORKERS_QUIESCED" = 1 ] || return 0
+  if [ "$STAGING_API_TARGET_READY" = 1 ]; then
+    echo "  completing target workers after an interrupted post-API bootstrap" >&2
+    for name in "${LANE_WORKERS[@]}"; do
+      revision="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
+        --query properties.latestRevisionName -o tsv)"
+      _update_lane_worker "$name" || failed=1
+      ( _wait_rollout_cohort "$name" "$revision" ) || failed=1
+    done
+    return "$failed"
+  fi
+  echo "  restoring the prior staging API and workers after an interrupted bootstrap" >&2
+  _aca_retry python3 "$SRC_ROOT/deploy/public/update_api_image.py" \
+    --subscription "$SUB" --group "$RG" --app "$APP" --image "$STAGING_OLD_API_IMAGE" \
+    --env "${API_ENV_VARS[@]}" || failed=1
+  active= replicas= image=
+  for _ in $(seq 1 60); do
+    revision="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" \
+      --query properties.latestRevisionName -o tsv 2>/dev/null || true)"
+    ready="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" \
+      --query properties.latestReadyRevisionName -o tsv 2>/dev/null || true)"
+    image="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" \
+      --query properties.template.containers[0].image -o tsv 2>/dev/null || true)"
+    active="$(az containerapp revision list "${AZ[@]}" -g "$RG" -n "$APP" --all \
+      --query "[?properties.active==\`true\`] | length(@)" -o tsv 2>/dev/null || true)"
+    replicas="$(az containerapp replica list "${AZ[@]}" -g "$RG" -n "$APP" --revision "$revision" \
+      --query 'length(@)' -o tsv 2>/dev/null || true)"
+    [ "$revision" = "$ready" ] && [ "$image" = "$STAGING_OLD_API_IMAGE" ] \
+      && [ "$active" = 1 ] && [ "${replicas:-0}" -ge 1 ] && break
+    sleep 5
+  done
+  if [ "$revision" != "$ready" ] || [ "$image" != "$STAGING_OLD_API_IMAGE" ] \
+      || [ "$active" != 1 ] || [ "${replicas:-0}" -lt 1 ]; then
+    echo "  recovery failed for $APP; manual API restoration is required" >&2
+    failed=1
+  fi
+  for index in "${!LANE_WORKERS[@]}"; do
+    name="${LANE_WORKERS[$index]}"
+    [ -n "${STAGING_OLD_IMAGES[$index]:-}" ] || continue
+    _aca_retry az containerapp update "${AZ[@]}" -g "$RG" -n "$name" \
+      --image "${STAGING_OLD_IMAGES[$index]}" --min-replicas "${STAGING_OLD_MINS[$index]}" \
+      --termination-grace-period "$WORKER_TERMINATION_GRACE_SECONDS" \
+      --set-env-vars "ACP_SHUTDOWN_DRAIN_SECONDS=$WORKER_DRAIN_SECONDS" \
+        "ACP_DB_MAX_CONN=$([ "$name" = "$RELEASE_WORKER" ] && echo 6 || echo 5)" \
+        "ACP_WORKERS=$([ "$name" = "$RELEASE_WORKER" ] && echo 3 || echo 2)" \
+      --no-wait -o none \
+      >/dev/null 2>&1 || failed=1
+    expected="${STAGING_OLD_IMAGES[$index]:-}"
+    [ -n "$expected" ] || continue
+    active= replicas=
+    for _ in $(seq 1 60); do
+      active="$(az containerapp revision list "${AZ[@]}" -g "$RG" -n "$name" --all \
+        --query "[?properties.active==\`true\`] | length(@)" -o tsv 2>/dev/null || true)"
+      replicas="$(az containerapp replica list "${AZ[@]}" -g "$RG" -n "$name" \
+        --revision "$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" --query properties.latestRevisionName -o tsv 2>/dev/null)" \
+        --query 'length(@)' -o tsv 2>/dev/null || true)"
+      image="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
+        --query properties.template.containers[0].image -o tsv 2>/dev/null || true)"
+      [ "$active" = 1 ] && [ "${replicas:-0}" -ge "${STAGING_OLD_MINS[$index]}" ] \
+        && [ "$image" = "$expected" ] && break
+      sleep 5
+    done
+    if [ "$active" != 1 ] || [ "${replicas:-0}" -lt "${STAGING_OLD_MINS[$index]}" ] || [ "$image" != "$expected" ]; then
+      echo "  recovery failed for $name; manual worker restoration is required" >&2
+      failed=1
+    fi
+  done
+  return "$failed"
+}
+
+_staging_bootstrap_exit() {
+  local original_status=$?
+  local recovery_status=0
+  trap - EXIT
+  _restore_staging_workers || recovery_status=$?
+  rm -rf "$WORK"
+  if [ "$recovery_status" != 0 ]; then
+    echo "  staging worker recovery did not converge; see the role-specific errors above" >&2
+  fi
+  [ "$original_status" != 0 ] || original_status="$recovery_status"
+  exit "$original_status"
+}
+
+_queue_active_after_quiescence() {
+  local queue_now
+  queue_now="$(curl -sf --max-time 20 "https://$FQDN/readyz")" || return 1
+  python3 "$SRC_ROOT/deploy/public/queue_activity_gate.py" <<<"$queue_now"
+}
+
+_require_empty_staging_queue() {
+  local active
+  active="$(_queue_active_after_quiescence)" \
+    || die "staging bootstrap requires current numeric queue activity before any mutation"
+  [ "$active" = 0 ] \
+    || die "staging bootstrap requires an empty queue before any mutation; found $active active job(s)"
+}
+
+_quiesce_staging_workers() {
+  local name=""
+  local revision=""
+  local active=""
+  local replicas=""
+  local revisions_json=""
+  local valid=""
+  local configuration_revision=""
+  local provisioning=""
+  local applied_min=""
+  local active_revision=""
+  local seen=""
+  local index=""
+  local -a candidate_revisions=()
+  local -a candidate_args=()
+  STAGING_WORKERS_QUIESCED=1
+  STAGING_OLD_API_IMAGE="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" \
+    --query properties.template.containers[0].image -o tsv)"
+  [ -n "$STAGING_OLD_API_IMAGE" ] || die "could not capture the pre-bootstrap API image"
+  trap _staging_bootstrap_exit EXIT
+  for index in "${!LANE_WORKERS[@]}"; do
+    name="${LANE_WORKERS[$index]}"
+    STAGING_OLD_IMAGES[$index]="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
+      --query properties.template.containers[0].image -o tsv)"
+    STAGING_OLD_MINS[$index]="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
+      --query properties.template.scale.minReplicas -o tsv)"
+    revision="$(az containerapp revision list "${AZ[@]}" -g "$RG" -n "$name" --all \
+      --query "[?properties.active==\`true\`].name | [0]" -o tsv)"
+    [ -n "$revision" ] || die "could not resolve $name's pre-update active revision"
+    # min=0 prevents a replacement replica while the exact pre-update revision receives SIGTERM and its
+    # existing 540/600-second drain contract. Deactivation is explicit; KEDA cooldown is not a
+    # completion signal.
+    _aca_retry az containerapp update "${AZ[@]}" -g "$RG" -n "$name" --min-replicas 0 --no-wait -o none
+    configuration_revision=""
+    for _ in $(seq 1 60); do
+      read -r provisioning applied_min configuration_revision <<EOF
+$(az containerapp show "${AZ[@]}" -g "$RG" -n "$name" \
+  --query '[properties.provisioningState,properties.template.scale.minReplicas,properties.latestRevisionName]' -o tsv 2>/dev/null || true)
+EOF
+      [ "$provisioning" = Succeeded ] && [ "$applied_min" = 0 ] \
+        && [ -n "$configuration_revision" ] && break
+      sleep 5
+    done
+    [ "$provisioning" = Succeeded ] && [ "$applied_min" = 0 ] && [ -n "$configuration_revision" ] \
+      || die "$name min-zero configuration revision did not provision"
+    _aca_retry az containerapp revision deactivate "${AZ[@]}" -g "$RG" -n "$name" --revision "$revision" -o none
+    # A min-replica template update may have allocated a configuration revision. It must also be
+    # inactive before the API roll; never assume the pre-update name is the only revision now.
+    candidate_revisions=("$revision" "$configuration_revision")
+    while read -r active_revision; do
+      [ -z "$active_revision" ] || candidate_revisions+=("$active_revision")
+      [ -z "$active_revision" ] || _aca_retry az containerapp revision deactivate "${AZ[@]}" \
+        -g "$RG" -n "$name" --revision "$active_revision" -o none
+    done < <(az containerapp revision list "${AZ[@]}" -g "$RG" -n "$name" --all \
+      --query "[?properties.active==\`true\`].name" -o tsv)
+    candidate_args=()
+    for active_revision in "${candidate_revisions[@]}"; do
+      candidate_args+=(--revision "$active_revision")
+    done
+    for _ in $(seq 1 120); do
+      revisions_json="$(az containerapp revision list "${AZ[@]}" -g "$RG" -n "$name" --all \
+        -o json 2>/dev/null || true)"
+      while read -r active_revision; do
+        [ -z "$active_revision" ] && continue
+        seen=0
+        for revision in "${candidate_revisions[@]}"; do
+          [ "$revision" != "$active_revision" ] || seen=1
+        done
+        if [ "$seen" = 0 ]; then
+          [ "${#candidate_revisions[@]}" -lt 4 ] \
+            || die "$name produced more than four rollout revisions during quiescence"
+          candidate_revisions+=("$active_revision")
+          candidate_args+=(--revision "$active_revision")
+        fi
+        _aca_retry az containerapp revision deactivate "${AZ[@]}" -g "$RG" -n "$name" \
+          --revision "$active_revision" -o none
+      done <<<"$(python3 -c 'import json,sys
+try: print("\n".join(r["name"] for r in json.load(sys.stdin) if r.get("properties",{}).get("active") is True))
+except Exception: pass' <<<"$revisions_json")"
+      read -r valid active replicas <<EOF
+$(python3 "$SRC_ROOT/deploy/public/revision_replica_gate.py" \
+  --subscription "$SUB" --group "$RG" --app "$name" \
+  "${candidate_args[@]}" <<<"$revisions_json" || printf 'false -1 -1')
+EOF
+      [ "$valid" = true ] && [ "$active" = 0 ] && [ "$replicas" = 0 ] && break
+      sleep 5
+    done
+    [ "$valid" = true ] && [ "$active" = 0 ] && [ "$replicas" = 0 ] \
+      || die "$name did not drain to zero active revisions and replicas"
+  done
+  python3 "$SRC_ROOT/deploy/public/db_session_gate.py" \
+    --subscription "$SUB" --group "$RG" --app "$APP" \
+    --ceiling "$((CURRENT_API_POOL + STAGING_DB_EXTERNAL_CONNECTIONS))" \
+    || die "worker replicas stopped but their database sessions did not drain"
+  ACTIVE_JOBS="$(_queue_active_after_quiescence)" \
+    || die "could not validate numeric queue activity after staging workers drained"
+  [ "$ACTIVE_JOBS" = 0 ] \
+    || die "queue activity changed while staging workers drained; restoring prior workers without touching the API"
 }
 
 # ── 8-BG. blue-green (ACP_BLUE_GREEN=1) ────────────────────────────────────────────────────
@@ -569,7 +886,15 @@ _verify_startup() {
 # Validate and prepare before the first service mutation in either rollout path.
 _prepare_remediation_worker_patch
 
+_update_api_normal() {
+  _aca_retry python3 "$SRC_ROOT/deploy/public/update_api_image.py" \
+    --subscription "$SUB" --group "$RG" --app "$APP" --image "$IMG" \
+    --env "${API_ENV_VARS[@]}"
+}
+
 if [ "$BG" = 1 ]; then
+  [ "$DEPLOY_TARGET_ENV" != staging ] \
+    || die "staging blue-green is disabled because its old/new database envelope is not budgeted"
   ENV_DOMAIN="$(app_environment_domain)"
 
   # Multiple-revision mode, idempotently. Switching Single -> Multiple leaves the running revision
@@ -697,13 +1022,35 @@ fi
 #
 # A refusal is a STATE, not a fault — the same command succeeds once the in-flight operation
 # settles — so `_aca_retry` waits it out and fails fast on anything else. See readiness_probe.sh.
-say "updating $APP + ${LANE_WORKERS[*]} concurrently"
-_aca_retry python3 "$SRC_ROOT/deploy/public/update_api_image.py" \
-  --subscription "$SUB" --group "$RG" --app "$APP" --image "$IMG" \
-  --env "${API_ENV_VARS[@]}"
-for a in "${LANE_WORKERS[@]}"; do
-  _update_lane_worker "$a"
-done
+if [ "$DEPLOY_TARGET_ENV" = staging ]; then
+  if [ "$STAGING_DB_BOOTSTRAP" = 1 ]; then
+    _require_empty_staging_queue
+  fi
+  _ensure_single_revision_mode
+  if [ "$STAGING_DB_BOOTSTRAP" = 1 ]; then
+    say "quiescing staging workers for the one-time database-pool bootstrap"
+    _quiesce_staging_workers
+  fi
+  say "updating staging API within the PostgreSQL rollout budget"
+  PRIOR_REVISION="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" --query properties.latestRevisionName -o tsv)"
+  _update_api_normal
+  _wait_rollout_cohort "$APP" "$PRIOR_REVISION"
+  STAGING_API_TARGET_READY=1
+  for a in "${LANE_WORKERS[@]}"; do
+    say "updating staging worker cohort $a"
+    PRIOR_REVISION="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$a" --query properties.latestRevisionName -o tsv)"
+    _update_lane_worker "$a"
+    _wait_rollout_cohort "$a" "$PRIOR_REVISION"
+  done
+  STAGING_WORKERS_QUIESCED=0
+  trap 'rm -rf "$WORK"' EXIT
+else
+  say "updating $APP + ${LANE_WORKERS[*]} concurrently"
+  _update_api_normal
+  for a in "${LANE_WORKERS[@]}"; do
+    _update_lane_worker "$a"
+  done
+fi
 
 for a in "$APP" "${LANE_WORKERS[@]}"; do
   printf '  %s ' "$a"
