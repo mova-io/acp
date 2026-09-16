@@ -58,6 +58,8 @@ MIN_MODULES=41                  # engine/pdf-analyser is tracked; this guards ag
 DRY="${ACP_DRY_RUN:-0}"
 BG="${ACP_BLUE_GREEN:-0}"       # 1 => green provisions at 0% traffic, is tested, then promoted
 ALLOW_ACTIVE_JOBS="${ACP_DEPLOY_WITH_ACTIVE_JOBS:-0}"
+STAGING_DEPLOY_MODE="${ACP_STAGING_DEPLOY_MODE:-}"
+STAGING_GITHUB_OUTPUT="${GITHUB_OUTPUT:-}"
 # Worker jobs are document-sized and production PDFs commonly take 5–7 minutes. ACA's 30-second
 # default killed them during ordinary releases; the durable queue then kept their claims until
 # lease recovery, making active Remediation appear hung. Worker code drains for 540s, leaving a
@@ -156,6 +158,31 @@ git fetch -q origin
 PIN="$(git rev-parse --verify --quiet "${ACP_PIN:-origin/main}^{commit}")" \
   || die "cannot resolve ${ACP_PIN:+ACP_PIN=}${ACP_PIN:-origin/main} to a commit — check the ref exists locally (a fetch may be needed) and is unambiguous"
 say "pinning ${PIN:0:7}"
+
+# Serialized automatic staging events can arrive out of order. Compare the actual
+# resolved ACP_PIN, never workflow metadata, against the currently serving build.
+if [ "$DEPLOY_TARGET_ENV" = staging ] && [ -n "${STAGING_DEPLOY_MODE:-}" ]; then
+  GUARD_FQDN="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$APP" --query properties.configuration.ingress.fqdn -o tsv)"
+  [ -n "$GUARD_FQDN" ] || die "staging target has no ingress hostname"
+  GUARD_HEALTH="$(curl -fsS --max-time 20 "https://$GUARD_FQDN/healthz" || echo '{}')"
+  GUARD_ARGS=(--repo "$SRC_ROOT" --pin "$PIN" --mode "$STAGING_DEPLOY_MODE")
+  if [ "${ACP_STAGING_ALLOW_ROLLBACK:-0}" = 1 ]; then
+    [ -n "${ACP_PIN:-}" ] || die "manual rollback/recovery requires an explicit pin"
+    [ "${ACP_SKIP_CI_GATE:-0}" != 1 ] || die "manual rollback/recovery cannot bypass image CI"
+    GUARD_ARGS+=(--rollback)
+  fi
+  GUARD_DECISION="$(python3 "$SRC_ROOT/deploy/public/staging_pin_guard.py" "${GUARD_ARGS[@]}" <<<"$GUARD_HEALTH")" \
+    || die "staging monotonic pin guard refused deployment"
+  if [ "$GUARD_DECISION" = skip ]; then
+    say "Skipping stale automatic staging pin ${PIN:0:7}; live build is newer"
+    [ -z "${STAGING_GITHUB_OUTPUT:-}" ] || echo 'staging_deployed=false' >> "$STAGING_GITHUB_OUTPUT"
+    exit 0
+  fi
+  if [ -n "${STAGING_GITHUB_OUTPUT:-}" ]; then
+    echo 'staging_deployed=true' >> "$STAGING_GITHUB_OUTPUT"
+    echo "staging_pin=$PIN" >> "$STAGING_GITHUB_OUTPUT"
+  fi
+fi
 
 # The CI gate, ENFORCED rather than described. This step's own comment has always said "check CI
 # is green on it", and nothing ever checked — a human was expected to remember. Deploying an
