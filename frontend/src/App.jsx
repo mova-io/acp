@@ -1469,6 +1469,9 @@ export default function App() {
         // Split topology (#113): the API's local pool is 0 by design — the standalone worker
         // container's heartbeat is what proves the queue is manned.
         if (!SIM && !workers && !worker_tier_alive) throw new Error('no workers available — the worker service looks down; check Monitor')
+        // Sources launches discovery; Discover reports the accepted run's live progress.
+        // A rejected request stays on Sources with its inputs and error intact.
+        if (view === 'integrations') setView(me?.allow && !me.allow.includes('discover') ? 'overview' : 'discover')
         setLiveScanId(scan_id)
         setDiscoverJobId(job_id)
         setProgress({ phase: accepted.inline ? 'connecting' : 'queued' })
@@ -1562,6 +1565,7 @@ export default function App() {
         if (!fresh) throw new Error('scan still processing — watch it finish in the Monitor queue')
       } else {
         const { job_id } = await startScan(apiSource, folder, aiEnabled, deepScan, excludeRemediated, incremental, picked, excluded, includeSubfolders)
+        if (view === 'integrations') setView(me?.allow && !me.allow.includes('discover') ? 'overview' : 'discover')
         fresh = await pollScanJob(job_id)
       }
       setScan(fresh); setExplicitTimeTravel(false)

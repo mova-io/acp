@@ -63,6 +63,7 @@ vi.mock('./api.js', async (importActual) => ({
   getScanLocations,
   checkDiscoveryPreflight,
   startScanQueued,
+  openDiscoverStream: vi.fn(() => ({ close: vi.fn() })),
   // The Durable toggle is no longer on the modal, so a default confirm takes the NON-queued path
   // and THIS is the call that has to be observable. Throws for the same reason startScanQueued
   // does: it stops doScan before the getJob poll loop.
@@ -179,6 +180,26 @@ describe('the universal scan gate (App)', () => {
     expect(startScanQueued.mock.calls[0][7]).toEqual([])
     expect(startScan).not.toHaveBeenCalled()
     expect(dialog(c)).toBeNull()
+  })
+
+
+  it('moves from Sources to Discover only after the backend accepts the start', async () => {
+    startScanQueued.mockResolvedValueOnce({ scan_id: 'accepted-scan', job_id: 'accepted-job', workers: 1, worker_tier_alive: true })
+    const c = await mountSignedInOn(/Sources/, { persona: /Compliance Officer/ })
+    await click(newScan(c)); await gotoStep(dialog(c), act, 3)
+    await click(dialog(c).querySelector('button[data-wizard-forward]'))
+    const active = [...c.querySelectorAll('[role="tab"]')].find((tab) => tab.getAttribute('aria-selected') === 'true')
+    expect(active.textContent).toMatch(/Discover/)
+  })
+
+  it('keeps Sources and its error visible when the backend rejects the start', async () => {
+    startScanQueued.mockRejectedValueOnce(Object.assign(new Error('source unavailable'), { status: 400 }))
+    const c = await mountSignedInOn(/Sources/, { persona: /Compliance Officer/ })
+    await click(newScan(c)); await gotoStep(dialog(c), act, 3)
+    await click(dialog(c).querySelector('button[data-wizard-forward]'))
+    const active = [...c.querySelectorAll('[role="tab"]')].find((tab) => tab.getAttribute('aria-selected') === 'true')
+    expect(active.textContent).toMatch(/Sources/)
+    expect(c.textContent).toMatch(/source unavailable/)
   })
 
   it('cancelling the gate starts nothing', async () => {
