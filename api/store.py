@@ -2541,7 +2541,7 @@ class _PgAdapter:
             h.update(" ".join(stmt.split()).encode())
         return h.hexdigest()[:32]
 
-    def init_schema(self) -> None:
+    def init_schema(self, *, timeout_seconds: float = 60) -> None:
         """Verify the schema; migrate only if it differs, and only one process at a time.
 
         THE PRODUCTION FAILURE THIS FIXES (reproduced 2026-08-31 on PostgreSQL 16, six replicas
@@ -2585,9 +2585,21 @@ class _PgAdapter:
         locks while every reader queues — but bounding is not preventing.
         """
         import psycopg2
+        from schema_boot_deadline import DeadlineConnection
+        if not 0 < timeout_seconds <= 600:
+            raise ValueError('schema initialization timeout outside supported bounds')
+        started = time.monotonic()
+        deadline = started + timeout_seconds
         want = self._schema_checksum()
-        conn = psycopg2.connect(self._url, **self._ssl_kwargs)
+        print(json.dumps({'event': 'schema.boot', 'state': 'started',
+                          'version': self._SCHEMA_VERSION}), flush=True)
+        conn = None
+        failed = False
         try:
+            raw = psycopg2.connect(
+                self._url, **self._ssl_kwargs, connect_timeout=min(5, max(1, int(timeout_seconds))),
+                options=f'-c statement_timeout={max(1, int(timeout_seconds * 1000))} -c lock_timeout=5000')
+            conn = DeadlineConnection(raw, deadline)
             conn.autocommit = True
             with conn.cursor() as cur:
                 if self._schema_is_current(cur, want):
@@ -2601,9 +2613,25 @@ class _PgAdapter:
                         return
                     self._apply_schema(conn, want)
                 finally:
-                    cur.execute("SELECT pg_advisory_unlock(%s)", (self._MIGRATION_ADVISORY_KEY,))
+                    # Close releases the session lock even if the whole budget expired.
+                    if time.monotonic() < deadline:
+                        cur.execute("SELECT pg_advisory_unlock(%s)", (self._MIGRATION_ADVISORY_KEY,))
+        except BaseException as exc:
+            failed = True
+            sqlstate = getattr(exc, 'pgcode', None)
+            print(json.dumps({'event': 'schema.boot', 'state': 'failed',
+                              'version': self._SCHEMA_VERSION,
+                              'error_type': type(exc).__name__,
+                              'sqlstate': sqlstate if isinstance(sqlstate, str) and re.fullmatch('[A-Z0-9]{5}', sqlstate) else None,
+                              'elapsed_ms': round((time.monotonic() - started) * 1000, 3)}), flush=True)
+            raise
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
+            if not failed:
+                print(json.dumps({'event': 'schema.boot', 'state': 'completed',
+                                  'version': self._SCHEMA_VERSION,
+                                  'elapsed_ms': round((time.monotonic() - started) * 1000, 3)}), flush=True)
 
     def _schema_is_current(self, cur, want: str) -> bool:
         """Is the database AT OR AHEAD OF the schema this build needs?
@@ -2632,6 +2660,9 @@ class _PgAdapter:
         except Exception:                       # noqa: BLE001 — unknown state means migrate
             return False
 
+    def _before_schema_ddl(self, conn) -> None:
+        """Deployment preflight may refuse before any DDL; ordinary boots retain their path."""
+
     def _apply_schema(self, conn, want: str) -> None:
         """The DDL itself, under the advisory lock, with a bounded wait.
 
@@ -2644,6 +2675,7 @@ class _PgAdapter:
         try:
             with conn.cursor() as cur:
                 cur.execute("SET LOCAL lock_timeout = '5s'")
+                self._before_schema_ddl(conn)
                 for stmt in _SCHEMA:
                     cur.execute(stmt)
                 for stmt in _PG_VIEWS:
