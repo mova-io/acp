@@ -192,7 +192,7 @@ def test_durable_failed_process_receipt_cannot_be_hidden_by_recovered_process():
 def _complete_startup_reads(row, *, restart=0):
     replicas = [{'properties': {'containers': [
         {'ready': True, 'started': True, 'restartCount': restart}]}}]
-    system = [{'RevisionName': 'new', 'Reason': 'ContainerStarted',
+    system = [{'RevisionName': row['properties']['latestRevisionName'], 'Reason': 'ContainerStarted',
                'Msg': 'started', 'TimeStamp': 'now', 'Count': 1}]
     console = [
         {'Log': '{"event":"schema.boot","state":"completed","version":57}',
@@ -210,6 +210,8 @@ def test_complete_post_ready_snapshot_retries_when_logs_arrive_late(monkeypatch)
 
     def read(_subscription, *args, **_kwargs):
         nonlocal system_reads
+        if args[1:3] == ('revision', 'show'):
+            return row
         if args[1] == 'show':
             return row
         if args[1:3] == ('replica', 'list'):
@@ -236,6 +238,8 @@ def test_permanently_missing_post_ready_logs_exhaust_one_deadline(monkeypatch):
     clock = [0.0]
 
     def read(_subscription, *args, **_kwargs):
+        if args[1:3] == ('revision', 'show'):
+            return row
         if args[1] == 'show':
             return row
         if args[1:3] == ('replica', 'list'):
@@ -265,6 +269,8 @@ def test_proved_startup_failure_is_never_retried_into_success(monkeypatch, failu
     def read(_subscription, *args, **_kwargs):
         nonlocal reads
         reads += 1
+        if args[1:3] == ('revision', 'show'):
+            return row
         if args[1] == 'show':
             return row
         if args[1:3] == ('replica', 'list'):
@@ -283,7 +289,7 @@ def test_proved_startup_failure_is_never_retried_into_success(monkeypatch, failu
     monkeypatch.setattr(evidence.time, 'sleep', lambda _seconds: pytest.fail('fatal evidence retried'))
     with pytest.raises(evidence.StartupFailure):
         evidence.collect('sub', 'group', 'api-staging', 'old', timeout=20)
-    assert reads == (2 if failure == 'restart' else 6)
+    assert reads == (3 if failure == 'restart' else 8)
 
 
 @pytest.mark.parametrize('source', ['replica', 'system', 'console', 'durable'])
@@ -299,6 +305,8 @@ def test_each_fatal_source_is_latched_before_a_later_transient_read(monkeypatch,
 
     def read(_subscription, *args, **_kwargs):
         maybe_transient()
+        if args[1:3] == ('revision', 'show'):
+            return row
         if args[1] == 'show':
             return row
         if args[1:3] == ('replica', 'list'):
@@ -345,6 +353,8 @@ def test_missing_post_ready_container_fields_retry_then_complete(monkeypatch):
 
     def read(_subscription, *args, **_kwargs):
         nonlocal replica_reads
+        if args[1:3] == ('revision', 'show'):
+            return row
         if args[1] == 'show':
             return row
         if args[1:3] == ('replica', 'list'):
@@ -381,6 +391,8 @@ def test_explicit_post_ready_container_failure_never_retries_to_later_healthy(
 
     def read(_subscription, *args, **_kwargs):
         nonlocal replica_reads
+        if args[1:3] == ('revision', 'show'):
+            return row
         if args[1] == 'show':
             return row
         if args[1:3] == ('replica', 'list'):
@@ -415,6 +427,95 @@ def test_main_artifact_records_only_allowlisted_fatal_reason(monkeypatch, tmp_pa
     assert saved['roles'] == [
         {'app': 'api-staging', 'ok': False, 'reason': 'container_restart'}]
     assert 'exception' not in output.read_text().lower()
+
+
+def _revision_app(revision, image):
+    result = app()
+    result['properties']['latestRevisionName'] = revision
+    result['properties']['latestReadyRevisionName'] = revision
+    selected = [container for container in result['properties']['template']['containers']
+                if container.get('name') == result['name']]
+    selected[0]['image'] = image
+    return result
+
+
+def test_prior_revision_is_not_latched_before_expected_image_becomes_visible(monkeypatch):
+    old = _revision_app('old-revision', 'old-image')
+    target = _revision_app('target-revision', 'target-image')
+    replicas, system, console = _complete_startup_reads(target)
+    app_reads = 0
+
+    def read(_subscription, *args, **_kwargs):
+        nonlocal app_reads
+        if args[1:3] == ('revision', 'show'):
+            revision = args[args.index('--revision') + 1]
+            return old if revision == 'old-revision' else target
+        if args[1] == 'show':
+            app_reads += 1
+            return old if app_reads == 1 else target
+        if args[1:3] == ('replica', 'list'):
+            return replicas
+        if '--type' in args:
+            return system
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: None)
+    monkeypatch.setattr(evidence.time, 'sleep', lambda _seconds: None)
+    result = evidence.collect('sub', 'group', 'api-staging', 'target-image', timeout=20)
+    assert result['ok'] is True and result['revision'] == 'target-revision'
+    assert app_reads == 3  # old visibility, target latch, final target snapshot
+
+
+def test_prior_image_visibility_exhausts_deadline_without_false_revision_latch(monkeypatch):
+    old = _revision_app('old-revision', 'old-image')
+    clock = [0.0]
+
+    def read(_subscription, *args, **_kwargs):
+        return old
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(evidence.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    with pytest.raises(RuntimeError, match='within observation budget'):
+        evidence.collect('sub', 'group', 'api-staging', 'target-image', timeout=6)
+    assert clock[0] == 6
+
+
+@pytest.mark.parametrize('drift,reason', [('revision', 'revision_changed'),
+                                          ('image', 'image_changed')])
+def test_post_target_latch_revision_or_image_drift_is_fatal(monkeypatch, drift, reason):
+    target = _revision_app('target-revision', 'target-image')
+    changed = _revision_app('other-revision' if drift == 'revision' else 'target-revision',
+                            'other-image')
+    replicas, system, console = _complete_startup_reads(target)
+    app_reads = 0
+    revision_reads = 0
+
+    def read(_subscription, *args, **_kwargs):
+        nonlocal app_reads, revision_reads
+        if args[1:3] == ('revision', 'show'):
+            revision_reads += 1
+            return changed if drift == 'image' and revision_reads > 1 else target
+        if args[1] == 'show':
+            app_reads += 1
+            return changed if drift == 'revision' and app_reads > 1 else target
+        if args[1:3] == ('replica', 'list'):
+            return replicas
+        if '--type' in args:
+            return system
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: None)
+    monkeypatch.setattr(evidence.time, 'sleep', lambda _seconds: pytest.fail('latched drift retried'))
+    with pytest.raises(evidence.StartupFailure) as caught:
+        evidence.collect('sub', 'group', 'api-staging', 'target-image', timeout=20)
+    assert caught.value.reason == reason
 
 
 @pytest.mark.parametrize('blue_green,active_override', [('0', '0'), ('1', '0'), ('0', '1')])

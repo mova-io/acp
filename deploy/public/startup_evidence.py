@@ -21,7 +21,7 @@ class StartupFailure(RuntimeError):
 
     REASONS = {'container_restart', 'container_not_ready', 'system_terminated',
                'liveness_restart', 'console_phase_failed', 'durable_failure',
-               'revision_changed'}
+               'revision_changed', 'image_changed'}
 
     def __init__(self, reason):
         if reason not in self.REASONS:
@@ -187,6 +187,17 @@ def _logs_complete(receipt_row):
                     and event.get('state') == 'completed' for event in events))
 
 
+def _revision_image(document, name):
+    try:
+        containers = document['properties']['template']['containers']
+        selected = [container for container in containers if container.get('name') == name]
+        if len(selected) != 1 or not isinstance(selected[0].get('image'), str):
+            raise ValueError()
+        return selected[0]['image']
+    except (KeyError, TypeError, ValueError):
+        raise RuntimeError('revision image unavailable') from None
+
+
 def collect(subscription, group, name, image, *, timeout=OBSERVATION_SECONDS):
     deadline = time.monotonic() + timeout
     revision = None
@@ -195,10 +206,25 @@ def collect(subscription, group, name, image, *, timeout=OBSERVATION_SECONDS):
             app = read(subscription, 'containerapp', 'show', '-g', group, '-n', name,
                        deadline=deadline)
             current = app['properties']['latestRevisionName']
+            revision_document = read(subscription, 'containerapp', 'revision', 'show',
+                                     '-g', group, '-n', name, '--revision', current,
+                                     deadline=deadline)
+            current_image = _revision_image(revision_document, name)
             if revision is None:
-                revision = current
+                if current_image == image:
+                    revision = current
+                else:
+                    # The update was accepted but Azure still exposes the prior
+                    # latest revision. It is not the observation target yet.
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError('startup evidence unavailable within observation budget')
+                    time.sleep(min(5, remaining))
+                    continue
             elif current != revision:
                 raise StartupFailure('revision_changed')
+            elif current_image != image:
+                raise StartupFailure('image_changed')
             replicas = read(subscription, 'containerapp', 'replica', 'list', '-g', group,
                             '-n', name, '--revision', revision, deadline=deadline)
             post_ready = app['properties'].get('latestReadyRevisionName') == revision
@@ -221,6 +247,11 @@ def collect(subscription, group, name, image, *, timeout=OBSERVATION_SECONDS):
                              deadline=deadline)
                 if final['properties']['latestRevisionName'] != revision:
                     raise StartupFailure('revision_changed')
+                final_revision = read(subscription, 'containerapp', 'revision', 'show',
+                                      '-g', group, '-n', name, '--revision', revision,
+                                      deadline=deadline)
+                if _revision_image(final_revision, name) != image:
+                    raise StartupFailure('image_changed')
                 replicas = read(subscription, 'containerapp', 'replica', 'list', '-g', group,
                                 '-n', name, '--revision', revision, deadline=deadline)
                 # This revision was already observed post-ready above. A later
