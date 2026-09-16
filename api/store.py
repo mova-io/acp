@@ -4318,6 +4318,15 @@ class Store:
                  run_id, scan_id, owner, source_revision))
             return cur.rowcount == 1
 
+    def lifecycle_source_item(self, scan_id: str, file: str, owner: str) -> dict | None:
+        """Resolve an inventory item with its provider namespace, never just an opaque id."""
+        with self._db.cursor() as cur:
+            self._db.execute(cur,
+                "SELECT si.*,sr.source FROM scan_inventory si JOIN scan_runs sr ON sr.id=si.scan_id "
+                "WHERE si.scan_id=%s AND si.file=%s AND sr.owner_email=%s",
+                (scan_id, file, owner))
+            return self._db.fetchone(cur)
+
     def drive_targets_for_files(self, scan_id: str, files: list[str], owner: str) -> dict[str, str]:
         """{file: drive_file_id} for the files in one scan that have one, in ONE query.
 

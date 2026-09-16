@@ -49,7 +49,10 @@ def definition(source, secrets, name, image, environment):
     container.update(name=name, image=image, env=list(env.values()), resources={'cpu': 1.0, 'memory': '2Gi'})
     # This service runs worker_main; copying web probes would leave it permanently unhealthy.
     container.pop('probes', None)
+    # CLI show returns this response-only field; the activation ARM API rejects it.
+    container.pop('imageType', None)
     template.pop('revisionSuffix', None)
+    template.pop('customMetricsSettings', None)
     template['terminationGracePeriodSeconds'] = 600
     rules = props['template'].get('scale', {}).get('rules', [])
     queues = [r for r in rules if r.get('custom', {}).get('type') == 'postgresql']
@@ -84,6 +87,8 @@ def main():
     p.add_argument('--source', required=True); p.add_argument('--name', required=True)
     p.add_argument('--image', required=True, help='CI-verified image with release-role support')
     p.add_argument('--environment', required=True, choices=['staging', 'production'])
+    p.add_argument('--blob-grants-file', type=Path,
+        help='Explicit container grants JSON: scope plus reader/contributor role; default copies exact source grants')
     p.add_argument('--apply', action='store_true')
     a = p.parse_args()
     common = ['--subscription', a.subscription, '-g', a.resource_group]
@@ -100,6 +105,12 @@ def main():
     blob_roles = [r for r in roles if r['roleDefinitionId'].lower().endswith('/ba92f5b4-2d11-453d-a403-e96b0029c9fe')]
     if not blob_roles:
         raise ValueError('Source has no explicit Blob Data Contributor grant; verify storage access before provisioning')
+    if a.blob_grants_file is not None:
+        from release_blob_grants import select_blob_grants
+        source_env = {e['name']: e for e in source['properties']['template']['containers'][0].get('env', [])}
+        blob_roles = select_blob_grants(blob_roles, json.loads(a.blob_grants_file.read_text()),
+            account=source_env.get('ACP_BLOB_ACCOUNT', {}).get('value'),
+            subscription=a.subscription, environment=a.environment)
     print(f'{a.name}: private Release worker, 1 CPU/2Gi, three slots (two delivery, one report), one replica maximum.')
     if not a.apply:
         print('Validation only. No Azure resources changed.'); return

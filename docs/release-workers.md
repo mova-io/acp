@@ -42,3 +42,17 @@ Durable completion of remediation, approved writes, rescoring and uploads promot
 Each automatic permission admits at most two outstanding uploads. Admission occupies a slot before a provider response exists; queued jobs and provider retries keep their slots. SharePoint appends work only to the same permission and frozen release, preserving existing jobs and work items. Unrelated, paused, cancelled or receipt-only legacy executions remain protected. Provider retry/backoff rules are unchanged. During staging validation confirm two independent authorized corrected copies upload concurrently, report capacity remains available, Stop prevents later admission, and interrupted delivery reuses its receipt. Rollout stays under the parent task's coordination after active scans and other tasks settle.
 
 Treat 1 CPU/2Gi as an initial staging configuration, not measured adequacy. Before production cutover record peak memory/CPU, DB pool waits, provider throttles and upload latency while two uploads and a report run together. Keep one replica maximum during this validation. If capacity or delivery verification fails, follow shared-routing recovery above and drain the Release worker gracefully; retain all jobs and receipts.
+
+## Explicit container grants
+
+`--blob-grants-file FILE` optionally selects private container scopes instead of cloning every source Blob Data Contributor grant. The file is a JSON array of objects with exactly `scope` and `role` (`reader` or `contributor`). For production, precreate the private `release-packages` container; a container-scoped worker cannot create it at account level. Select only containers needed for the chosen Release flow, for example `sources` with reader access and `remediated`/`release-packages` with contributor access. Include other containers only if the validated flow needs them.
+
+Every selection must be a container under an existing source Blob grant, in the source's explicit `ACP_BLOB_ACCOUNT` and requested subscription. Production selections cannot include staging containers. Conditional grants are retained only for an exact same-scope contributor clone; narrowing or changing their role is rejected rather than interpreting the condition. Default invocations still copy exact source grants and conditions.
+
+Example entry (use the actual account/resource group and repeat for each required container):
+
+```json
+[{"scope":"/subscriptions/8fab0f8f-b577-45d7-a485-ec32f73b22be/resourceGroups/mdk-accessibility/providers/Microsoft.Storage/storageAccounts/acpremediatedstore/blobServices/default/containers/sources","role":"reader"}]
+```
+
+Validate first with `--blob-grants-file FILE` and no `--apply`. Review the file before applying. Existing source identity grants remain unchanged. Verify storage access before routing activation; an unrelated administrative source role never authorizes a selected grant.
