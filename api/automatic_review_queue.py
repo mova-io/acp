@@ -40,8 +40,9 @@ def stalled_reason(item):
                 'before saving; the earlier approval remains in the audit history.')
     outcome = item.get('apply_outcome') or {}
     reason = str(outcome.get('reason') or '').strip()
-    kept = ('Your approval still stands and the approved text is kept — retry saving it. '
-            'You will not be asked to approve it again.')
+    kept = ('Your approval and approved text are kept — retry saving it. '
+            'Retry checks the document and suggestion against the approved versions. '
+            'Matching records need no second approval; changed or missing version records require review.')
     if outcome.get('outcome') == NOTHING_WRITTEN:
         lead = ('Saving ran and left the document unchanged.'
                 if reason else
@@ -60,7 +61,7 @@ def stalled_reason(item):
         return ('Saved, but not yet independently checked. No verification is running right now; '
                 'start one again when you are ready. Another approval is not needed.')
     return ('Approved, not yet saved into the document. No saving is running right now; retry '
-            'saving it. Another approval is not needed.')
+            'saving it. ' + kept)
 
 
 def annotate(store, rows, owner):

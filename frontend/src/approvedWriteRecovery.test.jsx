@@ -169,7 +169,9 @@ describe('an approved 1.4.5 whose approved value was never written', () => {
     expect(pane.textContent).toContain('Approved — the change has not been written yet')
     // The backend's recorded reason is surfaced, not paraphrased or replaced.
     expect(pane.textContent).toContain(REASON)
-    expect(pane.textContent).toMatch(/not ask for it again/i)
+    // This legacy row has no complete version binding: approval is not a permanent promise.
+    expect(pane.textContent).toContain('changed or missing version records require review')
+    expect(pane.textContent).not.toMatch(/not ask for it again|no further approval will/i)
     // An affordance exists: the plan button is real and wired.
     const plan = [...pane.querySelectorAll('button')].find(b => b.textContent === 'Open remediation plan')
     expect(plan).not.toBeNull()

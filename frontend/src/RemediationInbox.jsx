@@ -339,7 +339,7 @@ function taskLineOf(f, lane, automaticMode = false, decisions = {}) {
   // Stated before the applied/automatic branches because it is the narrower fact: the approval is
   // recorded AND nothing was written. Saying "already applied" here would claim a write that the
   // writer declined to make.
-  if (approvedWriteUnconfirmed(f, decisions)) return 'Your approval is recorded and ACP will not ask for it again. The approved value has not been written to a corrected copy yet — retry the write, or read the recorded writer outcome. Nothing here needs approving twice.'
+  if (approvedWriteUnconfirmed(f, decisions)) return 'Your approval is recorded, but the approved value has not been written to a corrected copy yet. Retry checks the approved document and suggestion versions; matching records need no second approval. Changed or missing version records require review.'
   if (f.applied && !f.validated) return 'This change is already applied. Recorded verification is incomplete; another approval is not needed.'
   if (automaticMode) {
     const responsibility = automaticReviewResponsibility(f, decisions)
@@ -717,7 +717,7 @@ function DetailPane({ f, decisions, readOnly = false, automaticMode = false, pre
 
         {!isManual && <p className="muted" style={{ fontSize: 13, lineHeight: 1.45, margin: '14px 0 0' }}>
           {staleApproval ? 'An approval for this is on record, but it was given against a version this document or suggestion has moved on from. Nothing was written from it, and it may need a fresh decision — so ACP may ask you about this one again.'
-            : writeUnconfirmed ? 'Your approval is on record. No confirmed write of the approved value exists yet, so nothing here is applied or verified — and no further approval will be requested for it.'
+            : writeUnconfirmed ? 'Your approval is on record. No confirmed write of the approved value exists yet, so nothing here is applied or verified. Retry checks the approved versions; changed or missing version records require review.'
             : f.applied && !f.validated ? 'This change is applied, but verification is incomplete. No additional approval is needed and it is not counted as verified.'
             : automaticMode && responsibility === 'acp' ? 'ACP is handling this admitted work automatically. No human confirmation is required now.'
             : automaticMode && responsibility === 'check' ? 'Automatic admission or verification needs a status check. The absence of a verification action does not imply that human approval is required.'
@@ -1112,7 +1112,7 @@ export default function RemediationInbox({
           </button>
         )}
         <span style={{ fontSize: 13, fontWeight: 700 }}>Guided remediation</span>
-        {(selected?.automaticReason || selected?.automaticQueued) && <p className="automatic-review-queued" role="status"><b>{autoApprove === true ? (automaticReviewResponsibility(selected, decisions) === 'human' ? 'You' : selected.automaticQueued ? 'ACP' : 'Status check') : selected.automaticQueued ? 'ACP' : selected.automaticDisposition?.owner || 'You'}: </b>{autoApprove === true && workflowStatusOf(selected, decisions) === 'awaiting-validation' && automaticReviewResponsibility(selected, decisions) === 'check' ? 'Approval is already recorded. Verification is still pending; no additional approval is needed.' : approvedWriteUnconfirmed(selected, decisions) ? <>Approval is already recorded and will not be requested again. {selected.automaticReason}</> : selected.automaticReason || 'Automatic eligibility checks are queued.'}{selected.automaticQueued && <> This is not yet an applied or verified fix.</>}</p>}
+        {(selected?.automaticReason || selected?.automaticQueued) && <p className="automatic-review-queued" role="status"><b>{autoApprove === true ? (automaticReviewResponsibility(selected, decisions) === 'human' ? 'You' : selected.automaticQueued ? 'ACP' : 'Status check') : selected.automaticQueued ? 'ACP' : selected.automaticDisposition?.owner || 'You'}: </b>{autoApprove === true && workflowStatusOf(selected, decisions) === 'awaiting-validation' && automaticReviewResponsibility(selected, decisions) === 'check' ? 'Approval is already recorded. Verification is still pending; no additional approval is needed.' : approvedWriteUnconfirmed(selected, decisions) ? <>Approval is already recorded. Retry checks the approved versions before writing. {selected.automaticReason}</> : selected.automaticReason || 'Automatic eligibility checks are queued.'}{selected.automaticQueued && <> This is not yet an applied or verified fix.</>}</p>}
       </span>
     </div>
   )

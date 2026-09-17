@@ -55,9 +55,10 @@ def test_a_refused_write_explains_itself_instead_of_denying_the_job_existed():
     assert 'No active writer job is recorded' not in reason
     assert 'application pending' not in reason
     # And the user is told the approval survives and what to do next.
-    assert 'approval still stands' in reason
+    assert 'Your approval and approved text are kept' in reason
     assert 'retry saving it' in reason
-    assert 'not be asked to approve it again' in reason
+    assert 'changed or missing version records require review' in reason
+    assert 'not be asked to approve it again' not in reason
 
 
 def test_no_reason_string_claims_the_value_came_from_ai():
@@ -90,7 +91,8 @@ def test_the_fallback_no_longer_claims_no_job_was_ever_recorded():
     for text in (unsaved, saved):
         assert 'is recorded' not in text
         assert 'running right now' in text
-        assert 'Another approval is not needed.' in text
+    assert 'Another approval is not needed.' in saved
+    assert 'changed or missing version records require review' in unsaved
     assert 'not yet saved into the document' in unsaved
     assert 'not yet independently checked' in saved
 
