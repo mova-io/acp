@@ -1,7 +1,8 @@
-import { progressBar, etaGate, runHeadline, shouldShowCard } from './remediationRunCard.js'
+import { progressBar, runHeadline, shouldShowCard } from './remediationRunCard.js'
 import { freshness, counterRows, secondaryRows, partitionSums } from './remediationSnapshot.js'
 import LiveCounter from './LiveCounter.jsx'
 import ActivityPulse from './ActivityPulse.jsx'
+import RemediationProgressFacts from './RemediationProgressFacts.jsx'
 
 // The persistent remediation run card — visible on EVERY tab while a run is live.
 //
@@ -70,7 +71,6 @@ export default function RemediationRunCard({ snapshot = null, receivedAt = null,
   const head = runHeadline(snapshot)
   const bar = progressBar(snapshot)
   const fresh = freshness({ snapshot, connected, receivedAt })
-  const eta = etaGate(snapshot, throughput)
   const fixes = snapshot.fixes || {}
   const delivery = snapshot.delivery || {}
   const source = snapshot.source || {}
@@ -170,14 +170,10 @@ export default function RemediationRunCard({ snapshot = null, receivedAt = null,
         ) })}
       </dl>
 
-      <p className="muted" style={{ margin: '8px 0 0', fontSize: 12 }}>
-        {eta.show
-          ? <>Estimated {eta.text} · <span style={{ fontStyle: 'italic' }}>{eta.basis}</span></>
-          : eta.note}
-        {typeof throughput?.ratePerMin === 'number' && throughput.ratePerMin > 0 && !throughput.calibrating && (
-          <> · {throughput.ratePerMin} documents/min · last 5 min</>
-        )}
-      </p>
+      <RemediationProgressFacts snapshot={snapshot} />
+      {Number.isFinite(throughput?.ratePerMin) && throughput.ratePerMin > 0 && !throughput.calibrating && (
+        <p className="muted" style={{ margin: '4px 0', fontSize: 12 }}>{throughput.ratePerMin} documents/min · last 5 min</p>
+      )}
 
       {/* One polite live region carrying the STATE, not the counters. */}
       <p aria-live="polite" className="sr-only" data-testid="rem-run-card-announce">
