@@ -86,8 +86,8 @@ export function canonicalStageCardModel(snapshot, context = {}) {
   const definition = stageDefinition(snapshot.stage)
   const views = canonicalStageViewModels(snapshot, context)
   const stateLabel = stopping ? 'Stopping safely'
-    : snapshot.stage === 'remediate' && ['processing_complete', 'succeeded'].includes(snapshot.state)
-      ? 'Complete' : (STATE_LABELS[snapshot.state] || 'Status unavailable')
+    : ['remediate', 'release'].includes(snapshot.stage) && ['processing_complete', 'succeeded'].includes(snapshot.state)
+      ? (snapshot.stage === 'release' ? 'Publication processing finished' : 'Processing finished') : (STATE_LABELS[snapshot.state] || 'Status unavailable')
   return {
     stage: snapshot.stage,
     stageLabel: definition?.label || 'Stage',

@@ -47,7 +47,7 @@ it('traces omitted findings to recorded file/SC evidence and refuses inconsisten
   const html = renderToStaticMarkup(<Card snapshot={{stage:'remediate',state:'processing_complete',
     domain_reconciliation:{total:3,accounted:2,buckets:{resolved_verified:2}},
     omitted_assessment_groups:[{file:'one.pdf',sc:'1.4.1',count:1}]}} />)
-  expect(html).toContain('Complete')
+  expect(html).toContain('Remediate · Processing finished')
   expect(html).not.toContain('Processing complete')
   expect(html).toContain('2 with recorded outcomes + 1 awaiting an outcome = 3 assessed findings')
   expect(html).toContain('one.pdf')
