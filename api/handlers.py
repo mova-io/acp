@@ -5270,7 +5270,7 @@ def _apply_one_value_kind(
         write_fn, diff_rule_id: str, credit_rule_ids: tuple[str, ...],
         noun: str, job: dict, pending_credits: list, extra_work: bool = False,
         residual_state: dict | None = None, diff_rule_ids: dict | None = None,
-        refusal_reason_fn=None) -> tuple[bytes, bool]:
+        refusal_reason_fn=None, only_item_id: str | None = None) -> tuple[bytes, bool]:
     """Shared write → verify → credit sequence for one kind of approved value (alt text or
     link text) applied on top of `working`. Returns (new_working, uploaded_this_kind).
 
@@ -5301,14 +5301,18 @@ def _apply_one_value_kind(
     # Freeze the exact review items before the lane changes their applied state. Their immutable
     # HITL events carry model_call_id when a reviewer acted on an AI draft; human-authored work
     # simply yields no model outcome row.
+    # `only_item_id` narrows this lane to ONE approved row — a retry re-attempts one reviewer's
+    # decision, so nothing else on the file may be written or credited by it. None (the ordinary
+    # approval path) leaves the lane file-wide, exactly as before.
     review_item_ids = []
     for rule_id in credit_rule_ids:
-        review_item_ids.extend(core.store.approved_unapplied_item_ids(scan_id, filename, rule_id))
+        review_item_ids.extend(core.store.approved_unapplied_item_ids(
+            scan_id, filename, rule_id, item_id=only_item_id))
     # The locators each item hands the writer, so an unresolved locator can be attributed to the
     # item — and through its HITL event, the model call — that approved it.
     try:
         item_locators = core.store.approved_unapplied_item_locators(
-            scan_id, filename, credit_rule_ids)
+            scan_id, filename, credit_rule_ids, item_id=only_item_id)
     except Exception:
         swallowed("_apply_one_value_kind: reading the approved items' locators failed", scan_id)
         item_locators = {}
@@ -5633,7 +5637,7 @@ def _apply_one_value_kind(
 
 
 @handler("apply_approved_values")
-def _apply_approved_values(payload: dict, job: dict) -> None:
+def _apply_approved_values(payload: dict, job: dict, *, _retry_locked=False) -> None:
     """Write reviewer-approved content (alt text, link text, PDF form-field names) into the
     remediated copy, then verify it.
 
@@ -5646,7 +5650,15 @@ def _apply_approved_values(payload: dict, job: dict) -> None:
     lane may only credit what its own re-scan observed. They run in sequence on the same
     `working` bytes, so a file with both alt text and field names approved gets one upload.
 
-    payload: {scan_id, file}
+    payload: {scan_id, file} — every approved value the file owes, the ordinary approval path.
+
+    payload: {scan_id, file, item_id, approved_binding} — ONE approval, re-attempted
+    (store.retry_approved_write). The item narrows every value map and every credit below to
+    that row, so a retry requested for one suggestion cannot sweep in whatever else has been
+    approved on the document since. `approved_binding` is the source revision, value digest,
+    decision version and proposal snapshots the retry was admitted on; it is re-checked HERE,
+    against the row as it stands now, because a route-time check is minutes stale by the time a
+    worker claims the job. A binding that no longer holds is fatal and writes nothing.
     """
     # Approval coordination shares the established approved-fix worker lane;
     # this phase authorizes exact pending proposals and queues normal file writes.
@@ -5664,6 +5676,34 @@ def _apply_approved_values(payload: dict, job: dict) -> None:
     filename = payload.get("file")
     if not (scan_id and filename):
         raise FatalJobError("apply_approved_values job missing scan_id/file")
+
+    # A retry re-attempts one already-approved row. Revalidate its binding here rather than
+    # trusting the admission check: the row can be re-decided, re-proposed or re-remediated
+    # between the request and the claim, and this worker is the last place that can refuse.
+    only_item_id = payload.get("item_id") or None
+    if only_item_id and not _retry_locked:
+        with core.store.transaction():
+            core.store._get_hitl_item_for_decision(only_item_id)
+            suffix = " FOR UPDATE" if core.store._db.supports_for_update else ""
+            with core.store._db.cursor() as cur:
+                core.store._db.execute(cur,
+                    f"SELECT file FROM file_records WHERE scan_id=%s AND file=%s{suffix}",
+                    (scan_id, filename))
+            return _apply_approved_values(payload, job, _retry_locked=True)
+    if only_item_id:
+        item = core.store.get_hitl_item(only_item_id)
+        binding, refusal = core.store.approved_write_binding(item)
+        if (not refusal and (item.get("scan_id") != scan_id or item.get("file") != filename)):
+            refusal = "this review item does not belong to the document the job names"
+        expected = payload.get("approved_binding")
+        if not refusal and (not isinstance(expected, dict) or binding != expected):
+            refusal = core.store.RETRY_VALUES_CHANGED
+        if refusal:
+            core.store.log_decision(
+                "system", "apply.retry_refused", scan_id=scan_id, file=filename,
+                rule_id=(item or {}).get("rule_id"),
+                detail=f"the retry of {only_item_id} was not re-admitted at write time: {refusal}")
+            raise FatalJobError(refusal)
 
     if payload.get('standing_approval'):
         from ai_standing_approval import check_application
@@ -5690,25 +5730,31 @@ def _apply_approved_values(payload: dict, job: dict) -> None:
                                 detail=f".{ext}: no approved-value applier for this format")
         return
 
-    alt_values = core.store.approved_alt_values(scan_id, filename)
+    # `item_id=only_item_id` is None on the ordinary path (every approved value the file owes)
+    # and one row's id on a retry. It is threaded into every map rather than filtered
+    # afterwards so there is one place the narrowing happens and no kind can be missed.
+    alt_values = core.store.approved_alt_values(scan_id, filename, item_id=only_item_id)
     # Images a reviewer resolved as DECORATIVE. Office only: the marking is an OOXML extLst
     # marker (apply_alt), and the PDF equivalent — re-tagging the figure as an /Artifact — is a
     # structure edit no writer here performs, so on PDF the exception stays a recorded judgement.
-    deco_locators = (core.store.approved_decorative_locators(scan_id, filename)
+    deco_locators = (core.store.approved_decorative_locators(scan_id, filename, item_id=only_item_id)
                      if ext in _OFFICE_ALT_MIME else [])
-    link_values = core.store.approved_link_values(scan_id, filename) if ext in _OFFICE_LINK_EXTS else {}
-    field_values = (core.store.approved_field_values(scan_id, filename)
+    link_values = (core.store.approved_link_values(scan_id, filename, item_id=only_item_id)
+                   if ext in _OFFICE_LINK_EXTS else {})
+    field_values = (core.store.approved_field_values(scan_id, filename, item_id=only_item_id)
                     if ext in _FIELD_NAME_EXTS else {})
-    sensory_values = (core.store.approved_sensory_values(scan_id, filename)
+    sensory_values = (core.store.approved_sensory_values(scan_id, filename, item_id=only_item_id)
                       if ext in _SENSORY_EXTS else {})
-    language_values = (core.store.approved_language_values(scan_id, filename)
+    language_values = (core.store.approved_language_values(scan_id, filename, item_id=only_item_id)
                        if ext in _LANGUAGE_EXTS else {})
-    structure_label_values = (core.store.approved_structure_label_values(scan_id, filename)
+    structure_label_values = (core.store.approved_structure_label_values(
+                                  scan_id, filename, item_id=only_item_id)
                               if ext in _STRUCTURE_LABEL_EXTS else {})
     image_of_text_values = (core.store.approved_images_of_text_values(
-                                scan_id, filename, _IMAGE_OF_TEXT_SCS)
+                                scan_id, filename, _IMAGE_OF_TEXT_SCS, item_id=only_item_id)
                             if ext in _IMAGE_OF_TEXT_EXTS else {})
-    pdf_structure_groups = ({sc: core.store.approved_pdf_structure_values(scan_id, filename, sc)
+    pdf_structure_groups = ({sc: core.store.approved_pdf_structure_values(
+                                 scan_id, filename, sc, item_id=only_item_id)
         for sc in _PDF_STRUCTURE_SCS} if ext in _PDF_STRUCTURE_EXTS else {})
     if not (alt_values or deco_locators or link_values or field_values
             or sensory_values or language_values or structure_label_values
@@ -5735,6 +5781,11 @@ def _apply_approved_values(payload: dict, job: dict) -> None:
             core.store.log_decision("system", "apply.no_remediated_copy", scan_id=scan_id,
                                     file=filename, detail="no stored corrected copy or assessed source available")
             raise FatalJobError('No corrected copy or assessed source is available. Start remediation again to restore the copy; the approval remains saved.')
+
+    if only_item_id:
+        import hashlib
+        if hashlib.sha256(working).hexdigest() != binding['corrected_sha256']:
+            raise FatalJobError(core.store.RETRY_SOURCE_MOVED)
 
     if payload.get('standing_approval'):
         from ai_standing_approval import check_application
@@ -5835,7 +5886,8 @@ def _apply_approved_values(payload: dict, job: dict) -> None:
         # doing everything else right.
         diff_rule_id="1.1.1", noun="description", job=job,
         credit_rule_ids=("1.1.1", f"1.1.1{core.store.DESCRIBED_RULE_SUFFIX}"),
-        residual_state=residual_state, pending_credits=pending_credits)
+        residual_state=residual_state, pending_credits=pending_credits,
+            only_item_id=only_item_id)
 
     # 4.1.2 form-field accessible names. PDF keys on `pdf:field:…` and writes /TU; Word keys
     # on `docx:sdt:…` and writes w:alias. One lane, one criterion, the writer chosen by format.
@@ -5853,7 +5905,8 @@ def _apply_approved_values(payload: dict, job: dict) -> None:
             scan_id=scan_id, filename=filename, working=working,
             values=field_values, scs_to_clear={"4.1.2"}, write_fn=field_write_fn,
             diff_rule_id="4.1.2", credit_rule_ids=("4.1.2",), noun="field name", job=job,
-            residual_state=residual_state, pending_credits=pending_credits)
+            residual_state=residual_state, pending_credits=pending_credits,
+            only_item_id=only_item_id)
 
     link_uploaded = False
     if link_values:
@@ -5866,7 +5919,8 @@ def _apply_approved_values(payload: dict, job: dict) -> None:
             scan_id=scan_id, filename=filename, working=working,
             values=link_values, scs_to_clear=set(link_scs), write_fn=link_write_fn,
             diff_rule_id="2.4.4", credit_rule_ids=link_scs, noun="link text", job=job,
-            residual_state=residual_state, pending_credits=pending_credits)
+            residual_state=residual_state, pending_credits=pending_credits,
+            only_item_id=only_item_id)
 
     # 1.3.3 sensory rewrites and 3.1.2 language marks (Word). Two lanes, not one, even though a
     # single module writes both: each lane may only credit the criterion its OWN re-scan saw
@@ -5879,7 +5933,8 @@ def _apply_approved_values(payload: dict, job: dict) -> None:
             scan_id=scan_id, filename=filename, working=working,
             values=sensory_values, scs_to_clear={"1.3.3"}, write_fn=sensory_write_fn,
             diff_rule_id="1.3.3", credit_rule_ids=("1.3.3",), noun="rewrite", job=job,
-            residual_state=residual_state, pending_credits=pending_credits)
+            residual_state=residual_state, pending_credits=pending_credits,
+            only_item_id=only_item_id)
 
     language_uploaded = False
     if language_values:
@@ -5893,7 +5948,8 @@ def _apply_approved_values(payload: dict, job: dict) -> None:
             scan_id=scan_id, filename=filename, working=working,
             values=language_values, scs_to_clear={"3.1.2"}, write_fn=language_write_fn,
             diff_rule_id="3.1.2", credit_rule_ids=("3.1.2",), noun="language mark", job=job,
-            residual_state=residual_state, pending_credits=pending_credits)
+            residual_state=residual_state, pending_credits=pending_credits,
+            only_item_id=only_item_id)
 
     structure_label_uploaded = False
     if structure_label_values:
@@ -5909,7 +5965,8 @@ def _apply_approved_values(payload: dict, job: dict) -> None:
             write_fn=_struct_write_fn,
             diff_rule_id="2.4.6", credit_rule_ids=("2.4.6",),
             noun="structure label", job=job,
-            residual_state=residual_state, pending_credits=pending_credits)
+            residual_state=residual_state, pending_credits=pending_credits,
+            only_item_id=only_item_id)
 
     # 1.4.5 images of text. The approved transcript replaces the picture with a real text box and
     # the image is deleted, so the words become selectable, resizable text and the raster the
@@ -5938,7 +5995,8 @@ def _apply_approved_values(payload: dict, job: dict) -> None:
             diff_rule_id="1.4.5", credit_rule_ids=_IMAGE_OF_TEXT_SCS,
             noun="image-of-text replacement", job=job,
             refusal_reason_fn=image_replacement_refusal,
-            residual_state=residual_state, pending_credits=pending_credits)
+            residual_state=residual_state, pending_credits=pending_credits,
+            only_item_id=only_item_id)
 
     pdf_structure_uploaded = False
     if ext in _PDF_STRUCTURE_EXTS and any(pdf_structure_groups.values()):
@@ -5958,7 +6016,7 @@ def _apply_approved_values(payload: dict, job: dict) -> None:
             diff_rule_id=criteria[0], diff_rule_ids=rules,
             credit_rule_ids=tuple(sorted(set(criteria) & set(_PDF_STRUCTURE_SCS))),
             noun='PDF tag structure', job=job, residual_state=structure_state,
-            pending_credits=pending_credits)
+            pending_credits=pending_credits, only_item_id=only_item_id)
         if pdf_structure_uploaded:
             residual_state['verification'] = structure_state['verification']
 

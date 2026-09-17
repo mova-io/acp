@@ -150,21 +150,56 @@ export function isResolved(f, decisions = {}) {
   return !!(d && (d.state === 'accepted' || d.state === 'approved' || d.state === 'rejected' || d.state === 'not_applicable'))
 }
 
-/**
- * Whether an approval is ALREADY RECORDED for this row — on the row itself (hitl_queue.status,
- * which outlives the browser session) or in this session's decisions.
- *
- * An approval that is recorded is an approval that will never be asked for again: the exact same
- * proposal cannot be re-approved, and a screen that asks for one is asking for something the
- * backend would refuse. A rejection, a defer and an assignment are decisions, not approvals, and
- * are deliberately excluded — that work really is a person's.
- */
-export function approvalRecordedOn(f, decisions = {}) {
-  const d = decisions[f?.id] ?? decisions[f?.file]
-  if (f?.rejectedFix || ['assigned', 'deferred', 'rejected', 'not_applicable'].includes(d?.state)) return false
+// Only a finding-specific decision can grant approval; changed bindings need recheck.
+function ownApprovalDecision(f, decisions = {}) {
+  const byId = f?.id != null ? decisions[f.id] : undefined
+  if (byId) return byId
+  const byFile = f?.file ? decisions[f.file] : undefined
+  const named = byFile?.id ?? byFile?.findingId ?? byFile?.finding_id
+  return named != null && f?.id != null && String(named) === String(f.id) ? byFile : null
+}
+
+function recordedApprovalState(f, decisions = {}) {
+  // Refusal reads both maps — see ownApprovalDecision.
+  const blocking = decisions[f?.id] ?? decisions[f?.file]
+  if (f?.rejectedFix || ['assigned', 'deferred', 'rejected', 'not_applicable'].includes(blocking?.state)) return 'none'
+  const own = ownApprovalDecision(f, decisions)
   const st = String(f?.status || '').toLowerCase()
-  if (['approved', 'applied', 'accepted'].includes(st)) return true
-  return ['approved', 'accepted'].includes(d?.state)
+  if (!(['approved', 'applied', 'accepted'].includes(st) || ['approved', 'accepted'].includes(own?.state))) return 'none'
+  if (f?.applied === true || f?.autoApplied === true || f?.validated || f?.verified === true) return 'current'
+  const raw = (f && f._raw) || {}
+  // The finding itself stopped being the work that was approved (a re-scan replaced the row, or a
+  // shadowed/provenance check retired it). batchReviewSelection already calls this "Stale".
+  if (raw.approval_recheck_required === true || f?.stale === true || f?.superseded === true || raw.superseded === true) return 'stale'
+  const approvedRevision = raw.approved_source_revision ?? null
+  const currentRevision = raw.source_revision ?? f?.source_revision ?? null
+  if (approvedRevision != null && currentRevision != null
+      && String(approvedRevision) !== String(currentRevision)) return 'stale'
+  // Aligned, one slot per proposal, and a null slot means "no snapshot captured for this instance"
+  // (legacy data) rather than a mismatch — so only a slot that WAS captured can disagree. A change
+  // in length is a proposal added or withdrawn since the approval, which is itself a change.
+  const approvedSnapshots = raw.approved_proposal_snapshot_ids
+  const currentSnapshots = raw.proposal_snapshot_ids ?? f?.proposal_snapshot_ids
+  if (Array.isArray(approvedSnapshots) && Array.isArray(currentSnapshots)) {
+    if (approvedSnapshots.length !== currentSnapshots.length) return 'stale'
+    if (approvedSnapshots.some((id, i) => id != null && String(id) !== String(currentSnapshots[i]))) return 'stale'
+  }
+  // Optimistic-concurrency version, when the caller recorded which one its decision was taken
+  // against. Remediate's in-session approvals send `expectedVersion` to the server but do not keep
+  // it on the local decision, so today this fires only for callers that do; the row-binding columns
+  // above are what carry the production case.
+  const decidedAt = own?.decisionVersion ?? own?.decision_version
+  if (decidedAt != null && raw.decision_version != null
+      && Number(decidedAt) !== Number(raw.decision_version)) return 'stale'
+  return 'current'
+}
+
+export function approvalRecordedOn(f, decisions = {}) {
+  return recordedApprovalState(f, decisions) === 'current'
+}
+
+export function approvalSuperseded(f, decisions = {}) {
+  return recordedApprovalState(f, decisions) === 'stale'
 }
 
 /**
@@ -182,11 +217,10 @@ export function approvalRecordedOn(f, decisions = {}) {
  * question, already handled by the awaiting-validation path.
  */
 export function approvedWriteUnconfirmed(f, decisions = {}) {
-  if (!approvalRecordedOn(f, decisions)) return false
-  if (f?.validated || f?.verified === true) return false
-  if (f?.automaticQueued === true) return false
-  if (f?.applied === true || f?.autoApplied === true) return false
-  return workflowStatusOf(f, decisions) === 'blocked'
+  if (!approvalRecordedOn(f, decisions) || f?.validated || f?.verified === true) return false
+  if (f?.applied === true || f?._raw?.applied === 1 || f?.autoApplied === true) return false
+  if (['decorative', 'essential_exception', 'out_of_scope'].includes(f?.resolution)) return false
+  return Boolean(f?.hasProposal || f?.proposals?.length || f?._raw?.proposals?.length)
 }
 
 /** The plain-language issue — the dominant text in a row. Strips the "DOCX · " format prefix that

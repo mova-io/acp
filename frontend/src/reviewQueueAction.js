@@ -1,4 +1,4 @@
-import { approvedWriteUnconfirmed, laneOf, workflowStatusOf } from './remediationInboxModel.js'
+import { approvalSuperseded, approvedWriteUnconfirmed, laneOf, workflowStatusOf } from './remediationInboxModel.js'
 import { automaticReviewResponsibility } from './automaticReviewResponsibility.js'
 
 // Action ownership is independent of severity, which remains available for priority filters.
@@ -11,6 +11,11 @@ export function reviewQueueAction(row, decisions = {}, automatic = false) {
   // recorded and no further one will be requested — and the row had no control at all behind it.
   // Naming the state as recoverable is what routes the reviewer to the recovery pane.
   if (approvedWriteUnconfirmed(row, decisions)) return { key: 'recover', label: 'Recovery needed' }
+  // An approval that no longer binds is not recovery work and not a status check — both of those
+  // say ACP owns the next move. This one wants a person: the earlier approval will not be written
+  // into the version the document is at now. Stated ahead of the awaiting-validation line, which
+  // an approved row reaches whenever no blocked disposition beat it there.
+  if (approvalSuperseded(row, decisions)) return { key: 'review', label: 'Review needed' }
   if (status === 'awaiting-validation' || (automatic && owner === 'check')) return { key: 'check', label: 'Status check' }
   const lane = laneOf(row).key
   const manualReason = ['Manual work or no supported proposal writer',

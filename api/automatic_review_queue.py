@@ -7,6 +7,7 @@ def _key(owner, run_id, item_id):
     return 'ai-item-disposition:' + hashlib.sha256(json.dumps([owner, run_id, item_id]).encode()).hexdigest()
 
 
+from apply_outcome import COULD_NOT_VERIFY, NOTHING_WRITTEN, STILL_FAILING
 from release_continuation import PDF_STRUCTURE_MANUAL, PDF_STRUCTURE_REVIEW
 from sensory_rewrite_output import NON_ANSWER_REASON
 from fix_approval_policy import REVIEW_REQUIRED
@@ -20,6 +21,46 @@ def record(store, owner, sid, run_id, source_revision, item, state, reason):
     store.set_setting(_key(owner, run_id, item['id']), json.dumps(value, sort_keys=True))
     return value
 
+
+
+def stalled_reason(item):
+    """Why an approved suggestion is sitting still, in words its reviewer can act on.
+
+    SHOWN TO THE USER VERBATIM — the recovery pane renders it as written, so it is product
+    copy, not a log line. It prefers the row's own `apply_outcome`, the refusal reason
+    `apply_outcome.annotate_apply_outcomes` already parsed onto it, because the previous
+    wording ("No active writer job is recorded") was false for a job that ran and refused,
+    and left re-approving as the only move it suggested. The fallback now claims only that
+    none is running NOW — true whether one finished or none was ever made.
+
+    Nothing here calls the value AI-generated: an image-of-text transcript comes from OCR.
+    """
+    if item.get('approval_recheck_required'):
+        return ('The document or suggestion changed after approval. Review the current version '
+                'before saving; the earlier approval remains in the audit history.')
+    outcome = item.get('apply_outcome') or {}
+    reason = str(outcome.get('reason') or '').strip()
+    kept = ('Your approval still stands and the approved text is kept — retry saving it. '
+            'You will not be asked to approve it again.')
+    if outcome.get('outcome') == NOTHING_WRITTEN:
+        lead = ('Saving ran and left the document unchanged.'
+                if reason else
+                'Saving ran and left the document unchanged, because the approved text reaches '
+                'nothing this document can carry it on.')
+        return ' '.join(filter(None, (lead, reason, kept)))
+    if outcome.get('outcome') == COULD_NOT_VERIFY:
+        return ' '.join(filter(None, (
+            'Your approved text was written, but the independent check could not confirm it.',
+            reason, 'The change is kept and no further approval is needed.')))
+    if outcome.get('outcome') == STILL_FAILING:
+        return ('Your approved text was written, but the independent check still reports this '
+                'problem on the document. The change is kept and no further approval is needed; '
+                'this suggestion needs a closer look rather than another approval.')
+    if item.get('applied'):
+        return ('Saved, but not yet independently checked. No verification is running right now; '
+                'start one again when you are ready. Another approval is not needed.')
+    return ('Approved, not yet saved into the document. No saving is running right now; retry '
+            'saving it. Another approval is not needed.')
 
 
 def annotate(store, rows, owner):
@@ -87,7 +128,8 @@ def annotate(store, rows, owner):
                         state = 'verifying' if item.get('applied') else 'applying' if any(status in {'running','processing'} for status in active) else 'queued'
                         saved = {**saved, 'state': state, 'owner': 'ACP', 'reason': 'Approved changes await independent verification.' if item.get('applied') else 'An authorized writer job is active for this suggestion.'}
                     else:
-                        saved = {**saved, 'state': 'blocked', 'owner': 'ACP', 'responsibility': 'check', 'reason': 'Applied, verification incomplete. No active verification job is recorded; another approval is not needed.' if item.get('applied') else 'Approved, application pending. No active writer job is recorded; another approval is not needed.'}
+                        saved = {**saved, 'state': 'blocked', 'owner': 'ACP', 'responsibility': 'check',
+                                 'reason': stalled_reason(item)}
                 elif not setting and saved.get('state') in {'checking', 'queued'}:
                     saved = {**saved, 'state': 'blocked', 'owner': 'ACP', 'responsibility': 'check', 'reason': 'Automatic checks ended without admission. Review this suggestion or refresh its result.'}
                 item = {**item, 'automatic_approval': saved}

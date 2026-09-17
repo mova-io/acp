@@ -218,3 +218,21 @@ describe('an approved 1.4.5 whose approved value was never written', () => {
     expect(onRetryApproved).toHaveBeenCalledWith(expect.objectContaining({ id: 501 }))
   })
 })
+
+it('a document-level acceptance cannot approve a different finding', () => {
+  const pending = {...row,status:'pending', automaticDisposition:undefined}
+  expect(approvalRecordedOn(pending, {[row.file]:{state:'accepted'}})).toBe(false)
+  expect(approvalRecordedOn(pending, {[row.file]:{state:'accepted',findingId:501}})).toBe(true)
+})
+it.each([
+  {approved_source_revision:'old',source_revision:'new'},
+  {approved_proposal_snapshot_ids:['old'],proposal_snapshot_ids:['new']},
+  {approval_recheck_required:true},
+])('changed approval needs a fresh human check: %j', binding => {
+  const changed={...row,_raw:{...row._raw,...binding}}
+  expect(approvalRecordedOn(changed)).toBe(false)
+  expect(automaticReviewResponsibility(changed)).toBe('human')
+})
+it('an explicit rejection overrides an earlier recorded approval',()=>{
+  expect(approvalRecordedOn(row,{501:{state:'rejected'}})).toBe(false)
+})

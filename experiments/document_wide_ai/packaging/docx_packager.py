@@ -46,6 +46,46 @@ def fingerprint_missing() -> str:
     return sha256_hex(b"<missing>")
 
 
+def unnamed_docx_images(entries):
+    """Use a unique relationship only when the existing writer resolves that exact drawing."""
+    import re
+    from lxml import etree
+    from apply_alt import resolve_target, tag_for_part, _alt_elements
+    from formats.office.images import is_junk_descr, is_decorative
+    ns = {'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing',
+          'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+          'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
+          'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'}
+    images = []
+    for part, raw in entries.items():
+        if not re.fullmatch(r'word/(?:document|header\d*|footer\d*|footnotes|endnotes)\.xml', part):
+            continue
+        xml = raw.decode('utf-8')
+        root = etree.fromstring(raw, etree.XMLParser(resolve_entities=False, no_network=True))
+        props = root.findall('.//wp:docPr', ns)
+        matches = _alt_elements(xml, tag_for_part(part))
+        if len(matches) != len(props):
+            continue  # namespace/prefix shape the production writer cannot address
+        all_rids = [b.get('{'+ns['r']+'}embed') for b in root.findall('.//a:blip', ns)]
+        names = {p.get('name', '').strip() for p in props}
+        for index, prop in enumerate(props):
+            if prop.get('name', '').strip() or not is_junk_descr(prop.get('descr', '')):
+                continue
+            if is_decorative(etree.tostring(prop, encoding='unicode')):
+                continue
+            drawing = next((a for a in prop.iterancestors() if a.tag == '{'+ns['w']+'}drawing'), None)
+            if drawing is None or len(drawing.findall('.//wp:docPr', ns)) != 1:
+                continue
+            blips = drawing.findall('.//a:blip', ns)
+            rid = blips[0].get('{'+ns['r']+'}embed') if len(blips) == 1 else None
+            if not rid or all_rids.count(rid) != 1 or rid in names:
+                continue
+            if resolve_target(xml, tag_for_part(part), rid) != matches[index].start():
+                continue
+            images.append(DocxImage(part+'#'+rid, part, rid))
+    return images
+
+
 def package_docx(source_bytes: bytes, *, max_text_chars: int) -> PackagedDocx:
     issues: list[ExtractionIssue] = []
     text_parts: list[str] = []
@@ -78,6 +118,7 @@ def package_docx(source_bytes: bytes, *, max_text_chars: int) -> PackagedDocx:
             entries = {n: zf.read(n) for n in zf.namelist()}
         for rec in office_undescribed_images(entries):
             images.append(DocxImage(locator=rec["locator"], part_name=rec["part"], name=rec["name"]))
+        images.extend(unnamed_docx_images(entries))
     except Exception as exc:
         issues.append(ExtractionIssue(kind="extraction_failed", detail=f"image extraction failed: {exc}"))
 
