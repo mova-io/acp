@@ -2,6 +2,17 @@
 
 Readiness and liveness remain unchanged. Captured templates may contain secrets;
 they are never printed and the PATCH file is private and removed on every path.
+
+EVERY PATCH MUST NAME ITS OWN REVISION SUFFIX. This endpoint "patches a Container
+App using JSON Merge Patch" (Microsoft.App/containerApps update), so a member the
+body omits is LEFT UNCHANGED rather than cleared -- dropping revisionSuffix does
+not ask ACA to allocate a name, it re-uses whichever explicit suffix the resource
+already carries. A revision name is <app>--<suffix> and is a unique identifier of
+an immutable revision, so the next image-only rollout then asks for an existing
+revision under a different template. Production twice retained its old image after
+an accepted PATCH while carrying an explicit suffix; a fresh named revision recovered
+the rollout. Naming every new revision avoids depending on omission to reset the
+previous suffix. Acceptance is still verified by the rollout's readiness/version gates.
 """
 from __future__ import annotations
 
@@ -10,11 +21,18 @@ from copy import deepcopy
 import json
 import os
 from pathlib import Path
+import re
+import secrets
 import subprocess
 import sys
 import tempfile
 
 API_VERSION = '2025-10-02-preview'
+# Documented revision-suffix rules: lower-case alphanumerics and dashes, leading
+# alphabetic, trailing alphanumeric, no doubled dash, and the revision NAME it
+# forms is bounded at 64 characters.
+REVISION_SUFFIX = re.compile(r'^[a-z]([a-z0-9-]*[a-z0-9])?$')
+REVISION_NAME_LIMIT = 64
 STARTUP_PROBE = {
     'type': 'Startup',
     'httpGet': {'path': '/healthz', 'port': 8077, 'scheme': 'HTTP'},
@@ -23,7 +41,25 @@ STARTUP_PROBE = {
 }
 
 
-def update_template(template, app, image, env, revision_suffix=None):
+def valid_suffix(app, suffix):
+    """A suffix ACA will accept, and a revision name short enough to carry it."""
+    return bool(REVISION_SUFFIX.fullmatch(suffix)) and '--' not in suffix \
+        and len(app) + len('--') + len(suffix) <= REVISION_NAME_LIMIT
+
+
+def derived_suffix(app, image, token=None):
+    """Name the rollout after its image tag, plus a token so a repeat of the same
+    image asks for a NEW revision instead of colliding with the one it already
+    provisioned. An explicit caller suffix (blue-green) is never reached here."""
+    token = token or secrets.token_hex(3)
+    tag = re.sub(r'[^a-z0-9]+', '-', image.rpartition(':')[2].lower()).strip('-')
+    room = REVISION_NAME_LIMIT - len(app) - len('--') - len(token) - len('-')
+    if room < 1 or not re.fullmatch(r'[a-z0-9]+', token):
+        raise ValueError('image cannot form a safe Container Apps revision suffix')
+    return ('r' + tag)[:room].rstrip('-') + '-' + token
+
+
+def update_template(template, app, image, env, revision_suffix=None, token=None):
     result = deepcopy(template)
     matches = [c for c in result['containers'] if c.get('name') == app]
     if len(matches) != 1:
@@ -52,9 +88,9 @@ def update_template(template, app, image, env, revision_suffix=None):
     for name, value in env.items():
         values[name] = {'name': name, 'value': value}
     container['env'] = list(values.values())
-    result.pop('revisionSuffix', None)
-    if revision_suffix:
-        result['revisionSuffix'] = revision_suffix
+    result['revisionSuffix'] = revision_suffix or derived_suffix(app, image, token)
+    if not valid_suffix(app, result['revisionSuffix']):
+        raise ValueError('revision suffix requires explicit review')
     # These are response-only in the pinned PATCH API, as in the scaler repair.
     for c in result['containers']:
         c.pop('imageType', None)
@@ -101,7 +137,8 @@ def main(argv=None):
         azure(args.subscription, 'rest', '--method', 'patch', '--url',
               'https://management.azure.com' + app['id'] + '?api-version=' + API_VERSION,
               '--body', '@' + str(path))
-        print('API image revision accepted with bounded Startup gate', flush=True)
+        print('API image revision accepted with bounded Startup gate: '
+              + args.app + '--' + template['revisionSuffix'], flush=True)
         return 0
     except Exception as exc:
         # Only busy categories are exposed for the existing bounded retry matcher.
