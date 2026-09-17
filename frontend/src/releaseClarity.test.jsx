@@ -740,7 +740,7 @@ it('keeps explicit manual publication for copies outside the saved automatic pla
 })
 
 it('opens the existing Sources tab beside an authorization blocker without retrying publication', async () => {
- const tab = document.createElement('button'); tab.id = 'workflow-tab-sources'
+ const tab = document.createElement('button'); tab.id = 'workflow-tab-integrations'
  const navigate = vi.fn(); tab.addEventListener('click', navigate); document.body.appendChild(tab)
  try {
   const c = await mount({ run: { ...run, source: 'sharepoint' }, files: [verified('ready.pdf')] })

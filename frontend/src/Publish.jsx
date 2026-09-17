@@ -847,7 +847,7 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
   const recoveryActions = releaseError && <ReleaseRecoveryActions error={releaseError}
     disabled={readOnly || publishing || destinationPending || automaticStatusPending}
     destinationLocked={destinationLocked || Boolean(automaticDelivery)}
-    onReconnect={() => document.getElementById('workflow-tab-sources')?.click()}
+    onReconnect={() => document.getElementById('workflow-tab-integrations')?.click()}
     onCheckStatus={async () => {
       const context = releaseContext.current
       const status = await getReleaseStatus(run.id).catch(() => null)
