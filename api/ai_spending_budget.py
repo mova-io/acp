@@ -101,7 +101,11 @@ class BudgetLedger:
         _identifier(owner_id)
         _identifier(run_id)
         self._standalone()
-        with self.db.cursor() as cur:
+        # Keep the lock and every nested admission write on one connection and
+        # one commit boundary.  Ordinary ledger callers still commit exactly
+        # once; disabled compound admissions may safely add their own rows
+        # before this context exits.
+        with self.db.transaction(), self.db.cursor() as cur:
             self.db.execute(cur, """UPDATE ai_spending_budgets SET cap_units=cap_units
                 WHERE owner_id=%s AND run_id=%s""", (owner_id, run_id))
             self.db.execute(cur, """SELECT * FROM ai_spending_budgets
@@ -159,7 +163,7 @@ class BudgetLedger:
                 result = self._attempt(cur, owner_id, run_id, attempt_id)
         return result
 
-    def reserve_many(self, owner_id, run_id, attempts):
+    def _normalize_many(self, attempts):
         """Atomically reserve one bounded charge per attempt.
 
         Exact full-batch replay returns the durable rows in request order. A
@@ -187,36 +191,52 @@ class BudgetLedger:
             seen.add(attempt_id)
             normalized.append((attempt_id, max_cost_units, pricing_ref))
 
-        with self._locked(owner_id, run_id) as (cur, budget):
-            rows = []
-            new = []
-            for attempt_id, max_cost_units, pricing_ref in normalized:
-                row = self._attempt(cur, owner_id, run_id, attempt_id)
-                if row is not None:
-                    if (row["max_cost_units"], row["pricing_ref"]) != (max_cost_units, pricing_ref):
-                        raise AttemptConflict("attempt ID reused with a different bound or price")
-                    rows.append(row)
-                else:
-                    rows.append(None)
-                    new.append((attempt_id, max_cost_units, pricing_ref))
+        return normalized
 
-            if new:
-                existing = [row for row in rows if row is not None]
-                if any(row["state"] != "reserved" for row in existing):
-                    raise AttemptConflict("advanced attempt cannot admit new batch reservations")
-                snapshot = self._snapshot(cur, budget)
-                if snapshot["blocked"]:
-                    raise BudgetError("unresolved charge or breached bound blocks admission")
-                exposure = sum(max_cost_units for _, max_cost_units, _ in new)
-                if exposure > snapshot["available_units"]:
-                    raise BudgetExceeded("maximum provider exposure exceeds remaining budget")
-                for attempt_id, max_cost_units, pricing_ref in new:
-                    self.db.execute(cur, """INSERT INTO ai_spending_attempts
-                        (owner_id,run_id,attempt_id,max_cost_units,pricing_ref,state)
-                        VALUES (%s,%s,%s,%s,%s,'reserved')""",
-                        (owner_id, run_id, attempt_id, max_cost_units, pricing_ref))
-                rows = [self._attempt(cur, owner_id, run_id, attempt_id)
-                        for attempt_id, _, _ in normalized]
+    def _reserve_many_locked(self, cur, budget, normalized):
+        owner_id, run_id = budget["owner_id"], budget["run_id"]
+        rows = []
+        new = []
+        for attempt_id, max_cost_units, pricing_ref in normalized:
+            row = self._attempt(cur, owner_id, run_id, attempt_id)
+            if row is not None:
+                if (row["max_cost_units"], row["pricing_ref"]) != (max_cost_units, pricing_ref):
+                    raise AttemptConflict("attempt ID reused with a different bound or price")
+                rows.append(row)
+            else:
+                rows.append(None)
+                new.append((attempt_id, max_cost_units, pricing_ref))
+
+        if new:
+            existing = [row for row in rows if row is not None]
+            if any(row["state"] != "reserved" for row in existing):
+                raise AttemptConflict("advanced attempt cannot admit new batch reservations")
+            snapshot = self._snapshot(cur, budget)
+            if snapshot["blocked"]:
+                raise BudgetError("unresolved charge or breached bound blocks admission")
+            exposure = sum(max_cost_units for _, max_cost_units, _ in new)
+            if exposure > snapshot["available_units"]:
+                raise BudgetExceeded("maximum provider exposure exceeds remaining budget")
+            for attempt_id, max_cost_units, pricing_ref in new:
+                self.db.execute(cur, """INSERT INTO ai_spending_attempts
+                    (owner_id,run_id,attempt_id,max_cost_units,pricing_ref,state)
+                    VALUES (%s,%s,%s,%s,%s,'reserved')""",
+                    (owner_id, run_id, attempt_id, max_cost_units, pricing_ref))
+            rows = [self._attempt(cur, owner_id, run_id, attempt_id)
+                    for attempt_id, _, _ in normalized]
+        return rows
+
+    def reserve_many(self, owner_id, run_id, attempts):
+        """Atomically reserve one bounded charge per attempt.
+
+        Exact full-batch replay returns the durable rows in request order. A
+        partially replayed batch may be completed only while every existing
+        row is still reserved; once any member has advanced, the batch cannot
+        authorize new reservations.
+        """
+        normalized = self._normalize_many(attempts)
+        with self._locked(owner_id, run_id) as (cur, budget):
+            rows = self._reserve_many_locked(cur, budget, normalized)
         return rows
 
     def claim_dispatch(self, owner_id, run_id, attempt_id):
