@@ -14,6 +14,7 @@ export function automaticReviewResponsibility(row, decisions = {}) {
     && row.automaticDisposition?.reason === 'Manual work or no supported proposal writer')) return 'human'
   // Incomplete drafts need recovery before a person can make a decision.
   // This is not evidence of a queued job or permission to auto-approve.
+  if (row.aiDraftable === true && !row.hasProposal && !row.after) return 'check'
   const exclusion = exclusionReason(row, decisions)
   if (['Missing proposal', 'Version unavailable — review individually',
     'Stale — refresh and review', 'Invalid structural proposal — refresh suggestions',
