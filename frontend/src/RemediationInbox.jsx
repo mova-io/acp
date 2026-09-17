@@ -7,6 +7,7 @@ import {
   rowModel, laneOf, sortQueue, groupByDocument, nextUnresolvedId, progress, railColorOf,
   matchesWorkflow, workflowCounts, workflowStatusOf, workflowStepIndex, isResolved, isAiAssistedDraft,
   WORKFLOW_TABS, WORKFLOW_LABELS, SORTS, optionalInspectionOf, recordedReviewDecision,
+  approvedWriteUnconfirmed, approvalSuperseded,
 } from './remediationInboxModel.js'
 import { clusterRows, clusterOfFinding, batchTargetsOf } from './remediationClusters.js'
 import { fixSteps, appName } from './remediationGuide.js'
@@ -332,6 +333,13 @@ function ManualSteps({ f }) {
 // remediation task rather than an engineering evidence record. Criterion- and lane-aware so a contrast
 // fix reads like a contrast decision, not a generic "review the change".
 function taskLineOf(f, lane, automaticMode = false, decisions = {}) {
+  // First, because it is the one state where "your approval is recorded and will not be asked for
+  // again" — the sentence every branch below is built on — is not true.
+  if (approvalSuperseded(f, decisions)) return 'An approval for this is on record, but the document or the suggestion has changed since it was given, so ACP will not write it into the current version. Review the current suggestion and decide again — this one may need a fresh approval.'
+  // Stated before the applied/automatic branches because it is the narrower fact: the approval is
+  // recorded AND nothing was written. Saying "already applied" here would claim a write that the
+  // writer declined to make.
+  if (approvedWriteUnconfirmed(f, decisions)) return 'Your approval is recorded and ACP will not ask for it again. The approved value has not been written to a corrected copy yet — retry the write, or read the recorded writer outcome. Nothing here needs approving twice.'
   if (f.applied && !f.validated) return 'This change is already applied. Recorded verification is incomplete; another approval is not needed.'
   if (automaticMode) {
     const responsibility = automaticReviewResponsibility(f, decisions)
@@ -362,14 +370,18 @@ function taskLineOf(f, lane, automaticMode = false, decisions = {}) {
   }
 }
 
-function DetailPane({ f, decisions, readOnly = false, automaticMode = false, preparingProposals = false, onDecide, onOpenWord, onRecheck, onOpenPlan, onVerifySaved, matchingFindings = [], matchingReadyCount = 0, legacyApprovalControls = false, onApplyToMatching, cluster = null, draft = null, onDraftChange, saving = false, error = null, headingRef = null, detailExtra = null, emptyState = null }) {
+function DetailPane({ f, decisions, readOnly = false, automaticMode = false, preparingProposals = false, onDecide, onOpenWord, onRecheck, onOpenPlan, onVerifySaved, onRetryApproved, matchingFindings = [], matchingReadyCount = 0, legacyApprovalControls = false, onApplyToMatching, cluster = null, draft = null, onDraftChange, saving = false, error = null, headingRef = null, detailExtra = null, emptyState = null }) {
   const [matchingPreviewOpen, setMatchingPreviewOpen] = useState(false)
   const [copiedValue, setCopiedValue] = useState('')
   const draftRef = useRef(null)
   const [verification, setVerification] = useState(null)
+  // The outcome of a write retry, for THIS finding only: {busy} | {message} | {refusal} | {error}.
+  // Cleared on selection change below, like `verification`, so an answer about one finding can
+  // never be read as an answer about the next one.
+  const [retry, setRetry] = useState(null)
   const selectedRef = useRef(f?.id)
   selectedRef.current = f?.id
-  useEffect(() => { setVerification(null) }, [f?.id])
+  useEffect(() => { setVerification(null); setRetry(null) }, [f?.id])
   useEffect(() => { setMatchingPreviewOpen(false) }, [f?.id])
   useEffect(() => { setCopiedValue('') }, [f?.id])
   if (!f) {
@@ -396,7 +408,15 @@ function DetailPane({ f, decisions, readOnly = false, automaticMode = false, pre
   const resolved = isResolved(f, decisions)
   const inspectionOnly = optionalInspectionOf(f)
   const reviewDecision = recordedReviewDecision(f, decisions)
-  const eyebrow = automaticMode && responsibility === 'check' ? (f.applied && !f.validated ? 'Applied · verification incomplete' : 'Status check') : automaticMode && responsibility === 'acp' ? 'ACP processing' : inspectionOnly ? 'Saved changes · optional inspection' : isHandoff ? 'Needs manual handling' : lane.key === 'manual' ? 'Manual remediation' : 'Review'
+  // Approved, never written. Read once and used everywhere below, because every surface that got
+  // this row wrong got it wrong in the same direction: it read `resolved` (status === 'approved')
+  // as "a fix is saved" and then suppressed the recovery pane, the task line and every control.
+  const writeUnconfirmed = approvedWriteUnconfirmed(f, decisions)
+  // An approval that no longer binds. Read alongside `writeUnconfirmed` and never both true — it is
+  // the same "status says approved" row, told apart by whether the approval still describes what
+  // the document holds. Every surface below that promises the reviewer silence has to check it.
+  const staleApproval = approvalSuperseded(f, decisions)
+  const eyebrow = staleApproval ? 'Approved earlier · changed since' : writeUnconfirmed ? 'Approved · write not confirmed' : automaticMode && responsibility === 'check' ? (f.applied && !f.validated ? 'Applied · verification incomplete' : 'Status check') : automaticMode && responsibility === 'acp' ? 'ACP processing' : inspectionOnly ? 'Saved changes · optional inspection' : isHandoff ? 'Needs manual handling' : lane.key === 'manual' ? 'Manual remediation' : 'Review'
   // A drafted AI value the reviewer can adjust before applying. `draft` falls back to the finding's
   // proposed value until the reviewer types; `edited` flips the primary action to "Save edited fix".
   const structuralRow = isPdfStructuralRow(f)
@@ -418,7 +438,30 @@ function DetailPane({ f, decisions, readOnly = false, automaticMode = false, pre
     setCopiedValue(kind)
   }
   const why = whyOf(f)
-  const recovery = !resolved && !preparingProposals && remediationRecoveryGuidance(f, decisions)
+  // `!resolved` alone hid this pane from the one row that needed it most: an approved row is
+  // "resolved" by status and has no control of its own, so the reviewer got an empty pane under a
+  // sentence saying no further approval was needed. An unconfirmed write is the exception.
+  const recovery = (!resolved || writeUnconfirmed || staleApproval) && !preparingProposals && remediationRecoveryGuidance(f, decisions)
+  // Ask the host to re-run the WRITER over content this row already approved. Creates no approval,
+  // and this pane never claims the document changed: the only thing a successful call proves is
+  // that a writer job is queued. Whether anything reached the document is the next assessment's
+  // answer, not this button's — the image behind the production case is mixed illustration and
+  // OCR-read text, and the writer may refuse it again for exactly the reason it refused before.
+  const retryApprovedWrite = async () => {
+    const id = f.id
+    setRetry({ busy: true })
+    try {
+      const result = await onRetryApproved(f)
+      if (selectedRef.current !== id) return
+      // A refusal is an ANSWER, not an error: the backend returns {queued:false, reason} for a row
+      // it will not re-run, and that reason is the sentence to show. Rendered verbatim — this pane
+      // does not paraphrase it, and must not, because the paraphrase is what was wrong before.
+      if (!result?.accepted || !result?.in_flight) setRetry({ refusal: result?.reason || 'No active saving attempt was confirmed. Refresh to check the recorded outcome.' })
+      else setRetry({ message: 'Saving is queued or running. Your approval is unchanged; this does not confirm that the fix was written or verified.' })
+    } catch (error) {
+      if (selectedRef.current === id) setRetry({ error: error?.message || 'The retry could not be requested. Nothing was changed and your approval is untouched.' })
+    }
+  }
   const retryVerification = async () => {
     const id = f.id
     setVerification({ busy: true })
@@ -440,6 +483,19 @@ function DetailPane({ f, decisions, readOnly = false, automaticMode = false, pre
            style={{ borderTop: '1px solid var(--line,#e2dce4)', background: 'var(--bg, #fff)' }}>
         {recovery && <section aria-label="What this item needs" style={{ padding: '10px 22px', borderBottom: '1px solid var(--line,#e2dce4)', fontSize: 12.5 }}>
           <b>{recovery.title}</b><p>{recovery.reason}</p><p className="muted">{recovery.next}</p>
+          {/* A retry of the WRITE for the value already approved — never a second approval. `readOnly`
+              removes the control rather than disabling it: a reviewer without write permission is not
+              being offered an action they cannot take, and a disabled primary button reads as "this
+              is your next step" to someone for whom it never will be. The instruction text above is
+              then the whole affordance, and it names what to do. */}
+          {recovery.retryApproved && onRetryApproved && !readOnly && <button type="button" className="primary" disabled={saving || retry?.busy}
+                  onClick={retryApprovedWrite}>{retry?.busy ? 'Requesting retry…' : 'Retry writing the approved fix'}</button>}
+          {recovery.retryApproved && onRetryApproved && !readOnly && <>
+            {retry?.message && <p role="status">{retry.message}</p>}
+            {/* The backend's own refusal, as written. */}
+            {retry?.refusal && <p role="status">{retry.refusal}</p>}
+            {retry?.error && <p role="alert" className="error">{retry.error}</p>}
+          </>}
           {recovery.plan && onOpenPlan && <button type="button" className="linklike" disabled={readOnly || saving} onClick={onOpenPlan}>Open remediation plan</button>}
         </section>}
         {onVerifySaved && f.applied && !f.validated && <div style={{ padding: '10px 22px', fontSize: 12.5 }}>
@@ -511,6 +567,23 @@ function DetailPane({ f, decisions, readOnly = false, automaticMode = false, pre
                 <>
                   <span style={{ fontSize: 13, color: 'var(--ink)', fontWeight: 600 }}>✓ Verified.</span>
                   <span>Verification: Written → Re-scan → <b>Certified</b> — a fresh scan confirmed this fix.</span>
+                </>
+              ) : staleApproval ? (
+                /* Same trap as the branch below, one step further on: `resolved` is true because a
+                   decision is on record, and the default line would call it Written. It was not
+                   written, and the approval that would have written it no longer describes this
+                   document — so neither "Saved" nor "no further approval needed" may be said. */
+                <>
+                  <span style={{ fontSize: 13, color: 'var(--ink)', fontWeight: 600 }}>✓ Approval recorded earlier.</span>
+                  <span>Verification: Approved → <b>changed since approval</b> — the document or the suggestion has moved on from what was approved, nothing was written from it, and this finding is still counted as remaining.</span>
+                </>
+              ) : writeUnconfirmed ? (
+                /* The photographed contradiction: this line said "Saved — Written" beside a result
+                   reading "Proposed change not saved". `resolved` means a DECISION is recorded, not
+                   that bytes were written, and only `applied` says the latter. Say which happened. */
+                <>
+                  <span style={{ fontSize: 13, color: 'var(--ink)', fontWeight: 600 }}>✓ Approval recorded.</span>
+                  <span>Verification: Approved → <b>Write not confirmed</b> → Re-scan → Certified — the approved value has not been written to a corrected copy, so this finding is still counted as remaining.</span>
                 </>
               ) : (
                 <>
@@ -599,7 +672,7 @@ function DetailPane({ f, decisions, readOnly = false, automaticMode = false, pre
 
         {/* Your task — the imperative, so the reviewer is never left guessing what to do here. Hidden
             once the finding is resolved (the verification line below then speaks instead). */}
-        {!resolved && (
+        {(!resolved || writeUnconfirmed || staleApproval) && (
           <p style={{ fontSize: 13.5, lineHeight: 1.5, margin: '10px 0 0' }}><b>Your task:</b> {taskLineOf(f, lane, automaticMode, decisions)}</p>
         )}
 
@@ -643,7 +716,9 @@ function DetailPane({ f, decisions, readOnly = false, automaticMode = false, pre
         )}
 
         {!isManual && <p className="muted" style={{ fontSize: 13, lineHeight: 1.45, margin: '14px 0 0' }}>
-          {f.applied && !f.validated ? 'This change is applied, but verification is incomplete. No additional approval is needed and it is not counted as verified.'
+          {staleApproval ? 'An approval for this is on record, but it was given against a version this document or suggestion has moved on from. Nothing was written from it, and it may need a fresh decision — so ACP may ask you about this one again.'
+            : writeUnconfirmed ? 'Your approval is on record. No confirmed write of the approved value exists yet, so nothing here is applied or verified — and no further approval will be requested for it.'
+            : f.applied && !f.validated ? 'This change is applied, but verification is incomplete. No additional approval is needed and it is not counted as verified.'
             : automaticMode && responsibility === 'acp' ? 'ACP is handling this admitted work automatically. No human confirmation is required now.'
             : automaticMode && responsibility === 'check' ? 'Automatic admission or verification needs a status check. The absence of a verification action does not imply that human approval is required.'
             : f.autoApplied ? 'Inspecting this applied change does not approve or apply another change.'
@@ -664,8 +739,8 @@ function DetailPane({ f, decisions, readOnly = false, automaticMode = false, pre
             <dl className="remediation-details-list">
               <div><dt>How ACP detected this</dt><dd>{displayText(f.detectionMethod || f.proposalSource || 'Automated document analysis')}</dd></div>
               <div><dt>Observed value</dt><dd>{currentValue}</dd></div>
-              <div><dt>Verification</dt><dd>{f.applied && !f.validated ? 'Applied, verification incomplete. Independent verification is not recorded yet.' : automaticMode && responsibility === 'acp' ? 'ACP handles the admitted application and verification work.' : automaticMode && responsibility === 'check' ? 'Automatic admission or verification has not been confirmed.' : onRecheck ? `The corrected copy will be rescanned for WCAG ${scKeyOf(f) || 'compliance'}.` : 'Verification capability is not recorded here; check the saved outcome.'}</dd></div>
-              <div><dt>Current verification state</dt><dd>{resolved ? 'Awaiting verification' : 'Awaiting approval'}</dd></div>
+              <div><dt>Verification</dt><dd>{staleApproval ? 'Approved earlier, then changed. Nothing was written from that approval and there is nothing to verify; the current suggestion has not been decided.' : writeUnconfirmed ? 'Approved, write not confirmed. Nothing has been written to a corrected copy, so there is nothing to verify yet.' : f.applied && !f.validated ? 'Applied, verification incomplete. Independent verification is not recorded yet.' : automaticMode && responsibility === 'acp' ? 'ACP handles the admitted application and verification work.' : automaticMode && responsibility === 'check' ? 'Automatic admission or verification has not been confirmed.' : onRecheck ? `The corrected copy will be rescanned for WCAG ${scKeyOf(f) || 'compliance'}.` : 'Verification capability is not recorded here; check the saved outcome.'}</dd></div>
+              <div><dt>Current verification state</dt><dd>{staleApproval ? 'Approved earlier — changed since, may need a fresh decision' : writeUnconfirmed ? 'Approved — awaiting a confirmed write' : resolved ? 'Awaiting verification' : 'Awaiting approval'}</dd></div>
             </dl>
           </details>
         )}
@@ -728,7 +803,7 @@ function Divider({ orientation, label, value, min, max, onDrag, onNudge }) {
 }
 
 export default function RemediationInbox({
-  queue: suppliedQueue = [], decisions = {}, onDecide, onOpenWord, onRecheck, onOpenPlan, onVerifySaved, onPublish, preparingProposals = false, readOnly = false, legacyApprovalControls = false, autoApprove = null, automaticApprovalPolicy, onAutoApproveChange, autoApproveSaving = false, autoApproveError = null, approvalExplanation = null, afterRelease = false, onAutoApproveRetry, autoApproveNotice = null, onDismissAutoApproveNotice,
+  queue: suppliedQueue = [], decisions = {}, onDecide, onOpenWord, onRecheck, onOpenPlan, onVerifySaved, onRetryApproved, onPublish, preparingProposals = false, readOnly = false, legacyApprovalControls = false, autoApprove = null, automaticApprovalPolicy, onAutoApproveChange, autoApproveSaving = false, autoApproveError = null, approvalExplanation = null, afterRelease = false, onAutoApproveRetry, autoApproveNotice = null, onDismissAutoApproveNotice,
   initialSort = 'priority', initialTab = 'review', initialGroup = 'document', scanId = null,
   assignees = {}, myEmail = null, onAssign,
   // The per-ITEM board components (R4 fix preview, R7 per-document progress, R10 audit trail)
@@ -1037,13 +1112,13 @@ export default function RemediationInbox({
           </button>
         )}
         <span style={{ fontSize: 13, fontWeight: 700 }}>Guided remediation</span>
-        {(selected?.automaticReason || selected?.automaticQueued) && <p className="automatic-review-queued" role="status"><b>{autoApprove === true ? (automaticReviewResponsibility(selected, decisions) === 'human' ? 'You' : selected.automaticQueued ? 'ACP' : 'Status check') : selected.automaticQueued ? 'ACP' : selected.automaticDisposition?.owner || 'You'}: </b>{autoApprove === true && workflowStatusOf(selected, decisions) === 'awaiting-validation' && automaticReviewResponsibility(selected, decisions) === 'check' ? 'Approval is already recorded. Verification is still pending; no additional approval is needed.' : selected.automaticReason || 'Automatic eligibility checks are queued.'}{selected.automaticQueued && <> This is not yet an applied or verified fix.</>}</p>}
+        {(selected?.automaticReason || selected?.automaticQueued) && <p className="automatic-review-queued" role="status"><b>{autoApprove === true ? (automaticReviewResponsibility(selected, decisions) === 'human' ? 'You' : selected.automaticQueued ? 'ACP' : 'Status check') : selected.automaticQueued ? 'ACP' : selected.automaticDisposition?.owner || 'You'}: </b>{autoApprove === true && workflowStatusOf(selected, decisions) === 'awaiting-validation' && automaticReviewResponsibility(selected, decisions) === 'check' ? 'Approval is already recorded. Verification is still pending; no additional approval is needed.' : approvedWriteUnconfirmed(selected, decisions) ? <>Approval is already recorded and will not be requested again. {selected.automaticReason}</> : selected.automaticReason || 'Automatic eligibility checks are queued.'}{selected.automaticQueued && <> This is not yet an applied or verified fix.</>}</p>}
       </span>
     </div>
   )
   const guidedBody = (
     <>
-      <DetailPane f={selected} decisions={decisions} readOnly={readOnly} automaticMode={autoApprove === true} preparingProposals={preparingProposals} onDecide={act} onOpenWord={onOpenWord} onRecheck={onRecheck} onOpenPlan={onOpenPlan} onVerifySaved={onVerifySaved}
+      <DetailPane f={selected} decisions={decisions} readOnly={readOnly} automaticMode={autoApprove === true} preparingProposals={preparingProposals} onDecide={act} onOpenWord={onOpenWord} onRecheck={onRecheck} onOpenPlan={onOpenPlan} onVerifySaved={onVerifySaved} onRetryApproved={onRetryApproved}
                   headingRef={reviewHeadingRef}
                   saving={savingId != null && savingId === selected?.id}
                   error={saveError && selected && saveError.id === selected.id ? saveError : null}

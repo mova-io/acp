@@ -115,6 +115,29 @@ def test_applied_without_active_verifier_needs_system_check_not_another_approval
     projected = annotate(isolated_store, [{**row, 'status':'approved', 'applied':True, 'validated':False}], OWNER)[0]
     marker = projected['automatic_approval']
     assert marker['state'] == 'blocked' and marker['responsibility'] == 'check'
-    assert 'Applied, verification incomplete' in marker['reason']
-    assert 'another approval is not needed' in marker['reason']
+    # The copy moved to `automatic_review_queue.stalled_reason` and is now shown to the user
+    # verbatim, so it says what is true in plain words. What it must NOT do is claim no
+    # verification was ever recorded — a finished job is not an absent one — while still making
+    # clear that re-approving is not the move. Both are asserted, the wording is not.
+    assert 'not yet independently checked' in marker['reason']
+    assert 'Another approval is not needed.' in marker['reason']
+    assert 'is recorded' not in marker['reason']
     assert projected['applied'] and not projected['validated']
+
+
+def test_exact_approved_retry_is_visible_as_an_active_writer(isolated_store, monkeypatch):
+    from ai_run_approval_override import process_pending
+    item_id, run_id = setup_queue(isolated_store, monkeypatch)
+    state = read(isolated_store, OWNER, SID, run_id)
+    process_pending(isolated_store, dict(owner=OWNER, scan_id=SID, run_id=run_id, source_revision=state['source_revision']))
+    with isolated_store._db.cursor() as cur:
+        isolated_store._db.execute(cur, "UPDATE jobs SET status='done' WHERE scan_id=%s AND type='apply_approved_values'", (SID,))
+    result = isolated_store.retry_approved_write(item_id)
+    assert result['accepted'], result
+    row = isolated_store.get_hitl_item(item_id)
+    marker = annotate(isolated_store, [row], OWNER)[0]['automatic_approval']
+    assert marker['state'] == 'queued'
+    assert 'active' in marker['reason']
+    with isolated_store._db.cursor() as cur:
+        isolated_store._db.execute(cur, "UPDATE jobs SET status='done' WHERE id=%s", (result['job_id'],))
+    assert annotate(isolated_store, [row], OWNER)[0]['automatic_approval']['state'] == 'blocked'

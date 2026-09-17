@@ -8812,15 +8812,15 @@ class Store:
             return None
         return [str(x) for x in v] if isinstance(v, list) else None
 
-    def approved_unapplied_item_locators(self, scan_id: str, file: str,
-                                         rule_ids) -> dict[str, list[str]]:
+    def approved_unapplied_item_locators(self, scan_id: str, file: str, rule_ids, *,
+                                         item_id: str | None = None) -> dict[str, list[str]]:
         """{item_id: [locator, …]} for the approved-but-unapplied rows of `rule_ids` — exactly
         the locators the applier hands the writer for each row (_row_approved_values), so a
         locator the writer could not resolve can be attributed back to the review item, and
         through it to the model call, that approved it."""
         wanted = {str(r).strip() for r in (rule_ids or ()) if r}
         out: dict[str, list[str]] = {}
-        for row in self._approved_unapplied_rows(scan_id, file):
+        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id):
             if str(row.get("rule_id") or "").strip() in wanted:
                 out[str(row["id"])] = list(self._row_approved_values(row).keys())
         return out
@@ -11548,14 +11548,17 @@ class Store:
         sc = _extract_sc(rule_id)
         return codes is None or sc in codes
 
-    def _approved_unapplied_rows(self, scan_id: str, file: str) -> list[dict]:
+    def _approved_unapplied_rows(self, scan_id: str, file: str, *,
+                                 item_id: str | None = None) -> list[dict]:
+        """Read writable approved rows, optionally narrowed to the one approval being retried."""
         with self._db.cursor() as cur:
             self._db.execute(cur,
                 "SELECT * FROM hitl_queue WHERE scan_id=%s AND file=%s AND status='approved' "
                 "AND (applied IS NULL OR applied=0)", (scan_id, file))
             rows = self._db.fetchall(cur)
         return [self._decode_proposals(r) for r in rows
-                if self._selected_sc(scan_id, file, r.get("rule_id") or "")]
+                if self._selected_sc(scan_id, file, r.get("rule_id") or "")
+                and (item_id is None or str(r.get("id")) == str(item_id))]
 
     def count_unapplied_approved_values(self, scan_id: str, file: str) -> int:
         """Approved items holding content the document does not yet carry.
@@ -11603,7 +11606,8 @@ class Store:
                     counts[f] = counts.get(f, 0) + 1
         return counts
 
-    def approved_alt_values(self, scan_id: str, file: str) -> dict[str, str]:
+    def approved_alt_values(self, scan_id: str, file: str, *,
+                            item_id: str | None = None) -> dict[str, str]:
         """{locator: alt text} awaiting a write into `file`, from its approved 1.1.1 rows.
 
         Scoped to Non-text Content because apply_alt.py writes alt text and nothing else.
@@ -11622,12 +11626,13 @@ class Store:
         """
         wanted = {"1.1.1", f"1.1.1{self.DESCRIBED_RULE_SUFFIX}"}
         out: dict[str, str] = {}
-        for row in self._approved_unapplied_rows(scan_id, file):
+        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id):
             if str(row.get("rule_id") or "").strip() in wanted:
                 out.update(self._row_approved_values(row))
         return out
 
-    def approved_decorative_locators(self, scan_id: str, file: str) -> list[str]:
+    def approved_decorative_locators(self, scan_id: str, file: str, *,
+                                     item_id: str | None = None) -> list[str]:
         """The images a reviewer marked DECORATIVE on `file`'s approved 1.1.1 rows.
 
         A decorative image is not undescribed — it is deliberately undescribed, and WCAG 1.1.1
@@ -11653,37 +11658,40 @@ class Store:
         clears the finding, and this write is what stops the next scan asking again.
         """
         out: list[str] = []
-        for row in self._approved_unapplied_rows(scan_id, file):
+        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id):
             if (str(row.get("rule_id") or "").strip() == "1.1.1"
                     and (row.get("resolution") or "").strip() == "decorative"):
                 out.extend(loc for loc in self._row_proposal_locators(row) if loc not in out)
         return out
 
-    def approved_link_values(self, scan_id: str, file: str) -> dict[str, str]:
+    def approved_link_values(self, scan_id: str, file: str, *,
+                             item_id: str | None = None) -> dict[str, str]:
         """{locator: link text} awaiting a write into `file`, from its approved 2.4.4/2.4.9 rows.
 
         Both criteria share proposals.propose_link_texts' locator scheme (the link's resolved
         HREF — see apply_link_text.py's module docstring for why), so one map serves both.
         """
         out: dict[str, str] = {}
-        for row in self._approved_unapplied_rows(scan_id, file):
+        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id):
             if str(row.get("rule_id") or "").strip() in ("2.4.4", "2.4.9"):
                 out.update(self._row_approved_values(row))
         return out
 
-    def approved_field_values(self, scan_id: str, file: str) -> dict[str, str]:
+    def approved_field_values(self, scan_id: str, file: str, *,
+                              item_id: str | None = None) -> dict[str, str]:
         """{locator: accessible name} awaiting a write into `file`, from its approved 4.1.2 rows.
 
         Scoped to Name, Role, Value because the only writer behind it (remediate_pdf's
         `pdf:field:…` → /TU lane) writes form-field accessible names and nothing else.
         """
         out: dict[str, str] = {}
-        for row in self._approved_unapplied_rows(scan_id, file):
+        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id):
             if str(row.get("rule_id") or "").strip() == "4.1.2":
                 out.update(self._row_approved_values(row))
         return out
 
-    def approved_sensory_values(self, scan_id: str, file: str) -> dict[str, str]:
+    def approved_sensory_values(self, scan_id: str, file: str, *,
+                                item_id: str | None = None) -> dict[str, str]:
         """{locator: rewrite} awaiting a write into `file`, from its approved 1.3.3 rows.
 
         The locator is a sentence prefix, not a part#rId or an href — see
@@ -11691,12 +11699,13 @@ class Store:
         writer of their own.
         """
         out: dict[str, str] = {}
-        for row in self._approved_unapplied_rows(scan_id, file):
+        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id):
             if str(row.get("rule_id") or "").strip() == "1.3.3":
                 out.update(self._row_approved_values(row))
         return out
 
-    def approved_language_values(self, scan_id: str, file: str) -> dict[str, str]:
+    def approved_language_values(self, scan_id: str, file: str, *,
+                                 item_id: str | None = None) -> dict[str, str]:
         """{locator: ISO language code} awaiting a write into `file`, from approved 3.1.2 rows.
 
         Kept apart from the sensory map even though both are text-span keyed: the value is a
@@ -11704,12 +11713,13 @@ class Store:
         and each lane may only credit the criterion its own re-scan verified.
         """
         out: dict[str, str] = {}
-        for row in self._approved_unapplied_rows(scan_id, file):
+        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id):
             if str(row.get("rule_id") or "").strip() == "3.1.2":
                 out.update(self._row_approved_values(row))
         return out
 
-    def approved_structure_label_values(self, scan_id: str, file: str) -> dict[str, str]:
+    def approved_structure_label_values(self, scan_id: str, file: str, *,
+                                        item_id: str | None = None) -> dict[str, str]:
         """{locator: label} awaiting a write into `file`, from approved 2.4.6 xlsx rows.
 
         Locators are 'sheet:<tab name>' and 'table:<displayName>#col:<colName>', written by
@@ -11717,14 +11727,14 @@ class Store:
         sheet tabs and table column headers — a different write target from link text or alt.
         """
         out: dict[str, str] = {}
-        for row in self._approved_unapplied_rows(scan_id, file):
+        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id):
             if str(row.get("rule_id") or "").strip() == "2.4.6":
                 out.update(self._row_approved_values(row))
         return out
 
     def approved_images_of_text_values(self, scan_id: str, file: str,
                                        rule_ids: tuple[str, ...] = ("1.4.5", "1.4.9"),
-                                       ) -> dict[str, str]:
+                                       *, item_id: str | None = None) -> dict[str, str]:
         """{locator: OCR'd text} awaiting a write into `file`, from approved image-of-text rows.
 
         Locator format depends on the source format:
@@ -11744,19 +11754,20 @@ class Store:
         """
         wanted = {str(r).strip() for r in (rule_ids or ()) if r}
         out: dict[str, str] = {}
-        for row in self._approved_unapplied_rows(scan_id, file):
+        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id):
             if str(row.get("rule_id") or "").strip() in wanted:
                 out.update(self._row_approved_values(row))
         return out
 
-    def approved_pdf_structure_values(self, scan_id: str, file: str, rule_id: str) -> dict[str, str]:
+    def approved_pdf_structure_values(self, scan_id: str, file: str, rule_id: str, *,
+                                      item_id: str | None = None) -> dict[str, str]:
         """Exact approved tag plans, scoped by criterion, operation and locator."""
         if not file.lower().endswith('.pdf'):
             return {}
         allowed = {'2.4.6': {'heading'}, '1.3.1': {'header-scope', 'table-headers'},
                    '1.3.2': {'reading-order'}}.get(rule_id, set())
         out, conflicts = {}, set()
-        for row in self._approved_unapplied_rows(scan_id, file):
+        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id):
             if str(row.get('rule_id') or '').strip() != rule_id:
                 continue
             for locator, value in self._row_approved_values(row).items():
@@ -11865,8 +11876,9 @@ class Store:
         with self._db.cursor() as cur:
             self._db.execute(cur, "UPDATE hitl_queue SET applied=1 WHERE id=%s", (item_id,))
 
-    def approved_unapplied_item_ids(self, scan_id: str, file: str, rule_id: str) -> list[str]:
-        return [r["id"] for r in self._approved_unapplied_rows(scan_id, file)
+    def approved_unapplied_item_ids(self, scan_id: str, file: str, rule_id: str, *,
+                                    item_id: str | None = None) -> list[str]:
+        return [r["id"] for r in self._approved_unapplied_rows(scan_id, file, item_id=item_id)
                 if str(r.get("rule_id") or "").strip() == rule_id]
 
     def mark_file_compliant_if_reviewed(self, scan_id: str, file: str) -> bool:
@@ -11982,6 +11994,12 @@ class Store:
         # the review card can say why nothing changed. Pending rows are untouched (no key).
         from apply_outcome import annotate_apply_outcomes
         annotate_apply_outcomes(rows, unverified)
+        for row in rows:
+            if row.get('status') == 'approved' and not row.get('applied'):
+                _, refusal = self.approved_write_binding(row)
+                row['approval_recheck_required'] = refusal in {
+                    self.RETRY_SOURCE_MOVED, self.RETRY_VALUES_CHANGED,
+                    self.RETRY_PROPOSALS_SUPERSEDED}
         if include_superseded:
             for r in rows:
                 r["superseded"] = r["id"] in superseded
@@ -12297,6 +12315,209 @@ class Store:
                      **({"release_intent_id": release_intent_id} if release_intent_id else {})},
                     scan_id=current["scan_id"])
             return self.get_hitl_item(item_id) or updated, False
+
+    # Retry refuses uncertain identity rather than inventing a fresh approval.
+    RETRY_GONE = "This review item no longer exists."
+    RETRY_NOT_APPROVED = ("This suggestion is not an approved change awaiting a save, so there "
+                          "is nothing to retry.")
+    RETRY_NOTHING_TO_WRITE = ("This approval holds no content an applier can write into the "
+                              "document, so re-running the writer would change nothing.")
+    RETRY_SOURCE_MOVED = ("The document has changed since this was approved. Review it against "
+                          "the current version before saving.")
+    RETRY_NO_BINDING = ("We cannot establish which document version and which text this "
+                        "approval was given for, so it cannot be safely re-applied. Review this "
+                        "suggestion against the current document instead.")
+    RETRY_VALUES_CHANGED = ("The approved text on this suggestion is not the text the approval "
+                            "was recorded for. Review it again before saving.")
+    RETRY_PROPOSALS_SUPERSEDED = ("A newer remediation run replaced the suggestions on this "
+                                  "item, so the approval no longer describes what is on it. "
+                                  "Review the current suggestion before saving.")
+    RETRY_WRITER_BUSY = ("Another approved change is being saved into this document right now. "
+                         "Try this one again once that finishes.")
+    RETRY_NO_FILE_RECORD = ("This document has no assessment record in this scan, so there is "
+                            "nothing to save into.")
+
+    # Job statuses from which a writer job can still do the write. Anything else is terminal:
+    # `done`, `dead`, `cancelled` (see the job queue below).
+    WRITER_ACTIVE_STATUSES = ("queued", "running")
+
+    @staticmethod
+    def _approved_value_digest(row: dict) -> str | None:
+        """Recompute the value digest recorded by complete_hitl_decision."""
+        import hashlib
+        instances = row.get("proposals") or row.get("evidence") or []
+        draft_fallback = (row.get("resolution") or None) != Store.DESCRIBED_RESOLUTION
+        values: list[str] = []
+        for instance in instances:
+            if not isinstance(instance, dict):
+                continue
+            value = str(instance.get("approved_value") or "").strip()
+            if not value and row.get("proposals") and draft_fallback:
+                value = str(instance.get("proposed_value") or "").strip()
+            values.append(value)
+        if not values:
+            return None
+        return hashlib.sha256(json.dumps(values, separators=(",", ":"),
+                                         ensure_ascii=False).encode()).hexdigest()
+
+    def approved_write_binding(self, item: dict | None) -> tuple[dict | None, str | None]:
+        """Require a current source, proposal snapshots, approved values and saved artifact."""
+        if not item:
+            return None, self.RETRY_GONE
+        scan_id, file = item.get("scan_id"), item.get("file")
+        if (str(item.get("status") or "") != "approved" or item.get("applied")
+                or not scan_id or not file):
+            return None, self.RETRY_NOT_APPROVED
+        # decision_version 0 means no decision was ever recorded through
+        # complete_hitl_decision, so none of the binding columns below were written by it.
+        decision_version = int(item.get("decision_version") or 0)
+        if decision_version < 1:
+            return None, self.RETRY_NO_BINDING
+        approved_revision = str(item.get("approved_source_revision") or "").strip()
+        if not approved_revision:
+            return None, self.RETRY_NO_BINDING
+        try:
+            revision = str(self.remediation_source_revision(scan_id) or "").strip()
+        except Exception:
+            revision = ""
+        if not revision:
+            return None, self.RETRY_NO_BINDING
+        if revision != approved_revision:
+            return None, self.RETRY_SOURCE_MOVED
+        approved_digest = str(item.get("approved_value_sha256") or "").strip()
+        if not approved_digest:
+            return None, self.RETRY_NO_BINDING
+        if self._approved_value_digest(item) != approved_digest:
+            return None, self.RETRY_VALUES_CHANGED
+        # enqueue_proposals REPLACES proposals in place on an existing row, whatever its
+        # status, so an approved row's suggestions can be overwritten by a later run while the
+        # approval stands. The aligned snapshot list is what detects that.
+        approved_snapshots = item.get("approved_proposal_snapshot_ids")
+        if not isinstance(approved_snapshots, list):
+            return None, self.RETRY_NO_BINDING
+        captured = item.get("proposal_snapshot_ids")
+        captured = captured if isinstance(captured, list) else []
+        instances = item.get("proposals") or item.get("evidence") or []
+        aligned = [captured[i] if i < len(captured) else None for i in range(len(instances))]
+        if not approved_snapshots or any(not value for value in approved_snapshots):
+            return None, self.RETRY_NO_BINDING
+        if list(approved_snapshots) != aligned:
+            return None, self.RETRY_PROPOSALS_SUPERSEDED
+        if not self._row_approved_values(item):
+            return None, self.RETRY_NOTHING_TO_WRITE
+        artifact = (self.get_file_record(scan_id, file) or {}).get('corrected_sha256')
+        if not isinstance(artifact, str) or not re.fullmatch(r'[0-9a-f]{64}', artifact):
+            return None, self.RETRY_NO_BINDING
+        return {"item_id": str(item["id"]), "scan_id": scan_id, "file": file,
+                "decision_version": decision_version, "corrected_sha256": artifact,
+                "resolution": item.get("resolution"),
+                "values": self._row_approved_values(item),
+                "approved_source_revision": approved_revision,
+                "approved_value_sha256": approved_digest,
+                "approved_proposal_snapshot_ids": list(approved_snapshots)}, None
+
+    @staticmethod
+    def _approved_retry_job_id(binding: dict) -> str:
+        """One idempotent retry per unchanged approval; terminal attempts are not requeued."""
+        import hashlib
+        material = json.dumps([binding["item_id"], binding["scan_id"], binding["file"],
+                               binding["decision_version"],
+                               binding["approved_source_revision"],
+                               binding["approved_value_sha256"]],
+                              separators=(",", ":"), ensure_ascii=False)
+        return "approved-retry-" + hashlib.sha256(material.encode()).hexdigest()[:16]
+
+    def _retry_attempt_reason(self, item: dict, job: dict) -> str:
+        """Return the recorded terminal outcome instead of claiming the writer is still running."""
+        from apply_outcome import apply_outcome_for
+        with self._db.cursor() as cur:
+            outcome = apply_outcome_for(item, self._apply_unverified_decisions(cur, [item]))
+        detail = str((outcome or {}).get("reason") or "").strip()
+        status = str(job.get("status") or "")
+        if status == "done":
+            lead = "Saving was already re-run for this approval and left the document unchanged."
+        elif status == "cancelled":
+            lead = "The saving attempt for this approval was cancelled before it ran."
+        else:
+            lead = "The saving attempt for this approval did not complete."
+        tail = ("Nothing about the approval has changed since, so another attempt would reach "
+                "the same answer. Review this suggestion against the document instead.")
+        return " ".join(part for part in (lead, detail, tail) if part)
+
+    def retry_approved_write(self, item_id: str, *, actor: str = "system") -> dict:
+        """Retry one version-bound approval under a per-file transaction lock. Never create a new decision."""
+        def refuse(reason, *, job_id=None, status=None):
+            return {"accepted": False, "job_id": job_id, "status": status,
+                    "in_flight": False, "existing": job_id is not None, "reason": reason}
+
+        with self.transaction():
+            if not self._db.supports_for_update:
+                with self._db.cursor() as cur:
+                    if not cur.connection.in_transaction:
+                        self._db.execute(cur, 'BEGIN IMMEDIATE')
+
+            item = self._get_hitl_item_for_decision(item_id)
+            binding, reason = self.approved_write_binding(item)
+            if reason:
+                return refuse(reason)
+            scan_id, file = binding["scan_id"], binding["file"]
+            # One lock both retries of the same document contend on. The row lock above is
+            # per-item, and two different items never meet on it.
+            suffix = " FOR UPDATE" if getattr(self._db, "supports_for_update", False) else ""
+            with self._db.cursor() as cur:
+                self._db.execute(cur,
+                    f"SELECT file FROM file_records WHERE scan_id=%s AND file=%s{suffix}",
+                    (scan_id, file))
+                if not self._db.fetchone(cur):
+                    return refuse(self.RETRY_NO_FILE_RECORD)
+            job_id = self._approved_retry_job_id(binding)
+            with self._db.cursor() as cur:
+                self._db.execute(cur,
+                    "SELECT id,payload,status FROM jobs "
+                    "WHERE scan_id=%s AND type='apply_approved_values'", (scan_id,))
+                jobs = self._db.fetchall(cur)
+            mine = next((j for j in jobs if str(j["id"]) == job_id), None)
+            if mine is not None:
+                status = str(mine.get("status") or "")
+                if status in self.WRITER_ACTIVE_STATUSES:
+                    return {"accepted": True, "job_id": job_id, "status": status,
+                            "in_flight": True, "existing": True, "reason": None}
+                return refuse(self._retry_attempt_reason(item, mine),
+                              job_id=job_id, status=status)
+            for job in jobs:
+                if str(job.get("status") or "") not in self.WRITER_ACTIVE_STATUSES:
+                    continue
+                payload = job.get("payload")
+                payload = (json.loads(payload) if isinstance(payload, str) else payload) or {}
+                if payload.get("phase") or payload.get("file") != file:
+                    continue          # a coordination job, or a write for a different document
+                if payload.get("item_id") in (None, binding["item_id"]):
+                    # A file-wide job carries this item's values too, and a job already scoped
+                    # to this item IS the retry. Either way, waiting on it beats racing it.
+                    return {"accepted": True, "job_id": str(job["id"]),
+                            "status": str(job.get("status")), "in_flight": True,
+                            "existing": True, "reason": None}
+                return refuse(self.RETRY_WRITER_BUSY, job_id=str(job["id"]),
+                              status=str(job.get("status")))
+            now = self._now()
+            with self._db.cursor() as cur:
+                self._db.execute(cur,
+                    "INSERT INTO jobs(id,type,payload,status,priority,attempts,max_attempts,"
+                    "run_after,scan_id,created_at,updated_at) "
+                    "VALUES(%s,'apply_approved_values',%s,'queued',%s,0,1,%s,%s,%s,%s) "
+                    "ON CONFLICT(id) DO NOTHING",
+                    (job_id, json.dumps({"scan_id": scan_id, "file": file,
+                                         "item_id": binding["item_id"],
+                                         "approved_binding": binding},
+                                        separators=(",", ":"), sort_keys=True),
+                     job_priority("apply_approved_values"), now, scan_id, now, now))
+                created = (getattr(cur, "rowcount", 0) or 0) > 0
+            self.log_decision(actor, "apply.retry_requested", scan_id=scan_id, file=file,
+                              rule_id=item.get("rule_id"),
+                              detail=f"re-running the writer for already-approved content on "
+                                     f"{binding['item_id']}; no new approval was created")
+            return {"accepted": True, "job_id": job_id, "status": "queued", "in_flight": True,
+                    "existing": not created, "reason": None}
 
     def assign_hitl_item(self, item_id: str, assignee: str | None) -> dict | None:
         """Set or clear the reviewer assigned to a HITL item. Separate from update_hitl_item

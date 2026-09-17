@@ -48,7 +48,7 @@ import FileDrawer, { SOURCE_URL } from './FileDrawer.jsx'
 import SegmentDrawer from './SegmentDrawer.jsx'
 import { SENIORITY_ORDER, REMEDIATION_ACTIONS } from './sim.js'
 import { PRI_RANK } from './ontology.js'
-import { remediateScan, getRemediationStatus, getRemediationExceptions, downloadRemediated, listAllHitl, updateHitlItem, assignHitlItem, suggestFix, getAppliedFixes, getScanRemediationDiffs, getHitlAnalytics, getScanAiCalls, openTraceUrl, getQueueEstimate, getReleaseStatus, getScan, verifySavedCopy } from './api.js'
+import { remediateScan, getRemediationStatus, getRemediationExceptions, downloadRemediated, listAllHitl, updateHitlItem, assignHitlItem, suggestFix, getAppliedFixes, getScanRemediationDiffs, getHitlAnalytics, getScanAiCalls, openTraceUrl, getQueueEstimate, getReleaseStatus, getScan, verifySavedCopy, retryApprovedWrite } from './api.js'
 import { stageExecutionNotice } from './stageExecutionNotice.js'
 import { SIM, simProposalsFor } from './sim.js'
 import { TraceChip } from './Transparency.jsx'
@@ -206,6 +206,7 @@ export function dbItemToUi(it, files) {
     ruleId: it.rule_id,
     rule_id: it.rule_id,
     validated: !!it.validated,
+    applied: it.applied === 1 || it.applied === true,
     // The reviewer's recorded decision. Without it a row that was approved, rejected or skipped
     // came back from the server indistinguishable from untouched work.
     status: uiStatusOf(it),
@@ -956,6 +957,19 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
   const verifySaved = async (item) => {
     const result = await verifySavedRemediation({ runId, item, canAct: () => !reviewReadOnlyRef.current && verificationRunRef.current === runId, getReleaseStatus, getScan, verifySavedCopy })
     onRefresh?.()
+    return result
+  }
+  // Retry saving a recorded approval; do not create a second review decision.
+  const retryApprovedFix = async (item) => {
+    if (reviewReadOnlyRef.current) throw new Error('Historical scans are available for results browsing only.')
+    const itemId = item?._raw?.id ?? item?.id
+    if (!itemId) throw new Error('This review item has no server record to retry.')
+    const result = await retryApprovedWrite(itemId)
+    if (result?.accepted && result?.in_flight) {
+      window.dispatchEvent(new Event('acp:hitl-changed'))
+      try { const r = onRefresh?.(); if (r && typeof r.catch === 'function') r.catch(() => {}) }
+      catch { /* the refresh is cosmetic — the queued job is the outcome, and it is already queued */ }
+    }
     return result
   }
   const rescan = async (id) => {
@@ -1828,6 +1842,7 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
             onOpenPlan={readOnly ? undefined : openRemediationPlan}
             preparingProposals={!runStream?.snapshot?.terminal && ((runStream?.status?.running ?? remProg?.running ?? 0) > 0 || (runStream?.status?.queued ?? remProg?.queued ?? 0) > 0)}
             onVerifySaved={reviewReadOnly ? undefined : verifySaved}
+            onRetryApproved={reviewReadOnly ? undefined : retryApprovedFix}
             renderDetailExtra={(sel) => (sel ? (
               <>
                 {/* R15 · only for a row ACP applied itself — a drafted-AI or manually-authored

@@ -232,6 +232,7 @@ _map_many([
 # `remediate.review`), and it is deliberately not the same as running remediation.
 _map_many([
     ("PUT", "/hitl/queue/{item_id}"), ("PATCH", "/hitl/queue/{item_id}/assign"),
+    ("POST", "/hitl/queue/{item_id}/retry-write"),
     ("POST", "/hitl/queue/{scan_id}/auto"), ("POST", "/hitl/queue/{scan_id}/verify"),
 ], {"remediate.review"})
 # AI drafting assists a reviewer; it writes nothing to a document on its own.

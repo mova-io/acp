@@ -33,21 +33,25 @@ def _docx_targets(data):
           'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing',
           'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
           'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'}
+    from experiments.document_wide_ai.packaging.docx_packager import unnamed_docx_images
     result = {}
     with zipfile.ZipFile(io.BytesIO(data)) as z:
+        unnamed = {i.locator for i in unnamed_docx_images({n: z.read(n) for n in z.namelist()})}
         for part in z.namelist():
-            if not re.fullmatch(r'word/(?:document|header\d*|footer\d*)\.xml', part):
+            if not re.fullmatch(r'word/(?:document|header\d*|footer\d*|footnotes|endnotes)\.xml', part):
                 continue
             root = etree.fromstring(z.read(part), etree.XMLParser(resolve_entities=False, no_network=True))
             for index, paragraph in enumerate(root.findall('.//w:p', ns)):
                 for drawing in paragraph.findall('.//w:drawing', ns):
                     for props in drawing.findall('.//wp:docPr', ns):
                         name = props.get('name')
-                        if not name:
-                            continue
-                        key = part + '#' + name
                         blips = drawing.findall('.//a:blip', ns)
                         rid = blips[0].get('{'+ns['r']+'}embed') if len(blips) == 1 else None
+                        if not name:
+                            if not rid or part+'#'+rid not in unnamed:
+                                continue
+                            name = rid
+                        key = part + '#' + name
                         aliases = {key.casefold()}
                         if part == 'word/document.xml':
                             aliases.add(f"docx:drawing:{props.get('id')}:paragraph:{index}".casefold())
@@ -138,7 +142,7 @@ def build_manifest(store, scan_id, filename, data):
     if len(context) > LIMITS.max_text_chars:
         raise ValueError('document_extraction_incomplete')
     manifest = replace(packaged, findings=tuple(findings), extraction_issues=tuple(issues), text_context=context)
-    if targets:
+    if filename.lower().endswith(('.docx', '.pptx', '.xlsx')):
         evidence = []
         for finding in findings:
             key = finding.locator.part_name+'#'+finding.locator.element_ref
@@ -196,7 +200,17 @@ def build_manifest(store, scan_id, filename, data):
 def _image(data, locator):
     from remediate_office import image_bytes_for_locator
     from PIL import Image
-    image = image_bytes_for_locator(data, locator)
+    if locator and locator.startswith('word/') and '#' in locator:
+        from office_visible_image import visible_word_relationship
+        part, rid = locator.split('#', 1)
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            cropped, visible = visible_word_relationship({n: z.read(n) for n in z.namelist()}, part, rid)
+        if cropped:
+            image = visible
+        else:
+            image = image_bytes_for_locator(data, locator)
+    else:
+        image = image_bytes_for_locator(data, locator)
     if not image or len(image) > 1024 * 1024:
         return None
     try:

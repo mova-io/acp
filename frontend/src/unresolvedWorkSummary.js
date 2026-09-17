@@ -1,6 +1,7 @@
 import { pendingReviewRows } from './remediationCountSummary.js'
 import { reviewWorkCategory } from './reviewWorkBreakdown.js'
 import { automaticReviewResponsibility } from './automaticReviewResponsibility.js'
+import { approvalSuperseded, approvedWriteUnconfirmed } from './remediationInboxModel.js'
 import { exclusionReason } from './batchReviewSelection.js'
 import { requiresPdfSourceEditing } from './pdfStructuralProposal.js'
 
@@ -24,6 +25,15 @@ export function unresolvedWorkSummary(rows = [], decisions = {}) {
     const category = reviewWorkCategory(row, decisions)
     let key
     if (requiresPdfSourceEditing(row)) key = 'unsupported'
+    // An approval that was recorded and never written is recoverable work, not a human decision.
+    // It was being counted under "Human decisions or manual edits" while the same screen told the
+    // reviewer no further approval was needed — the contradiction the summary photographed.
+    else if (approvedWriteUnconfirmed(row, decisions)) key = 'recovery'
+    // An approval that no longer binds is the other half of that: a human decision, because the
+    // earlier one cannot be written into the version the document is at now. Counting it as
+    // recovery would say ACP can finish it unattended, and "Stale — refresh and review" below
+    // would otherwise do exactly that for a superseded row.
+    else if (approvalSuperseded(row, decisions)) key = 'human'
     else if (explicitHuman) key = 'human'
     else if (['failed-checks', 'blocked-ai', 'missing-proposals'].includes(category)
       || RECOVERABLE_DRAFT.has(exclusionReason(row, decisions))) key = 'recovery'

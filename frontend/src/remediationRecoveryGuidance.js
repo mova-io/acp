@@ -1,10 +1,41 @@
 import { exclusionReason } from './batchReviewSelection.js'
 import { requiresPdfSourceEditing } from './pdfStructuralProposal.js'
+import { approvalSuperseded, approvedWriteUnconfirmed } from './remediationInboxModel.js'
 
 // Use persisted eligibility and actual proposal lineage. Consent alone is not
 // evidence that an automatic job exists, and a document retry rewrites fixes.
 export function remediationRecoveryGuidance(row, decisions = {}) {
   if (!row || row.validated || row.automaticQueued) return null
+  // An approval is on record and no longer binds. Stated FIRST, and with no retry offer: the
+  // branch below would otherwise tell this reviewer their approval stands and will never be asked
+  // for again, which is exactly the promise a superseded approval cannot keep. The backend's retry
+  // gate refuses this row too ("The document has changed since this was approved"), so a button
+  // here would only produce that refusal.
+  if (approvalSuperseded(row, decisions)) return {
+    title: 'Approved earlier — this has changed since',
+    reason: row.automaticDisposition?.reason
+      || 'The approval on record was made against a version of this document or this suggestion that is no longer the current one.',
+    next: 'This one may need a fresh decision: what was approved then may not describe what the '
+      + 'document says now, and ACP will not write the earlier approval into the current version. '
+      + 'Review the current suggestion and decide again, or open the remediation plan to see what '
+      + 'changed. Until then this finding stays unresolved and is still reported as remaining.',
+    plan: true,
+    staleApproval: true,
+  }
+  // Approved, and the approved value was never written. The reviewer's approval is recorded and
+  // will not be requested again, so this pane must not offer an approval — it offers a retry of
+  // the WRITE, and states the writer's own recorded reason rather than inventing one.
+  if (approvedWriteUnconfirmed(row, decisions)) return {
+    title: 'Approved — the change has not been written yet',
+    reason: row.automaticDisposition?.reason
+      || 'ACP has your approval on record, but no confirmed write of the approved value exists for this finding.',
+    next: 'Your approval stays recorded — ACP will not ask for it again, and approving this suggestion '
+      + 'a second time would change nothing. Retry writing the approved value, or open the remediation '
+      + 'plan to read the writer’s recorded outcome for this item. Until a write is confirmed this '
+      + 'finding stays unresolved and is still reported as remaining.',
+    plan: true,
+    retryApproved: true,
+  }
   if (requiresPdfSourceEditing(row)) return {
     title: 'Edit the source document',
     reason: 'ACP cannot write this PDF heading or table structure from a prose suggestion.',

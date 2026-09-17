@@ -31,8 +31,9 @@ BLOCK_CODES = frozenset({'vision_spending_reconciliation_required',
 
 
 class RecoveryBlocked(ValueError):
-    def __init__(self, reason_code):
+    def __init__(self, reason_code, causes=()):
         self.reason_code = reason_code
+        self.causes = tuple(causes)
         super().__init__(_block_description(reason_code))
 
 
@@ -59,12 +60,24 @@ def _encoded(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
 
 
+def _causes(value):
+    """Bounded refusal codes only — fixed lowercase tokens, never provider or document text."""
+    from llm_waterfall_provider import bounded_refusal_reason
+    return sorted({reason for reason in (value or ()) if bounded_refusal_reason(reason)})[:5]
+
+
 def _decision(store, sid, file, state, **detail):
     store.log_decision('system', 'vision.recovery.' + state, scan_id=sid,
                        file=file, detail=_encoded(detail))
     safe = {key: detail[key] for key in ('retry', 'run_after', 'drafts') if key in detail}
     if state == 'blocked':
         safe['reason_code'] = detail.get('reason_code') if detail.get('reason_code') in BLOCK_CODES else 'vision_recovery_unresolved'
+        # The catch-all code says only that something is unresolved, which is what made a
+        # dispatch misconfiguration read like a provider outage. Carry the exact refusal
+        # reasons with it. Codes that already name their cause are left unchanged.
+        causes = _causes(detail.get('cause'))
+        if safe['reason_code'] == 'vision_recovery_unresolved' and causes:
+            safe['cause'] = causes
     store.append_scan_event(sid, 'remediate.vision_retry_' + state,
         phase='remediate', document=file, correlation_id=detail.get('run_id'),
         detail=safe or None)
@@ -196,7 +209,8 @@ def schedule(store, context, job, misses, *, inspect_pending=False):
     blocked = _recovery_block(context, misses)
     if blocked:
         _decision(store, sid, file, 'blocked', run_id=context.run_id,
-                  reason_code=blocked, reason=_block_description(blocked))
+                  reason_code=blocked, reason=_block_description(blocked),
+                  cause=sorted(_recovery_reasons(context)))
         if blocked == 'vision_spending_reconciliation_required':
             _enqueue(store, dict(payload, waiting_spending=True, wait_check=1))
         return
@@ -321,7 +335,7 @@ def process(store, payload):
             blocked = _recovery_block(context)
             if blocked:
                 _decision(store, sid, file, 'blocked', run_id=context.run_id, reason_code=blocked,
-                          reason=_block_description(blocked))
+                          reason=_block_description(blocked), cause=sorted(_recovery_reasons(context)))
                 if (payload.get('waiting_spending') and payload['wait_check'] < 8
                         and blocked == 'vision_spending_reconciliation_required'):
                     _enqueue(store, dict(payload, wait_check=payload['wait_check'] + 1))
@@ -351,7 +365,7 @@ def process(store, payload):
                         scan_id=sid, context_file=file, include_grounded=True, skip_locators=retained, guidance=guidance)
             blocked = _recovery_block(context, misses, check_admission=False)
             if blocked:
-                raise RecoveryBlocked(blocked)
+                raise RecoveryBlocked(blocked, sorted(_recovery_reasons(context)))
             if misses:
                 if payload['retry'] < 2:
                     _validate(store, payload)
@@ -400,4 +414,5 @@ def process(store, payload):
                     _enqueue(store, dict(payload, retry=2, proposals_before=current['proposals']))
     except (ValueError, BudgetError) as exc:
         _decision(store, sid, file, 'blocked', run_id=payload.get('run_id'), reason=str(exc),
-                  reason_code=getattr(exc, 'reason_code', None))
+                  reason_code=getattr(exc, 'reason_code', None),
+                  cause=getattr(exc, 'causes', None))

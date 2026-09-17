@@ -1628,6 +1628,14 @@ export const assignHitlItem = (itemId, assignee) =>
     headers: headers({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ assignee: assignee || null }),
   }).then(j)
+// Retry one version-bound approval. The response distinguishes active jobs from refusals.
+export const retryApprovedWrite = (itemId) => (SIM
+  ? sim({ accepted: true, in_flight: true, status: 'queued', job_id: `sim-retry-${itemId}`, reason: null })
+  : fetch(`${BASE}/hitl/queue/${encodeURIComponent(itemId)}/retry-write`, {
+      method: 'POST',
+      headers: headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({}),
+    }).then(j))
 // HITL review telemetry for the workspace dashboard — decisions by action, approval rate,
 // edit rate (confidence-calibration signal), avg review time (reviewer-time-saved). Scan-scoped.
 export const getHitlAnalytics = (scanId = null) => (SIM

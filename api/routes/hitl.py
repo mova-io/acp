@@ -418,6 +418,15 @@ def hitl_update(item_id: str, body: HitlUpdate, request: Request = None):
     return updated
 
 
+@router.post("/hitl/queue/{item_id}/retry-write")
+def hitl_retry_write(item_id: str, request: Request = None):
+    """Retry one owned approval; report active job or refusal without changing the decision."""
+    _owned_item(item_id, request)
+    actor = getattr(getattr(request, "state", None), "user_email", None) or "reviewer"
+    result = core.store.retry_approved_write(item_id, actor=actor)
+    return {k: result[k] for k in ("accepted", "job_id", "status", "in_flight", "reason")}
+
+
 class HitlAssign(BaseModel):
     assignee: str | None = None   # email address of the reviewer to assign, or null to clear
 

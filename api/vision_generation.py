@@ -163,6 +163,15 @@ class _CaptionGenerator:
         self.image_processing, self.clean = image_processing, clean
         self.deadline_rejected = False
         self.models, self.specs, self.pricing_refs = generator.models, generator.specs, generator.pricing_refs
+        # The managed dispatch path reads the endpoint zone map off whatever generator it is
+        # handed, so a wrapper that omits it does not fall back to the wrapped generator's —
+        # it reports NO zone for every model. That is indistinguishable from an endpoint the
+        # configuration genuinely cannot place, and quality_first then refuses a correctly
+        # configured cloud chain before any ledger or provider call. Carry the REAL map;
+        # never synthesise or default one. `{}` when the wrapped generator has none keeps the
+        # refusal closed, which is the same contract as _ValidatedGenerator in
+        # document_wide_provider.
+        self.zones = getattr(generator, 'zones', {})
 
     def generate_text(self, model, prompt):
         try:

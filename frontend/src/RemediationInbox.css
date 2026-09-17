@@ -117,3 +117,6 @@
 .rinbox-action-chip--review { background:var(--warn-bg,#fff8e6); color:var(--warn-fg,#986300); }
 .rinbox-action-chip--processing,.rinbox-action-chip--check { background:#e0efff; color:#174e7a; }
 .rinbox-action-chip--results { background:#e8f5e9; color:#176329; }
+/* Approved, not written. Deliberately not the amber "Review needed" chip — nobody is being asked
+   to approve anything — and not the blue status chip either, because there is an action to take. */
+.rinbox-action-chip--recover { background:#efe7fb; color:#5b3a9c; }

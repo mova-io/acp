@@ -269,12 +269,64 @@ def managed_context():
     return current_run_context(required=False)
 
 
+REFUSAL_REASON_CHARS = frozenset('abcdefghijklmnopqrstuvwxyz0123456789_')
+
+
+def bounded_refusal_reason(reason) -> bool:
+    """A fixed lowercase refusal code, never provider text or a document detail."""
+    return isinstance(reason, str) and 0 < len(reason) <= 64 and set(reason) <= REFUSAL_REASON_CHARS
+
+
+def _record_pre_dispatch_refusal(ctx, reason: str, kind: str) -> None:
+    """Persist the EXACT reason a request was refused before the ledger or a provider.
+
+    This refusal leaves `ai_calls` and `ai_spending_attempts` empty precisely because nothing
+    was attempted, so the only surviving record is a generic downstream block and a
+    misconfiguration is indistinguishable from a budget or provider failure. A refusal that
+    DID attempt already has its reservation and attempt-history rows, so it is not repeated
+    here. Owner-gated and best effort, on the same narration path as ai_request_activity:
+    evidence must never fail the work it describes.
+    """
+    try:
+        import core
+        from ai_run_policy import RunContext
+        store = core.store
+        if (type(ctx) is not RunContext or not bounded_refusal_reason(reason)
+                or not getattr(ctx, 'scan_id', None) or not getattr(ctx, 'file', None)
+                or ctx.ledger.db is not store._db):
+            return
+        detail = {'request_id': uuid4().hex, 'run_id': ctx.run_id, 'status': 'failed',
+                  'surface': kind if kind in ('text', 'vision') else 'text',
+                  'model': 'not-dispatched', 'processing_zone': 'unknown',
+                  'dispatched': False, 'reason': reason}
+        with store.transaction():
+            with store._db.cursor() as cur:
+                store._db.execute(cur, "SELECT e.execution_id FROM stage_executions e JOIN scan_runs s ON s.id=e.scan_id AND s.owner_email=e.owner_email WHERE e.execution_id=%s AND e.scan_id=%s AND e.owner_email=%s AND e.stage='remediate' AND e.is_current=1 AND e.cancel_requested_at IS NULL", (ctx.run_id, ctx.scan_id, ctx.owner_id))
+                if not store._db.fetchone(cur):
+                    return
+            event = store.append_scan_event(ctx.scan_id, 'remediate.ai_request_finished',
+                                            phase='remediate', document=ctx.file,
+                                            owner_email=ctx.owner_id, correlation_id=ctx.run_id,
+                                            detail=detail)
+            if event is not None:
+                store.log_decision('system', 'remediate.ai_request_finished', scan_id=ctx.scan_id,
+                                   file=ctx.file, detail=json.dumps(detail, sort_keys=True))
+    except Exception as error:
+        logging.getLogger(__name__).warning('ai_refusal_evidence_unavailable error_type=%s',
+                                            type(error).__name__)
+
+
 def defer_managed(reason: str, *, kind: str = 'text', attempts=None) -> dict:
     ctx = managed_context()
     item = {'reason': reason, 'kind': kind, 'status': 'deferred',
             'attempts': attempts or []}
     if ctx is not None and hasattr(ctx, 'deferred'):
+        # One record per distinct reason per run context. A repeat of the same refusal is the
+        # same configuration fact, not new evidence, and this path fans out per image.
+        first = not any(entry.get('reason') == reason for entry in ctx.deferred)
         ctx.deferred.append(item)
+        if first and not item['attempts']:
+            _record_pre_dispatch_refusal(ctx, reason, kind)
     return {'text': '', 'deferred': True, **item}
 
 
@@ -317,6 +369,14 @@ def managed_generate_attempts(prompt, ctx, generator, *, purpose='draft',
     from ai_generation_chain import normalize_chain, STEP_IDS, ELIGIBLE
     if type(image_prefix) is not bool:
         raise ValueError('explicit image prefix mode required')
+    # Fail closed: a model the zone map does not place ('zones' absent, or the model absent
+    # from it, or mapped to None) is refused exactly like a local one. That is deliberate —
+    # TextModelSpec.zone returns None for NOT REPORTED and must never be read as cloud.
+    # The cost of it is that a WRAPPER which forgets to carry `zones` forward turns every
+    # quality_first dispatch into this refusal, before any ledger or provider call, with no
+    # error anywhere. Any object handed to this function must propagate the real map
+    # (see _CaptionGenerator / _ValidatedGenerator); synthesising one here would trade a
+    # silent refusal for a silent lie about where a document was sent.
     if ctx.policy.get('quality_first') and any(getattr(generator, 'zones', {}).get(model.name) != 'cloud' for model in generator.models):
         return defer_managed('quality_first_cloud_endpoint_required')
     chain = getattr(ctx, 'policy', {}).get('generation_chain')

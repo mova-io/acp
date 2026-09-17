@@ -5,6 +5,13 @@ text. The raster and its relationship are removed, not described. Shared media,
 non-body Word placements, groups, crops and transforms are unresolved. Replacement
 changes appearance; it does not promise faithful typography or infer transcript text.
 Unchanged package members retain their original bytes.
+
+"Cropped" is measured geometry, not the presence of an element: OOXML treats an omitted
+inset as 0, so a bare `<a:srcRect/>` hides nothing and Word writes it for a picture whose
+crop handles were reset. Writer and refusal both ask `office_visible_image.has_word_crop`
+(the validated battery #2127 gave the drafting path), so the two answers cannot disagree.
+Fail closed on geometry we cannot vouch for — a refusal costs a retry, a wrong write
+deletes a picture nobody agreed to lose.
 """
 from __future__ import annotations
 
@@ -58,10 +65,24 @@ def _references(zin, media):
     return found
 
 
-def _simple_picture(pic):
-    # Unsupported transforms/crops would change both intended content and placement.
-    if pic.xpath('.//a:srcRect | .//a:tile', namespaces=NS):
+def _simple_picture(pic, *, vouched_zero_crop=False):
+    """Writable placement? Unsupported transforms/crops change content AND placement.
+
+    `vouched_zero_crop` is the caller's answer from `office_visible_image.has_word_crop` —
+    the same validated geometry the drafting path uses — and is only True for exactly one
+    a:srcRect with provably zero insets on a uniquely referenced, untiled, unrotated,
+    unflipped inline body picture. The rectangle is re-checked here against the live tree,
+    so the flag can only ever excuse one that is itself harmless. A real inset, a second
+    rectangle, an attribute outside l/t/r/b or a tile still refuses, and an ext whose
+    geometry this module cannot vouch for (xlsx) never sets the flag at all.
+    """
+    if pic.xpath('.//a:tile', namespaces=NS):
         return False
+    rectangles = pic.xpath('.//a:srcRect', namespaces=NS)
+    if rectangles:
+        from office_visible_image import _crops_nothing
+        if not (vouched_zero_crop and len(rectangles) == 1 and _crops_nothing(rectangles[0])):
+            return False
     for transform in pic.xpath('.//a:xfrm', namespaces=NS):
         if any(transform.get(k) not in (None, '0', 'false')
                for k in ('rot', 'flipH', 'flipV')):
@@ -69,7 +90,7 @@ def _simple_picture(pic):
     return len(pic.xpath('.//a:blip', namespaces=NS)) == 1
 
 
-def _word(root, rid, text):
+def _word(root, rid, text, *, vouched_zero_crop=False):
     blips = root.xpath('.//a:blip[@r:embed=$rid]', namespaces=NS, rid=rid)
     if len(blips) != 1:
         return False
@@ -78,7 +99,7 @@ def _word(root, rid, text):
         return False
     blip = blips[0]
     inline = next((p for p in blip.iterancestors() if p.tag == _q('wp', 'inline')), None)
-    if inline is None or not _simple_picture(inline):
+    if inline is None or not _simple_picture(inline, vouched_zero_crop=vouched_zero_crop):
         return False
     drawing = inline.getparent()
     run = drawing.getparent()
@@ -155,6 +176,10 @@ def office_image_replacement_refusal(data: bytes, ext: str, locator: str) -> str
 
     This is diagnostic only. Full-raster OCR cannot authorize deleting a cropped
     picture: the visible crop may contain a diagram or exclude transcribed words.
+
+    "Cropped" is `office_visible_image.has_word_crop`'s validated answer, not the presence
+    of an a:srcRect: a bare one hides no pixels. Unreadable or unvouchable geometry
+    (rotated, flipped, tiled, doubly cropped) still answers True and still refuses here.
     """
     if ext.lower().lstrip('.') != 'docx':
         return None
@@ -176,7 +201,10 @@ def office_image_replacement_refusal(data: bytes, ext: str, locator: str) -> str
                 return None
             inline = next((p for p in blips[0].iterancestors()
                            if p.tag == _q('wp', 'inline')), None)
-            if inline is not None and inline.xpath('.//a:srcRect', namespaces=NS):
+            if inline is None:
+                return None
+            from office_visible_image import has_word_crop
+            if has_word_crop(data, locator):
                 return 'cropped_image_requires_visible_transcription'
     except (zipfile.BadZipFile, ET.XMLSyntaxError, KeyError):
         return None
@@ -214,10 +242,25 @@ def apply_office_image_replacement(data: bytes, ext: str, values: dict[str, str]
             if not supported:
                 unresolved.append(locator)
                 continue
+            # Does this placement hide any pixels? Asked of the ORIGINAL package — the bytes
+            # the approval was bound to — through the same battery the drafting path uses.
+            # Word only: `has_word_crop` reads word/document.xml, so xlsx keeps the
+            # fail-closed bare-presence test in `_simple_picture`.
+            vouched_zero_crop = False
+            if ext == 'docx':
+                try:
+                    from office_visible_image import has_word_crop
+                    vouched_zero_crop = not has_word_crop(data, locator)
+                except Exception:
+                    vouched_zero_crop = False
             try:
                 root = ET.fromstring(changes.get(owner, zin.read(owner)), parser=PARSER)
-                writer = _word if ext == 'docx' else _excel
-                if not writer(root, rid, text.replace('\r\n', '\n').replace('\r', '\n')):
+                if ext == 'docx':
+                    written = _word(root, rid, text.replace('\r\n', '\n').replace('\r', '\n'),
+                                    vouched_zero_crop=vouched_zero_crop)
+                else:
+                    written = _excel(root, rid, text.replace('\r\n', '\n').replace('\r', '\n'))
+                if not written:
                     unresolved.append(locator)
                     continue
                 relpath = _relpart(owner)
