@@ -297,6 +297,27 @@ _map_many([
 ], {"discover.run", "assess.run", "assess.cancel", "remediate.run", "release.publish"})
 _map_many([("GET", "/scans/{sid}/report.pdf")], {"release.view", "reports.export"})
 
+# ── Report facts, the server renderer, and reviewer decisions ─────────────────
+# Reading the facts a report is built from is the same right as reading the scan it describes —
+# it is a projection of findings, saved changes and reviewer verdicts this workspace can already
+# see through /scans/{sid}, and it issues no writes. The exact-bytes preview is listed with them
+# because it is the same evidence in image form: it renders only bytes ACP already holds for a
+# document in the scan, and only when the caller names their digest.
+_map_many([
+    ("GET", "/scans/{sid}/files/{filename:path}/report-facts"),
+    ("GET", "/scans/{sid}/report-facts"),
+    ("GET", "/scans/{sid}/files/{filename:path}/change-reviews"),
+    ("GET", "/scans/{sid}/files/{filename:path}/artifact/{sha256}/page/{page}"),
+], _SCAN_READ)
+# Rendering a report is an EXPORT: it produces a document that leaves the workspace, so it takes
+# the same pair as /scans/{sid}/report.pdf rather than a view grant on its own.
+_map_many([("POST", "/scans/{sid}/report-render")], {"release.view", "reports.export"})
+# Recording a verdict on a saved AI change is the reviewer's own action (PRD §5), not a view of
+# it. `remediate.review` names exactly that and nothing else: a role that may watch remediation
+# must not be able to sign off the changes it produced.
+_map_many([("PUT", "/scans/{sid}/files/{filename:path}/change-reviews/{change_id:path}")],
+          {"remediate.review"})
+
 # ── Monitor ───────────────────────────────────────────────────────────────────
 _map_many([("GET", "/schedule"),
            ("GET", "/schedule/history"), ("GET", "/schedule/notifications"),

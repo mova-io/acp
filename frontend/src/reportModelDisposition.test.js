@@ -79,6 +79,9 @@ describe('reportModel — W4 dispositions in the certification report', () => {
     const model = buildFileCertificationModel(data(rows))
     expect(model.fullyConformant).toBe(true)
     // in-scope denominator is 2 (out-of-scope excluded), all resolved
-    expect(flat(model)).toMatch(/meets all 2 in-scope/)
+    // Was /meets all 2 in-scope/. "Meets" read as a conformance claim; the house position (a64142c1)
+    // is that ACP reports what it checked, changed and verified, so the ready wording now says
+    // there is nothing outstanding among the criteria checked — against the same denominator.
+    expect(flat(model)).toMatch(/No outstanding items for "deck\.pptx" among the 2 in-scope/)
   })
 })

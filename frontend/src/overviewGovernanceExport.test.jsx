@@ -20,8 +20,22 @@ async function clickReport(certifiable = 1, assessed = true) {
   const files = [{ file: 'report.docx', type: 'DOCX', score: assessed ? 80 : null, status: assessed ? 'done' : 'discovered', issues: assessed ? [{ wcag: 'SC_1_3_1', severity: 'SERIOUS' }] : [] }]
   await act(async () => { root.render(createElement(Overview, { run: { id: 'export-test', files: 2, certifiable, avg_score: assessed ? 80 : null, status: 'done', scope: {} }, files })) })
   const button = [...container.querySelectorAll('button')].find(button => button.textContent === 'Quarterly governance report')
-  await act(async () => { button.click(); await new Promise(resolve => setTimeout(resolve, 100)) })
+  await act(async () => { button.click() })
+  await settle(button)
   return { container, button }
+}
+
+// Wait for the export to FINISH, rather than for a fixed 100ms. The click starts a dynamic import
+// and a full jsPDF render, and 100ms is a guess about how long that takes on an idle machine —
+// under a loaded full-suite run it is not enough, and the failure reads as "no PDF was produced"
+// rather than as "the test did not wait". The button re-enables when the handler settles, so that
+// is the condition to wait on.
+async function settle(button, tries = 200) {
+  for (let i = 0; i < tries; i++) {
+    if (!button.disabled) return
+    // eslint-disable-next-line no-await-in-loop
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 5)) })
+  }
 }
 
 describe('Quarterly governance report download from Overview', () => {
@@ -41,7 +55,8 @@ describe('Quarterly governance report download from Overview', () => {
     expect(downloads).toHaveLength(0)
     expect(errors.mock.calls.some(([message]) => message === 'PDF export failed')).toBe(true)
     jsPDF.API.save = successfulSave
-    await act(async () => { button.click(); await new Promise(resolve => setTimeout(resolve, 100)) })
+    await act(async () => { button.click() })
+    await settle(button)
     expect(container.querySelector('[role="alert"]')).toBeNull()
     expect(downloads).toHaveLength(1)
     expect(button.disabled).toBe(false)

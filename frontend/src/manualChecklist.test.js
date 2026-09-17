@@ -3,7 +3,9 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { fixSteps, hasGuidance, appName } from './remediationGuide.js'
-import { exportScanReport } from './pdfReport.js'
+import { LEGACY_JSPDF_RENDERERS } from './pdfReport.js'
+// The retired jsPDF renderer, still checked headlessly; the UI now renders on the server.
+const { exportScanReport } = LEGACY_JSPDF_RENDERERS
 
 const here = dirname(fileURLToPath(import.meta.url))
 const read = (f) => readFileSync(join(here, f), 'utf8')

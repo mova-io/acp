@@ -170,27 +170,101 @@ def _table(headers, rows):
     return '<div class="table-scroll"><table><thead><tr>' + ''.join(f'<th scope="col">{_text(h)}</th>' for h in headers) + '</tr></thead><tbody>' + ''.join('<tr>' + ''.join(f'<td>{c}</td>' for c in row) + '</tr>' for row in rows) + '</tbody></table></div>'
 
 
-def _offline_guide(document):
-    """Print concrete recorded recommendations without creating a second findings count."""
-    content = ('<h2>Offline remediation guide</h2><p>In-app review is optional. '
-               'Work through the remaining actions in the saved document when convenient. '
-               'AI recommendations require checking the target and meaning before use.</p>')
-    for row in document['remaining']:
-        content += (f'<section class="report-card"><h3>SC {_text(row["criterion"])} — {_text(row["title"])}</h3>'
-                    f'<p><strong>Priority:</strong> {_text(row["priority"])}<br>'
-                    f'<strong>Location:</strong> {_text(row["location"])}<br>'
-                    f'<strong>Status:</strong> {_text(row["status"])}</p>')
-        if row.get('description'):
-            content += f'<p><strong>Issue:</strong> {_text(row["description"])}</p>'
-        if row.get('original_value') is not None:
-            content += f'<p><strong>Original recorded value:</strong> {_text(row["original_value"])}</p>'
-        if row.get('proposed_value') is not None:
-            content += f'<p><strong>AI recommended value — not recorded as saved:</strong> {_text(row["proposed_value"])}</p>'
-        if row.get('reason'):
-            content += f'<p><strong>Recorded rationale:</strong> {_text(row["reason"])}</p>'
-        content += '<p><strong>How to fix:</strong></p><ol>' + ''.join(f'<li>{_text(step)}</li>' for step in row['editor_steps']) + '</ol>'
-        content += f'<p>{_text(row["technical_status"])} · {_text(row["human_status"])}</p></section>'
-    return content if document['remaining'] else ''
+FOLLOW_UP_NOTICE = ('Ticking this printed copy does not record anything in ACP. Reassess the saved copy '
+                    'after editing; a saved edit alone does not establish conformance.')
+
+
+def _field(label, value_html, cls=''):
+    return f'<p class="report-field{cls}"><strong>{_text(label)}:</strong> {value_html}</p>'
+
+
+def _finding_card(criterion, row=None, category=None, guide=None):
+    """ONE card per remaining finding: the checklist facts, the specific offline instructions,
+    how to verify, and the printed reviewer response, together.
+
+    The report used to print every finding twice — a checklist card, then the same finding again
+    in a separate "offline guide" card — so two findings took three pages and a reviewer had to
+    reconcile the two copies by hand. Nothing is dropped here: every checklist column and every
+    guide field is still printed, once.
+    """
+    from wcag_codeset import _name_for
+    name = _name_for(criterion) if criterion else ''
+    title = f'SC {_text(criterion)}' + (f' — {_text(name)}' if name and name != criterion
+                                        else f' — {_text(guide["title"])}' if guide and guide.get('title') else '')
+    issue = row[1] if row else (guide or {}).get('description')
+    location = row[2] if row else (guide or {}).get('location')
+    severity = row[3] if row else (guide or {}).get('priority')
+    owner = row[5] if row else 'Unassigned'
+    status = row[6] if row else (guide or {}).get('status')
+    parts = [f'<section class="report-card finding-card" data-criterion="{_text(criterion)}">',
+             f'<h3>{title}</h3>',
+             '<p class="report-field facts">'
+             f'<strong>Severity:</strong> {_text(severity)} · '
+             f'<strong>Status:</strong> {_text(status)} · '
+             f'<strong>Owner:</strong> {_text(owner)}'
+             + (f' · <strong>Remediation category:</strong> {_text(CATEGORIES[category])}' if category else '')
+             + '</p>',
+             _field('Location', _text(location)),
+             _field('Issue', _text(issue or 'Accessibility issue remains'))]
+    words = lambda value: set(re.findall(r'\w+', str(value or '').lower()))  # noqa: E731
+    if guide and row and guide.get('location') and not guide['location'].startswith('Location not recorded') \
+            and not words(guide['location']) <= words(location):
+        # Only when the guide's target adds something ("pdf:figure:first" beside "Not recorded").
+        parts.append(_field('Recorded target', _text(guide['location'])))
+    if guide and guide.get('original_value') is not None:
+        parts.append(_field('Original recorded value', _text(guide['original_value']), ' evidence'))
+    if guide and guide.get('proposed_value') is not None:
+        parts.append(_field('AI recommended value — not recorded as saved', _text(guide['proposed_value']), ' evidence'))
+    if guide and guide.get('reason'):
+        parts.append(_field('Recorded rationale', _text(guide['reason'])))
+    action = row[4] if row else (guide or {}).get('recommendation')
+    if action:
+        parts.append(_field('Recommended action', _text(action)))
+    if guide and guide.get('editor_steps'):
+        parts.append('<p class="report-field"><strong>How to fix:</strong></p><ol>'
+                     + ''.join(f'<li>{_text(step)}</li>' for step in guide['editor_steps']) + '</ol>')
+    verification = (f'{_text(guide["technical_status"])} · {_text(guide["human_status"])}' if guide
+                    else 'Technical verification not recorded · Human confirmation of meaning not recorded')
+    parts.append(_field('Verification', verification))
+    parts.append('<div class="check-off"><p><span class="print-box" aria-hidden="true">☐</span> '
+                 'Remediated and rechecked</p>'
+                 '<p class="notes">Reviewer / date / notes:</p>'
+                 f'<p class="print-notice">{_text(FOLLOW_UP_NOTICE)}</p></div></section>')
+    return ''.join(parts)
+
+
+def _remaining_actions(categorized, document):
+    """Join checklist rows to the guide's per-target rows, then render one card each.
+
+    Rows are matched on criterion and recorded issue text, consuming guide rows in order, so two
+    findings with identical text at different targets each keep their own instructions. A guide
+    row with no checklist counterpart (an unlinked recommendation, or a finding whose criterion is
+    still processing) is still printed, as its own card.
+    """
+    guide_rows = list(document['remaining'])
+    used = set()
+    cards = []
+    for category, row in categorized:
+        match = None
+        for index, guide in enumerate(guide_rows):
+            if index in used or guide.get('criterion') != row[0] or guide.get('kind') != 'finding':
+                continue
+            if (guide.get('description') or '') == (row[1] or ''):
+                match = index
+                break
+        if match is not None:
+            used.add(match)
+        cards.append(_finding_card(row[0], row, category, guide_rows[match] if match is not None else None))
+    for index, guide in enumerate(guide_rows):
+        if index not in used:
+            cards.append(_finding_card(guide.get('criterion'), None, None, guide))
+    if not cards:
+        return ''
+    return ('<h2>Remaining actions · Offline remediation guide</h2><p>In-app review is optional. '
+            'Work through the remaining actions in the saved document when convenient. Each card below '
+            'is one recorded item: what was found, where, how to fix it, how to check it, and a place to '
+            'record your follow-up. AI recommendations require checking the target and meaning before use.</p>'
+            + ''.join(cards))
 
 
 def build_release_report_sources(store, scan_id, owner, release_id):
@@ -332,8 +406,7 @@ def build_release_report_sources(store, scan_id, owner, release_id):
         remaining_file = original_file - verified_file if original_file is not None and verified_file is not None else None
         detail += (f'<p><strong>Assessed findings:</strong> {_text(original_file)} · '
                    f'<strong>Verified fixed:</strong> {_text(verified_file)} · '
-                   f'<strong>Not yet verified fixed:</strong> {_text(remaining_file)}</p>'
-                   '<h2>Remaining actions</h2>')
+                   f'<strong>Not yet verified fixed:</strong> {_text(remaining_file)}</p>')
         if candidate and not candidate.get('assessment_ok'):
             detail += '<p class="notice">These are last-known recorded actions, not a complete fresh assessment of this copy. Current remaining findings are unknown.</p>'
         categorized = []
@@ -342,8 +415,6 @@ def build_release_report_sources(store, scan_id, owner, release_id):
             task = next((q for q in open_queue if q['file'] == name and _rule(q['rule_id']) == row[0]), {})
             category = _category(trace, task)
             categorized.append((category, row))
-        detail += _table(['Criterion', 'Issue', 'Location', 'Remediation category', 'Recommended action', 'Owner', 'Status'],
-                         [[_text(r[0]), _text(r[1]) + '<br><small>Severity: ' + _text(r[3]) + '</small>', _text(r[2]), _text(CATEGORIES[key]), *[_text(v) for v in r[4:]]] for key, r in categorized]) if checklist else ('<p>Current remaining findings are unknown because the saved-copy assessment could not be completed.</p>' if candidate and not candidate.get('assessment_ok') else '<p>No remaining issues are recorded in the available evidence. This is not a guarantee of compliance.</p>')
         from remediation_audit_guide import build_remediation_audit_guide
         # Unlike legacy category accounting, the offline guide preserves each target.
         # A processing task for one image must not hide another finding under its SC.
@@ -353,7 +424,13 @@ def build_release_report_sources(store, scan_id, owner, release_id):
         guide = build_remediation_audit_guide(
             [{'file': name, 'issues': guide_issues, 'artifact_digest': outcome.get('artifact_digest')}],
             facts={'audit_review_tasks': guide_tasks})[0]
-        detail += _offline_guide(guide)
+        actions = _remaining_actions(categorized, guide)
+        if actions:
+            detail += actions
+        elif candidate and not candidate.get('assessment_ok'):
+            detail += '<h2>Remaining actions</h2><p>Current remaining findings are unknown because the saved-copy assessment could not be completed.</p>'
+        else:
+            detail += '<h2>Remaining actions</h2><p>No remaining issues are recorded in the available evidence. This is not a guarantee of compliance.</p>'
         checklist_detail = detail
         from wcag_codeset import _name_for
         detail = f'<p>Document: {_text(name)}<br>Publication: {_text(status)}</p>'

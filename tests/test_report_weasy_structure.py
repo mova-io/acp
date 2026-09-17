@@ -429,3 +429,110 @@ def test_the_chart_alt_breaks_a_tie_toward_the_more_severe_criterion():
     alt = report_weasy._bars_alt([("1.3.1 Info and Relationships", 37),
                                   ("3.1.1 Language of Page", 37)], 37)
     assert "1.3.1 Info and Relationships affects the most files, 37 of 37" in alt, alt
+
+
+# ── layout: page furniture, chart labels, long scans ─────────────────────────────────────────
+
+def test_every_page_is_numbered_and_names_the_scan(report):
+    from test_report_render import pdftext
+    text = pdftext(report.read_bytes())
+    with pikepdf.open(str(report)) as pdf:
+        pages = len(pdf.pages)
+    for n in range(1, pages + 1):
+        assert f"Page {n} of {pages}" in text
+    # pdftotext drops the space before a middle dot in margin boxes, so match loosely.
+    import re as _re
+    assert len(_re.findall(r"Scan selfcheck\s*·\s*generated .* UTC\s*·\s*Mova iO ACP", text)) == pages
+
+
+def _svg_text_extents(svg: str):
+    """(x_start, x_end, text) for every <text> in a chart SVG, measured with real font metrics
+    (DejaVu Sans, the widest face in the report's stack) and honouring text-anchor."""
+    import re as _re
+    from html import unescape
+    import report_weasy
+    width = float(_re.search(r'<svg[^>]*\swidth="([\d.]+)"', svg).group(1))
+    out = []
+    for m in _re.finditer(r"<text([^>]*)>(.*?)</text>", svg):
+        attrs, label = m.group(1), unescape(m.group(2))
+        x = float(_re.search(r'\sx="([-\d.]+)"', attrs).group(1))
+        size = float(_re.search(r'font-size="([\d.]+)"', attrs).group(1))
+        w = report_weasy.text_width(label) * size / report_weasy._BAR_LABEL_PX
+        anchor = (_re.search(r'text-anchor="(\w+)"', attrs) or [None, "start"])[1]
+        start = x - w if anchor == "end" else x - w / 2 if anchor == "middle" else x
+        out.append((start, start + w, label, width))
+    return out
+
+
+@pytest.mark.parametrize("rows", [
+    [("1.4.3 Contrast (Minimum)", 3), ("1.1.1 Non-text Content", 12)],
+    [("2.5.8 Target Size (Minimum)", 1), ("1.3.1 Info and Relationships", 49)],
+    [("4.1.2 " + "Name, Role, Value with an unusually long custom rubric label " * 3, 7)],
+    [("X" * 140, 2)],
+])
+def test_chart_labels_fit_inside_the_chart(rows):
+    """THE CLIPPING REGRESSION. The label column was a fixed 130px, right-aligned at x=124, so
+    "1.4.3 Contrast (Minimum)" (≈130px at 10px) started left of the image and printed as
+    ".4.3 Contrast (Minimum)". Asserted on geometry with real metrics, because text extraction
+    still returns the clipped glyphs and would pass. Bite-checked against the old layout."""
+    import report_weasy
+    svg = report_weasy._bars_svg(rows)
+    extents = _svg_text_extents(svg)
+    for start, end, label, width in extents:
+        assert start >= 0 and end <= width, (label, start, end, width)
+    shown = " ".join(label for _, _, label, _ in extents)
+    for name, _ in rows:
+        for word in name.split():
+            assert word[:10] in shown, word
+
+
+def test_long_scan_report_layout(tmp_path):
+    """300 files with 200-character names, 40 criteria, long finding text."""
+    import re as _re
+    from test_report_render import pdftext
+    crits = ["1.1.1", "1.2.1", "1.2.2", "1.2.3", "1.2.5", "1.3.1", "1.3.2", "1.3.3", "1.3.4", "1.3.5",
+             "1.4.1", "1.4.2", "1.4.3", "1.4.4", "1.4.5", "1.4.10", "1.4.11", "1.4.12", "1.4.13", "2.1.1",
+             "2.1.2", "2.1.4", "2.2.1", "2.2.2", "2.3.1", "2.4.1", "2.4.2", "2.4.3", "2.4.4", "2.4.5",
+             "2.4.6", "2.4.7", "2.5.1", "2.5.2", "2.5.3", "2.5.4", "3.1.1", "3.1.2", "3.2.1", "4.1.2"]
+    sev = ["CRITICAL", "SERIOUS", "MODERATE", "MINOR"]
+    files = []
+    for i in range(300):
+        name = (f"department-{i:03d}/" + "quarterly-accessibility-remediation-evidence-" * 5)[:196] + f"{i:03d}.docx"
+        issues = ([{"wcag": "SC_" + crits[(i // 5) % 40].replace(".", "_"), "severity": sev[i % 4],
+                    "detail": "Long finding text describing the barrier so that it wraps. " * 4, "page": 3}]
+                  if i % 5 == 0 else [])
+        files.append({"file": name, "status": "done", "compliant": 0 if issues else 1,
+                      "score": 40 + i % 60, "skipped_rules": 0, "issues": issues})
+    run = {**_RUN, "id": "long-fixture", "files": 300, "certifiable": 240}
+    out = _build(tmp_path, run=run, files=files)
+    data = out.read_bytes()
+    with pikepdf.open(str(out)) as pdf:
+        pages = len(pdf.pages)
+    chunks = pdftext(data).split("\f")[:pages]
+    assert 10 < pages < 120, pages
+
+    # The inventory starts on page 1 (it used to be pushed whole onto page 2) and its header
+    # row repeats on every page it spans.
+    inventory = [i for i, c in enumerate(chunks) if _re.search(r"department-\d{3}/", c)
+                 and "Your remediation guide" not in c and i < 20]
+    assert inventory[0] == 0, inventory[:3]
+    for i in inventory:
+        assert _re.search(r"File\s+Score\s+Certified", chunks[i]), f"no header row on page {i + 1}"
+
+    # Documents with nothing to act on are counted, not given 240 boilerplate guide blocks.
+    guide_text = " ".join("".join(chunks).split())
+    assert "240 other documents have no remaining item or recorded change" in guide_text
+    assert guide_text.count("Document version:") == 60
+
+    # Long names wrap rather than clip.
+    flat = _re.sub(r"\s+", "", pdftext(data, "-raw"))
+    assert _re.sub(r"\s+", "", files[-1]["file"]) in flat
+
+    # No stranded pages except the one before the guide (which deliberately starts a new page)
+    # and the last.
+    from test_report_render import page_fill
+    fills = page_fill(data, top_in=0.75, bottom_in=0.8)
+    guide = next(i for i, (_, words) in enumerate(fills) if "Your remediation guide" in words)
+    stranded = [(i + 1, round(f, 2)) for i, (f, _) in enumerate(fills)
+                if f < 0.6 and i not in (guide - 1, pages - 1)]
+    assert not stranded, stranded

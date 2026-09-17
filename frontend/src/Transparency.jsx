@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
-import { openTraceUrl, getTraceStatus, getScanTraces } from './api.js'
+import { openTraceUrl, getTraceStatus, getScanTraces, getScanReportFacts } from './api.js'
 import SegmentDrawer from './SegmentDrawer.jsx'
+import ReportModeMenu from './ReportModeMenu.jsx'
 import FileDrawer from './FileDrawer.jsx'
 import TracePanel from './TracePanel.jsx'
 import SessionPanel from './SessionPanel.jsx'
@@ -215,14 +216,25 @@ export function RuleBreakdown({ scanId, files }) {
     : { total: criteria.size, noun: 'criteria tracked for this engagement',
         question: `what do we track? — the ${criteria.size} criteria Mova iO follows, of the ${CORE_SCS.size} document core` }
   const [hideNA, setHideNA] = useState(true)   // default to hiding the N/A rows; the toggle reveals them
-  const [exporting, setExporting] = useState(false)
-  const doScanExport = async () => {
-    setExporting(true)
+  // Same server-facts path as Overview's scan report: the facts index is read to the end, the
+  // recorded baseline supplies "since the previous assessment", and the renderer's own outcome is
+  // returned so an HTML fallback is never reported as a PDF.
+  const [factsProgress, setFactsProgress] = useState(null)
+  const runScanReport = async (mode) => {
+    const [{ loadScanReportFacts, scanComparisonFromFacts }, { generateScanReport }] = await Promise.all([
+      import('./fileReportData.js'), import('./scanReport.js'),
+    ])
+    setFactsProgress({ loaded: 0, total: null, complete: false })
     try {
-      const { generateScanReport } = await import('./scanReport.js')
-      await generateScanReport({ scanId, files: files || [] })
-    } catch (e) { console.error('scan report export failed', e) }
-    finally { setTimeout(() => setExporting(false), 600) }
+      const got = await loadScanReportFacts(scanId, { getScanReportFacts, onProgress: setFactsProgress })
+      const cmp = scanComparisonFromFacts(got.facts, targetLevel)
+      return await generateScanReport({
+        scanId, files: files || [], mode,
+        facts: got.facts, factsDigest: got.facts?.factsDigest ?? null,
+        factsIndexComplete: got.complete, factsIncompleteReason: got.incompleteReason || got.factsError || null,
+        previous: cmp.previous, previousReason: cmp.previousReason, scope: cmp.scope,
+      })
+    } finally { setFactsProgress(null) }
   }
   useEffect(() => {
     if (!scanId) { setRows(null); return }
@@ -322,11 +334,11 @@ export function RuleBreakdown({ scanId, files }) {
                   title="Hide the criteria that don't apply to this file type (N/A) \u2014 show only the ones with a pass or fail result">
             {hideNA ? `\u2713 Hiding ${naCount} N/A` : `Hide N/A (${naCount})`}
           </button>
-          <button className="ghost small" style={{ marginLeft: 8, fontSize: 11 }} disabled={exporting}
-                  onClick={doScanExport}
-                  title="Export a scan-level accessibility report (PDF): conformance, WCAG failure heatmap, per-department breakdown, remediation throughput, HITL queue & a per-document appendix">
-            {exporting ? "\u23f3 Generating\u2026" : "\u2913 Export scan report"}
-          </button></span>
+          <span style={{ marginLeft: 8, fontSize: 11 }}>
+            <ReportModeMenu label="Export scan report" disabled={!scanId}
+                            progress={factsProgress && `Reading report evidence\u2026 ${factsProgress.loaded}${factsProgress.total != null ? ` of ${factsProgress.total}` : ''} document(s)`}
+                            formats={[{ key: 'pdf', label: 'PDF', run: runScanReport }]} />
+          </span></span>
       </div>
       <div className="rulerows">
         {shown.map((r) => {

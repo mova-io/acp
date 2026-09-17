@@ -1,4 +1,5 @@
 import RemediationAutomationLayout from './RemediationAutomationLayout.jsx'
+import ReportModeMenu from './ReportModeMenu.jsx'
 import { verifySavedRemediation } from './verifySavedRemediation.js'
 import { checkSelfRemediation } from './checkSelfRemediation.js'
 import useAutomaticReleaseStatus from './useAutomaticReleaseStatus.js'
@@ -1117,27 +1118,30 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
   const [reportBusy, setReportBusy] = useState(false)
   const [reportErr, setReportErr] = useState(null)
   const APPLIED_FIX_CAP = 200        // the server's LIMIT in list_applied_fixes; disclosed if hit
-  const downloadRemediationReport = async () => {
-    setReportBusy(true); setReportErr(null)
+  const [reportProgress, setReportProgress] = useState(null)
+  // The remediation report now has the same three modes as the other two report kinds — Summary,
+  // Reviewer packet, Full evidence — instead of one unlabelled "(PDF)" button whose content nobody
+  // could choose. ReportModeMenu owns the progress line and surfaces every refusal, including the
+  // render route's 409 "regenerate" when the evidence has moved on since the facts were read.
+  const runRemediationReport = async (mode) => {
+    setReportErr(null)
+    const sid = run?.id
+    setReportProgress({ loaded: 0, total: null, complete: false })
     try {
-      const sid = run?.id
-      const [diffs, fixes] = await Promise.all([
-        getScanRemediationDiffs(sid).catch(() => []),
+      const { gatherRemediationEvidence } = await import('./remediationReportData.js')
+      const [evidence, fixes] = await Promise.all([
+        gatherRemediationEvidence(sid, { onProgress: setReportProgress }),
         getAppliedFixes(sid).catch(() => []),
       ])
-      const diffsByFile = {}
-      ;(diffs || []).forEach((d) => { (diffsByFile[d.file] = diffsByFile[d.file] || []).push(d) })
       const { exportRemediationReport } = await import('./pdfReport.js')
-      await exportRemediationReport({
-        files, diffsByFile, appliedFixes: fixes || [], reviewByFile,
+      // The renderer's own outcome is RETURNED, not swallowed: the menu is what tells the reader
+      // whether a PDF exists, so a report that fell back to HTML must not reach it as a success.
+      return await exportRemediationReport({
+        ...evidence, mode, files, appliedFixes: fixes || [], reviewByFile,
         scanId: sid, level: run?.target || 'AA', org: run?.org || '',
         generatedAt: new Date().toISOString(), cappedAt: APPLIED_FIX_CAP,
       })
-    } catch (e) {
-      // A report that silently fails to download looks identical to one the user forgot to
-      // click. Say it, and keep it on screen.
-      setReportErr(`Report not generated: ${e?.message || e}`)
-    } finally { setReportBusy(false) }
+    } finally { setReportProgress(null) }
   }
 
   // R20 · CSV companion — same data as the PDF (shared buildRemediationModel), machine-readable.
@@ -1382,15 +1386,10 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
       <RemSection id="rem-docs" title="Documents" count={docList.length}
                   defaultOpen={false}>
         <div className="rem-sec-hd">
-          <button className="exportbtn" onClick={downloadRemediationReport} disabled={reportBusy}
-                  title="A signed record of every change applied, with a checkbox per item and how to verify it in Word / PowerPoint / Excel / Acrobat on Mac and Windows">
-            {reportBusy ? 'Generating…' : '⤓ Remediation report (PDF)'}
-          </button>
-          <button className="exportbtn" onClick={downloadRemediationCsvReport} disabled={reportBusy}
-                  title="The same changes as a machine-readable CSV — one row per document × criterion, for pulling into your own tracker">
-            {reportBusy ? 'Generating…' : '⤓ Changes (CSV)'}
-          </button>
-          {reportErr && <span style={{ fontSize: 12, color: 'var(--error-fg-strong)' }} role="alert">⚠ {reportErr}</span>}
+          {/* The report exports used to live here. This section is inside `runDetailSections`,
+              which is BUILT AND NEVER RENDERED — so the remediation report had no route into the
+              UI at all, in any state of the run. They now sit in the Review queue header, which is
+              mounted, and which is where a reviewer is when they want the record. */}
           <div className="triagesum">
             <span className="trstatchip inscope">{inscopeCount} in scope</span>
             <span className="trstatchip na">{naCount} N/A</span>
@@ -1707,6 +1706,21 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
               <span className="muted">{reviewProgress.resolved} of {reviewProgress.total} reviewed · tasks and change inspections</span>
             </div>
           )}
+          {/* The remediation report, in the same three modes as the document and scan reports
+              (Summary / Reviewer packet / Full evidence). It is mounted HERE, in the Review queue
+              header, because this is the section a reviewer is looking at when they want the
+              record — and because the section that used to hold it is never rendered. */}
+          <div className="rem-report-exports" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <ReportModeMenu label="Remediation report" disabled={!run?.id || reportBusy}
+                            disabledReason={run?.id ? null : 'Select a remediation run first.'}
+                            progress={reportProgress && `Reading report evidence… ${reportProgress.loaded}${reportProgress.total != null ? ` of ${reportProgress.total}` : ''} document(s)`}
+                            formats={[{ key: 'pdf', label: 'PDF', run: runRemediationReport }]} />
+            <button className="exportbtn" onClick={downloadRemediationCsvReport} disabled={reportBusy}
+                    title="The same changes as a machine-readable CSV — one row per document × criterion, for pulling into your own tracker">
+              {reportBusy ? 'Generating…' : '⤓ Changes (CSV)'}
+            </button>
+            {reportErr && <span style={{ fontSize: 12, color: 'var(--error-fg-strong)' }} role="alert">⚠ {reportErr}</span>}
+          </div>
           {/* Reviewer analytics (vision #39) — real counts from hitl_events, not a fabricated score:
               approval rate, how often the reviewer edited the AI draft (the calibration signal), and
               the average review time already computed by measuredReviewTime. */}

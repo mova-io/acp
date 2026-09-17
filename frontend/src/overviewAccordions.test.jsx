@@ -196,7 +196,11 @@ describe('report exports are consolidated', () => {
     const labels = [...menu.querySelectorAll('.reports-menu-items button')]
       .map((button) => button.textContent)
     expect(labels).toContain('Quarterly governance report')
-    expect(labels).toContain('Scan report')
+    // The scan report is offered in the three contract modes (ReportModeMenu, inline).
+    const named = [...menu.querySelectorAll('.reports-menu-items button')]
+      .map((button) => button.getAttribute('aria-label'))
+    expect(named).toEqual(expect.arrayContaining(['Summary — PDF', 'Reviewer packet — PDF', 'Full evidence — PDF']))
+    expect(menu.querySelector('[role="group"][aria-label="Scan report"]')).toBeTruthy()
     expect(labels).toContain('Findings (CSV)')
     expect(container.querySelectorAll('.dashtoolbar > button')).toHaveLength(0)
   })
