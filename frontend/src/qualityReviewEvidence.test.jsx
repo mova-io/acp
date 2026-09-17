@@ -80,3 +80,52 @@ it('labels source-grounded AI approval as judgment rather than verification', as
   expect(container.textContent).toContain('not proof of semantic correctness or full accessibility')
   expect(container.textContent).not.toContain('Source meaning: independently checked')
 })
+
+it.each([true, false])('pairs recorded saved changes with explicit verification %s', async validated => {
+ const { container } = await render(QualityReviewEvidence, { finding: { autoApplied: true, validated,
+  rule_id: '1.3.2', before: 'Footer, heading, body', after: 'Heading, body, footer' } })
+ expect(container.querySelector('[aria-label="Recorded before and after"]').textContent).toContain('Heading, body, footer')
+ expect(container.textContent).toContain(validated ? 'recorded checks passed' : 'verification not confirmed')
+ expect(container.textContent).toContain('does not demonstrate screen-reader order')
+})
+it('does not turn proposal validation into saved-document verification', async () => {
+ const { container } = await render(QualityReviewEvidence, { finding: { validated: true,
+  proposals: [{ proposed_value: 'A chart', quality_source_review: {status:'ai_reviewed'} }] } })
+ expect(container.textContent).toContain('Proposed change · not a saved result')
+ expect(container.textContent).not.toContain('Saved change · recorded checks passed')
+})
+it('shows a structured table proposal as a plan rather than a fabricated table image', async () => {
+ const { container } = await render(QualityReviewEvidence, { finding: { rule_id:'1.3.1', proposals:[{
+  kind:'pdf-table-header-scope', locator:'pdf:struct:1', subject_text:'Year',
+  proposed_value: JSON.stringify({op:'header-scope',scope:'Column'}),
+ }] } })
+ expect(container.textContent).toContain('Associate “Year” with its column')
+ expect(container.textContent).toContain('does not render its accessibility tags')
+ expect(container.querySelector('img')).toBeNull()
+})
+it('mounts recorded saved comparisons in the real inbox without demanding approval', async () => {
+ const { container } = await render(RemediationInbox, { queue:[{ id:'af:table', file:'table.docx',
+  rule_id:'1.3.1', autoApplied:true, inspectionOnly:true, validated:true, before:'Header not associated', after:'Column header associated' }],
+  decisions:{}, initialTab:'completed' })
+ expect(container.querySelector('[aria-label="Recorded before and after"]')).not.toBeNull()
+ expect(container.textContent).toContain('Column header associated')
+ expect(container.textContent).toContain('inspection is required')
+})
+it('uses actual applied record evidence rather than relabelling a proposal as saved', async () => {
+ const { container } = await render(QualityReviewEvidence, { finding:{ applied:true, after:'Unapplied proposed caption',
+  proposals:[{proposed_value:'Unapplied proposed caption'}], _raw:{applied:true, approved_value:'Saved edited caption'} } })
+ const saved = container.querySelector('[aria-label="Recorded before and after"]')
+ expect(saved.textContent).toContain('Saved edited caption')
+ expect(saved.textContent).not.toContain('Unapplied proposed caption')
+ expect(container.textContent).toContain('Saved change · verification not confirmed')
+})
+it('never treats a verified flag without application as a saved change', async () => {
+ const { container } = await render(QualityReviewEvidence, { finding:{verified:true, proposals:[{proposed_value:'Draft'}]} })
+ expect(container.textContent).toContain('Proposed change · not a saved result')
+ expect(container.querySelector('[aria-label="Recorded before and after"]')).toBeNull()
+})
+it('does not claim an auto inspection proposal is its saved excerpt', async () => {
+ const { container } = await render(QualityReviewEvidence, { finding:{autoApplied:true, after:'Proposal only',
+  _raw:{inspection_only:true}, proposals:[{proposed_value:'Proposal only'}]} })
+ expect(container.querySelector('[aria-label="Recorded before and after"]').textContent).toContain('Saved change excerpt unavailable')
+})

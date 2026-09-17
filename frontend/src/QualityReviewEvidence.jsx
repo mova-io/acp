@@ -5,10 +5,33 @@ import './qualityReviewEvidence.css'
 // Evidence is the recorded source, never an image generated from the proposed text.
 export default function QualityReviewEvidence({ finding, editedValue }) {
   const proposals = proposalsFor(finding)
-  if (!proposals.length) return null
+  const record = finding?._raw || finding || {}
+  const applied = finding?.applied === true || finding?.applied === 1 || record.applied === true || record.applied === 1
+  const saved = finding?.autoApplied === true || applied
+  // Raw queue 'after' may be the first proposal, even after another value was
+  // applied. Only autoFixRows diffs or the applied record's approved_value are saved excerpts.
+  const savedValue = finding?.autoApplied === true && !finding?._raw ? finding.after : applied ? record.approved_value : null
+  if (!proposals.length && !saved) return null
+  const criterion = String(finding.rule_id || finding.ruleId || '')
+  const guidance = criterion === '1.3.2'
+    ? 'Reading order: compare the recorded sequence with the original page. A text excerpt does not demonstrate screen-reader order.'
+    : criterion === '1.3.1' || proposals.some(p => /table/i.test(p.kind || ''))
+      ? 'Tables and structure: check header relationships and reading order in the saved document. A text preview does not render its accessibility tags.'
+      : 'Check labels, years, values, signs and units against the source. If anything is unclear, edit the fix or leave it for review.'
+  const verified = saved && (finding.validated === true || finding.validated === 1 || record.validated === true || record.validated === 1 || record.verified === true)
+
   return <section className="quality-review-evidence" aria-label="Source evidence and proposed fixes">
     <h4>Compare with the source</h4>
-    <p>Check labels, years, values, signs and units against the source. If anything is unclear, edit the fix or leave it for review.</p>
+    <p>{guidance}</p>
+    <div className="quality-review-verification" role="status">
+      <strong>{saved ? verified ? 'Saved change · recorded checks passed' : 'Saved change · verification not confirmed' : 'Proposed change · not a saved result'}</strong>
+      <p>{saved ? verified ? 'The recorded checks passed for this change. This does not certify the whole document or verify every aspect of its meaning.' : 'A change was recorded, but this record does not confirm it resolved the finding.' : 'The preview shows a suggestion. Approval, writing the corrected copy, and verification are separate steps.'}</p>
+    </div>
+    {saved && <article aria-label="Recorded before and after">
+      <div><strong>Before · recorded source</strong><p>{typeof finding.before === 'string' && finding.before ? finding.before : 'Source excerpt unavailable. Open the original document to compare.'}</p></div>
+      <div><strong>After · recorded saved change</strong><p>{typeof savedValue === 'string' && savedValue ? savedValue : 'Saved change excerpt unavailable. Open the corrected document to inspect it.'}</p></div>
+    </article>}
+
     {proposals.map((proposal, index) => {
       const needsReview = proposal.review_status === 'needs_review' || proposal.chart_review?.status === 'needs_review'
       const imageFinding = !!proposal.thumb || /image|chart|figure|picture/i.test(proposal.kind || '') || /1[.]1[.]1/.test(finding.rule_id || finding.ruleId || '')
