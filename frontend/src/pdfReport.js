@@ -772,11 +772,11 @@ const ACR = [
     ['1.3.1', 'Info & Relationships', 'A', 'Supports', 'Headings, lists, tables, form labels and landmarks (header/main/nav).'],
     ['1.3.2', 'Meaningful Sequence', 'A', 'Supports', 'DOM order matches the visual order.'],
     ['1.4.1', 'Use of Color', 'A', 'Supports', 'Graph status uses glyphs + colour; legends carry text labels.'],
-    ['1.4.3', 'Contrast (Minimum)', 'AA', 'Supports', 'Text corrected to at least 4.5:1.'],
+    ['1.4.3', 'Contrast (Minimum)', 'AA', 'Partially Supports', 'Known failure: the September 2026 self-assessment reported insufficient contrast on the update banner text. A fix is implemented locally; it is not yet deployed or verified in a deployed build.'],
     ['1.4.4 / 1.4.10', 'Resize / Reflow', 'AA', 'Supports', 'Responsive; zoom is not blocked.'],
-    ['1.4.11', 'Non-text Contrast', 'AA', 'Supports', 'UI marks and graph dots corrected to at least 3:1.'],
+    ['1.4.11', 'Non-text Contrast', 'AA', 'Partially Supports', 'UI marks and graph dots corrected to at least 3:1. On the update banner, the dismiss glyph and focus outline computed below 3:1 from source; a fix is pending deployed-build verification.'],
     ['1.4.12', 'Text Spacing', 'AA', 'Supports', 'No clipping when spacing is overridden.'],
-    ['1.4.13', 'Content on Hover or Focus', 'AA', 'Not Applicable', 'No persistent hover/focus content in the UI.'],
+    ['1.4.13', 'Content on Hover or Focus', 'AA', 'Needs verification', 'Applies: tooltips open on hover and focus. Dismissible, hoverable and persistent behaviour not yet tested.'],
   ]],
   ['Operable', [
     ['2.1.1', 'Keyboard', 'A', 'Supports', 'All controls operable; graph uses roving tabindex (arrows / Enter / Escape).'],
@@ -796,8 +796,8 @@ const ACR = [
     ['3.3.1 / 3.3.2', 'Error Identification / Labels', 'A', 'Supports', 'Inputs labeled; forms are minimal.'],
   ]],
   ['Robust', [
-    ['4.1.2', 'Name, Role, Value', 'A', 'Supports', 'Correct roles and accessible names on custom controls.'],
-    ['4.1.3', 'Status Messages', 'AA', 'Supports', 'aria-live / role=status on scan, chat, monitor and assess results.'],
+    ['4.1.2', 'Name, Role, Value', 'A', 'Partially Supports', 'Correct roles and accessible names on custom controls. DOM-level tests found tab-pattern gaps in several in-page tab sets (fix pending deployment); not verified with a screen reader.'],
+    ['4.1.3', 'Status Messages', 'AA', 'Needs verification', 'aria-live / role=status markup is present on scan, chat, monitor and assess results; announcement has not been verified with a screen reader.'],
   ]],
 ]
 export async function exportConformanceReport(d = {}) {
@@ -806,13 +806,13 @@ export async function exportConformanceReport(d = {}) {
   p.cover({
     title: 'Accessibility Conformance Report',
     subtitle: `${d.org || 'mova.io Accessibility Platform'} · UI conformance + document coverage`,
-    meta: [`WCAG 2.1 + 2.2 · ${date}`, 'Evaluation: automated (axe-core, all views) + manual code / semantic review'],
+    meta: [`WCAG 2.1 + 2.2 · ${date}`, 'Evaluation: partial automated checks (axe-core) + code / DOM-level review — no screen-reader testing'],
   })
   p.heading('Summary')
   p.text('This report covers two things: (1) the conformance of the mova.io Accessibility Platform’s own user interface, and (2) the WCAG coverage the platform provides for the documents it processes.')
-  p.text('The platform UI conforms to WCAG 2.1 Level AA on all applicable Level A and AA success criteria, verified by automated and manual evaluation. Two issues found during manual review (an unannounced status update and a missing navigation landmark) were remediated.')
+  p.text('Conformance of the platform UI to WCAG 2.1 Level AA is not established. A known 1.4.3 contrast failure on the update banner has a locally implemented fix that is not yet deployed or verified, several criteria lack assistive-technology evidence, and no screen-reader evaluation has been performed. Two issues found during an earlier manual review (an unannounced status update and a missing navigation landmark) were remediated.')
   p.heading('Part 1 · Platform UI conformance (WCAG 2.1 AA)')
-  p.text('Conformance key:  Supports · Partially Supports · Not Applicable', { size: 9, color: MUTED, gapAfter: 4 })
+  p.text('Conformance key:  Supports · Partially Supports · Not Applicable · Needs verification (evidence insufficient to claim either way). Rows without recorded manual or assistive-technology evidence should be read as needing verification.', { size: 9, color: MUTED, gapAfter: 4 })
   for (const [principle, rows] of ACR) {
     p.heading(principle)
     p.table(['Criterion', 'Lvl', 'Conformance', 'Notes'],
@@ -842,14 +842,14 @@ export async function exportConformanceReport(d = {}) {
   p.table(['Conformance level', 'Criteria', 'Covered', 'Status'],
     [
       ['Level A · must-have', String(byLevel.A.tot), `${byLevel.A.cov} / ${byLevel.A.tot}`, byLevel.A.cov === byLevel.A.tot ? 'Fully covered' : `${byLevel.A.tot - byLevel.A.cov} in progress`],
-      ['Level AA · legal target', String(byLevel.AA.tot), `${byLevel.AA.cov} / ${byLevel.AA.tot}`, byLevel.AA.cov === byLevel.AA.tot ? 'Fully covered — Level AA conformance reached' : `${byLevel.AA.tot - byLevel.AA.cov} in progress`],
+      ['Level AA · legal target', String(byLevel.AA.tot), `${byLevel.AA.cov} / ${byLevel.AA.tot}`, byLevel.AA.cov === byLevel.AA.tot ? 'Every criterion has a coverage method' : `${byLevel.AA.tot - byLevel.AA.cov} in progress`],
       ['Level AAA · optional', String(byLevel.AAA.tot), `${byLevel.AAA.cov} / ${byLevel.AAA.tot}`, `${byLevel.AAA.tot - byLevel.AAA.cov} optional (human-produced media) remaining`],
     ],
     [p.CW - 70 - 70 - 210, 70, 70, 210])
-  p.text('Every legally-required criterion (Level A and AA) is covered — by deterministic auto-fix, AI, the partner web scanner, or a human-in-the-loop review workflow. The full per-criterion matrix is available as the accompanying coverage matrix (Excel) and method deck (PowerPoint).', { size: 9.5, gapAfter: 6 })
+  p.text('"Covered" means the platform has a capability for the criterion — deterministic auto-fix, AI, the partner web scanner, or a human-in-the-loop review workflow — as classified in the capability matrix. It is capability coverage, not conformance: it does not mean any individual output document conforms to WCAG at Level A or AA, which depends on that document\'s own assessment and review. The full per-criterion matrix is available as the accompanying coverage matrix (Excel) and method deck (PowerPoint).', { size: 9.5, gapAfter: 6 })
 
   p.heading('Evaluation method & scope')
-  p.text('Part 1 (UI conformance): axe-core across every view (zero Level A/AA violations) plus manual accessibility-tree review, keyboard operation, focus management, and live-region announcements. Part 2 (document coverage): each success criterion is classified by what the platform’s detect-and-remediate engines do today — deterministic auto-fix, AI, partner web scanner, or human-in-the-loop review.', { size: 9.5, gapAfter: 6 })
+  p.text('Part 1 (UI assessment): automated axe-core checks and source / DOM-level review provide partial evidence only; automated checks do not establish conformance. The September 2026 self-assessment reported a 1.4.3 contrast failure on the update banner, which requires deployed-build retesting. Screen-reader testing has not been performed, and complete workflow, keyboard, focus and screen-reader announcement evidence remains pending. Part 2 (document coverage): each success criterion is classified by what the platform’s detect-and-remediate engines do today — deterministic auto-fix, AI, partner web scanner, or human-in-the-loop review.', { size: 9.5, gapAfter: 6 })
   p.text('Not yet performed: formal screen-reader user testing (NVDA / JAWS / VoiceOver) — recommended to finalize a signed conformance statement.', { size: 9.5, color: AMBER })
   p.save(d.filename || 'mova-accessibility-conformance-report.pdf')
 }

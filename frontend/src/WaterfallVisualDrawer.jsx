@@ -54,7 +54,7 @@ function ScopedDrawer({ stageTitle = 'AI waterfall', provider, model, status,
       </div>
       <div className="waterfall-visual-drawer__tabs" role="tablist" aria-label="Waterfall stage details">
         {TABS.map((name, index) => <button key={name} type="button" role="tab"
-          id={`${id}-${name}-tab`} aria-controls={`${id}-${name}-panel`} aria-selected={tab === name}
+          id={`${id}-${name}-tab`} aria-controls={tab === name ? `${id}-${name}-panel` : undefined} aria-selected={tab === name}
           tabIndex={tab === name ? 0 : -1} ref={el => { tabsRef.current[index] = el }}
           onClick={() => selectTab(name)} onKeyDown={event => navigate(event, index)}>{name}</button>)}
       </div>

@@ -6,6 +6,7 @@ import ReviewMemory from './ReviewMemory.jsx'
 import CapacitySchedule from './CapacitySchedule.jsx'
 import PeopleAccess from './PeopleAccess.jsx'
 import WorkspaceRoles from './WorkspaceRoles.jsx'
+import { handleWorkflowTabKeyDown } from './workflowTabs.js'
 
 // What a write is allowed to claim when the API layer marked its own answer `simulated`.
 // A simulated response never reached a server, so it is neither a success nor a failure — the
@@ -1235,6 +1236,14 @@ export default function Settings({ onClose, files = [], onDelegationChange, me =
   const [tab, setTab] = useState('users')
   const panelRef = useRef(null)
   useDialog(panelRef, onClose)
+  // ARIA tabs: one Tab stop (the selected tab), arrows/Home/End move and activate, and each tab
+  // names the single panel below, which is labelled by whichever tab is selected.
+  const sectionTab = (key) => ({
+    role: 'tab', id: `settings-tab-${key}`, 'aria-selected': tab === key,
+    'aria-controls': 'settings-panel', tabIndex: tab === key ? 0 : -1,
+    onKeyDown: handleWorkflowTabKeyDown,
+    className: tab === key ? 'fchip on' : 'fchip', onClick: () => setTab(key),
+  })
   return (
     <div className="setoverlay" role="dialog" aria-modal="true" aria-label="Platform settings" onClick={onClose}>
       <div className="setpanel" ref={panelRef} tabIndex={-1} onClick={(e) => e.stopPropagation()}>
@@ -1248,25 +1257,25 @@ export default function Settings({ onClose, files = [], onDelegationChange, me =
         {/* Access, worker and AI governance live together here. Operational telemetry remains in
             Live Operations; this surface controls whether off-box AI calls may happen at all. */}
         <div className="subtabs" role="tablist" aria-label="Settings sections">
-          <button role="tab" aria-selected={tab === 'owners'} className={tab === 'owners' ? 'fchip on' : 'fchip'} onClick={() => setTab('owners')}>Owners</button>
-          <button role="tab" aria-selected={tab === 'users'} className={tab === 'users' ? 'fchip on' : 'fchip'} onClick={() => setTab('users')}>Users</button>
+          <button {...sectionTab('owners')}>Owners</button>
+          <button {...sectionTab('users')}>Users</button>
           {/* Beside People, per PRD §8's "a dedicated Roles tab beside People". They are two
               halves of one job — a role is designed here and handed out there — and separating
               them across screens is how an administrator assigns a role they have not read. */}
-          <button role="tab" aria-selected={tab === 'roles'} className={tab === 'roles' ? 'fchip on' : 'fchip'} onClick={() => setTab('roles')}>Roles</button>
-          <button role="tab" aria-selected={tab === 'mydata'} className={tab === 'mydata' ? 'fchip on' : 'fchip'} onClick={() => setTab('mydata')}>My Data</button>
-          <button role="tab" aria-selected={tab === 'myscope'} className={tab === 'myscope' ? 'fchip on' : 'fchip'} onClick={() => setTab('myscope')}>My Scope</button>
+          <button {...sectionTab('roles')}>Roles</button>
+          <button {...sectionTab('mydata')}>My Data</button>
+          <button {...sectionTab('myscope')}>My Scope</button>
           {/* Scheduling is the single capacity-management surface. */}
-          <button role="tab" aria-selected={tab === 'scheduling'} className={tab === 'scheduling' ? 'fchip on' : 'fchip'} onClick={() => setTab('scheduling')}>Scheduling</button>
-          <button role="tab" aria-selected={tab === 'release'} className={tab === 'release' ? 'fchip on' : 'fchip'} onClick={() => setTab('release')}>Release</button>
-          <button role="tab" aria-selected={tab === 'ai'} className={tab === 'ai' ? 'fchip on' : 'fchip'} onClick={() => setTab('ai')}>AI Governance</button>
+          <button {...sectionTab('scheduling')}>Scheduling</button>
+          <button {...sectionTab('release')}>Release</button>
+          <button {...sectionTab('ai')}>AI Governance</button>
           {/* ADR 0021's "Settings → Review Memory". The tab renders for everyone because GET
               /org-memory has no admin gate — seeing which house style shaped a draft is not an
               admin privilege — and ReviewMemory itself withholds every write control unless
               me?.is_admin, matching the backend's _require_admin on all three writes. */}
-          <button role="tab" aria-selected={tab === 'memory'} className={tab === 'memory' ? 'fchip on' : 'fchip'} onClick={() => setTab('memory')}>Review Memory</button>
+          <button {...sectionTab('memory')}>Review Memory</button>
         </div>
-        <div className="setbody">
+        <div className="setbody" id="settings-panel" role="tabpanel" aria-labelledby={`settings-tab-${tab}`}>
           {tab === 'owners' && <OwnerDelegate files={files} onChanged={onDelegationChange} />}
           {tab === 'users' && <PeopleAccess />}
           {tab === 'roles' && <WorkspaceRoles />}
