@@ -33,10 +33,11 @@ it('balances chart rows and keeps Assess-size headings even inside the waterfall
  expect(css).toMatch(/\.wf-card \.wd-ai-dashboard \.wd-chart h3\s*\{[^}]*font-family:var\(--font-ui\);[^}]*font-size:13px/)
  expect(css).not.toContain('.wd-ai-dashboard > .wd-charts { display:contents; }')
 })
-it('preserves disabled AI and scopes usage to the exact current run', async () => {
+it('keeps disabled-run evidence visible without enabling metrics requests', async () => {
  const {root,container}=createTestRoot()
  await act(async () => root.render(<CloudAIActivity scanId="s" batchId="r" aiEnabled={false} live/>))
- expect(container.textContent).toBe('')
+ expect(container.textContent).toContain('Saved mode unavailable')
+ expect(container.textContent).not.toContain('AI usage · this run')
  expect(useMetrics).toHaveBeenLastCalledWith(expect.objectContaining({scanId:'s',batchId:'r',enabled:false}))
 })
 

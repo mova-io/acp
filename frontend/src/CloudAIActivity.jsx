@@ -1,3 +1,4 @@
+import QualityEvidenceSummary from './QualityEvidenceSummary.jsx'
 import useWaterfallDrawerMetrics from './useWaterfallDrawerMetrics.js'
 import { ActivityTrend, ProcessingPace, ContributionBars, SettledSpend } from './WaterfallDrawerCharts.jsx'
 import './waterfall-drawer-charts.css'
@@ -47,10 +48,11 @@ export function LocalAIRequestActivity({ data }) {
     </div>
   </section>
 }
-export default function CloudAIActivity({ scanId, batchId, live, paused, aiEnabled }) {
+export default function CloudAIActivity({ scanId, batchId, live, paused, aiEnabled, view, verifiedFindings }) {
   const metrics = useWaterfallDrawerMetrics({ scanId, batchId, scope: {}, live: live && !paused, enabled: aiEnabled !== false })
-  if (aiEnabled === false) return null
+  if (aiEnabled === false) return <QualityEvidenceSummary view={view} verifiedFindings={verifiedFindings} />
   return <section className="wd-ai-usage" aria-label="AI usage for this remediation run">
+    <QualityEvidenceSummary view={view} metrics={metrics.data} verifiedFindings={verifiedFindings} />
     <h3>AI usage · this run</h3>
     <p>Governed model attempts appear in the charts; linked local AI requests appear below. Calls without a run link are excluded, including some local AI activity. Select a waterfall model below for its individual evidence.</p>
     {metrics.loading && !metrics.data && <p role="status">Loading AI usage…</p>}
