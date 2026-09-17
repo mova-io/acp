@@ -81,21 +81,28 @@ describe('HTML certification report dogfoods ACP’s own checks', () => {
 
   it('renders the same section headings the PDF produces', () => {
     const doc = parseDoc(certificationHtml(sampleData()))
-    const headings = [...doc.querySelectorAll('h2')].map((h) => h.textContent)
+    // Section names follow the evidence-truth vocabulary: "Executive summary" became the
+    // Decision summary, "Compliance checklist" became "Checklist by area" (it no longer prints
+    // "Pass" over unchecked rows), and "Conformance statement" became "What this report is, and
+    // is not" (ACP does not certify — a64142c1). Sub-sections render as h3.
+    const headings = [...doc.querySelectorAll('h2, h3')].map((h) => h.textContent)
     expect(headings).toEqual(expect.arrayContaining([
-      'Executive summary', 'Result', 'Coverage at a glance', 'What ACP changed',
-      'Compliance checklist', 'Human review — how to verify', 'Manual verification guide',
-      'Full WCAG coverage', 'Audit trail', 'Conformance statement',
+      'Decision summary', 'Document identity', 'Since the previous assessment', 'Changes to confirm',
+      'Remaining work', 'Result', 'Coverage at a glance', 'What ACP changed',
+      'Checklist by area', 'Human review — how to verify', 'Manual verification guide',
+      'Complete evidence appendix', 'Full WCAG coverage', 'Audit trail', 'What this report is, and is not',
     ]))
   })
 
-  it('reflects a fully-conformant file in the conformance statement', () => {
+  it('reflects a file with nothing outstanding in the closing statement', () => {
     const clean = sampleData()
     clean.rows = clean.rows.filter((r) => r.outcome === 'PASS')
     clean.score = 100
     const doc = parseDoc(certificationHtml(clean))
     const failures = aaRules.flatMap((m) => m.check(doc))
     expect(failures).toEqual([])
-    expect(doc.body.textContent).toContain('meets all')
+    // Was toContain('meets all') — a conformance claim the report is not in a position to make.
+    expect(doc.body.textContent).toContain('No outstanding items')
+    expect(doc.body.textContent).not.toMatch(/certified|meets the requirements/i)
   })
 })

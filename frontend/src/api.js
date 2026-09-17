@@ -645,6 +645,17 @@ export const getFileRemediationDiffs = (scanId, file, { strict = false } = {}) =
   return fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/files/${encodeURIComponent(file)}/remediation-diffs`,
                { headers: headers() }).then(j).catch(error => { if (strict) throw error; return [] })
 }
+// Raw Response (blob body) for the accessible server renderer; null in SIM (no server).
+export const postReportRender = (scanId, body) => (SIM ? Promise.resolve(null)
+  : fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/report-render`, { method: 'POST', headers: headers({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) }))
+// Versioned reviewer decisions on saved changes (api/routes/change_review.py). Real mode only —
+// changeReview.js owns the SIM behaviour (local, clearly unsaved), so these never fake a server.
+export const fetchChangeReviews = (scanId, file) =>
+  fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/files/${encodeURIComponent(file)}/change-reviews`,
+        { headers: headers(), cache: 'no-store' }).then(j)
+export const putChangeReview = (scanId, file, changeId, body) =>
+  fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/files/${encodeURIComponent(file)}/change-reviews/${encodeURIComponent(changeId)}`,
+        { method: 'PUT', headers: headers({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) }).then(j)
 // Scan-wide before→after evidence — every verified-cleared fix across all files, so the
 // Remediation view can group REAL applied fixes by rule/category without fabricating counts.
 // Covers all fix types (reading order, titles, headings, tables), unlike applied-fixes

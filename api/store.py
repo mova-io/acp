@@ -5912,8 +5912,9 @@ class Store:
             file_published_count = (self._db.fetchone(cur) or {}).get("n") or 0
 
             self._db.execute(cur,
-                "SELECT kind, COUNT(*) AS n FROM scan_decisions WHERE scan_id=%s GROUP BY kind",
-                (scan_id,))
+                "SELECT kind, COUNT(*) AS n FROM scan_decisions WHERE scan_id=%s "
+                "AND kind NOT LIKE %s GROUP BY kind",
+                (scan_id, self.CHANGE_REVIEW_KIND_PREFIX + "%"))
             review_counts = {r["kind"]: r["n"] for r in self._db.fetchall(cur)}
 
         assessable_count = estate_count - excluded_count if estate_count else assessed_count
@@ -5964,10 +5965,17 @@ class Store:
         }
 
     # ── Per-scan decision snapshots (PRD: time-travel) ──
+    # Reviewer verdicts on individual saved changes ride scan_decisions under this kind prefix
+    # (api/routes/change_review.py). They are review RECORDS about an artifact, not intent that
+    # drives remediation or triage, so every generic reader below leaves them out.
+    CHANGE_REVIEW_KIND_PREFIX = "change_review:"
+
     def get_decisions(self, scan_id: str, owner: str | None = None) -> dict:
         """All decisions for a scan as {file: {kind: value}} (kind = 'triage' | 'action').
-        Owner-scoped to match the scan's per-user isolation."""
-        where, params = "scan_id=%s", [scan_id]
+        Owner-scoped to match the scan's per-user isolation. Excludes ``change_review:`` kinds:
+        consumers of this map (time-travel restore, assignment inbox, release selection) key on
+        the fixed kinds and must not see per-change reviewer records."""
+        where, params = "scan_id=%s AND kind NOT LIKE %s", [scan_id, self.CHANGE_REVIEW_KIND_PREFIX + "%"]
         if owner:
             where += " AND owner_email=%s"; params.append(owner)
         with self._db.cursor() as cur:
@@ -5992,7 +6000,9 @@ class Store:
         import json as _json
 
         selected = {str(file) for file in files}
-        decision_where, params = "scan_id=%s", [scan_id]
+        # change_review: rows are reviewer verdicts on already-saved edits; recording one must
+        # not change what remediation would do, so it must not change this digest either.
+        decision_where, params = "scan_id=%s AND kind NOT LIKE %s", [scan_id, self.CHANGE_REVIEW_KIND_PREFIX + "%"]
         if owner is not None:
             decision_where += " AND owner_email=%s"
             params.append(owner)
@@ -6040,6 +6050,19 @@ class Store:
                     "scan_decisions": saved, "review_decisions": reviewed}
         encoded = _json.dumps(document, sort_keys=True, separators=(",", ":"), default=str)
         return _hashlib.sha256(encoded.encode()).hexdigest()
+
+    def get_change_reviews(self, scan_id: str, file: str, owner: str | None = None) -> dict:
+        """Reviewer verdicts for one file as {kind: {value, updated_at}} (kinds carry the
+        ``change_review:`` prefix). Owner-scoped like get_decisions."""
+        where = "scan_id=%s AND file=%s AND kind LIKE %s"
+        params = [scan_id, file, self.CHANGE_REVIEW_KIND_PREFIX + "%"]
+        if owner:
+            where += " AND owner_email=%s"; params.append(owner)
+        with self._db.cursor() as cur:
+            self._db.execute(cur, f"SELECT kind,value,updated_at FROM scan_decisions WHERE {where}",
+                             tuple(params))
+            rows = self._db.fetchall(cur)
+        return {r["kind"]: {"value": r["value"], "updated_at": r["updated_at"]} for r in rows}
 
     def save_decision(self, scan_id: str, file: str, kind: str, value: str,
                       owner: str | None, when: str) -> None:

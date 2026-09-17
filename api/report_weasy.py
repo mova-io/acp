@@ -41,9 +41,12 @@ to close them. See the addendum to docs/adr/0034.
 from __future__ import annotations
 
 import base64
+import re
+from functools import lru_cache
 from pathlib import Path
 
 from jinja2 import Environment, BaseLoader
+from markupsafe import Markup
 
 # The content model is imported, never re-derived. Two renderers computing "how many files are
 # certified" from the same inputs is two chances to disagree, and the disagreement would show up
@@ -87,24 +90,82 @@ def _score_ring_svg(score: int) -> str:
     )
 
 
+# Chart geometry. The label sits ABOVE its bar across the full chart width rather than in a
+# fixed 130px column to the left: the column version right-aligned "1.4.3 Contrast (Minimum)"
+# into 124px and clipped its first characters off the image (".4.3 Contrast (Minimum)" on the
+# printed page). Labels are wrapped by MEASURED width, using the metrics of the bundled DejaVu
+# Sans — the widest face in the stack — so the wrap is conservative for Liberation/Arial too.
+BARS_W = 560
+_BAR_LABEL_PX = 10
+_BAR_LINE_H = 13
+_BAR_H = 12
+_BAR_GAP = 8
+_BAR_VALUE_W = 48
+_FONT_FILE = Path(__file__).resolve().parent / "assets" / "fonts" / "DejaVuSans.ttf"
+
+
+@lru_cache(maxsize=1)
+def _label_font():
+    from PIL import ImageFont
+    return ImageFont.truetype(str(_FONT_FILE), _BAR_LABEL_PX)
+
+
+def text_width(text: str) -> float:
+    """Rendered width in px at the chart's label size (DejaVu Sans metrics)."""
+    return float(_label_font().getlength(str(text)))
+
+
+def _wrap_label(text: str, width: float) -> list[str]:
+    words, lines, line = str(text).split(), [], ""
+    for word in words:
+        candidate = f"{line} {word}".strip()
+        if text_width(candidate) <= width:
+            line = candidate
+            continue
+        if line:
+            lines.append(line)
+        # A single word wider than the chart (a long identifier) is broken by characters.
+        while text_width(word) > width:
+            cut = len(word)
+            while cut > 1 and text_width(word[:cut]) > width:
+                cut -= 1
+            lines.append(word[:cut])
+            word = word[cut:]
+        line = word
+    if line:
+        lines.append(line)
+    return lines or [""]
+
+
+def _bars_layout(rows: list[tuple[str, int]]) -> tuple[list[dict], int]:
+    usable = BARS_W - 4
+    y, laid = 6, []
+    for name, count in rows:
+        lines = _wrap_label(name, usable * 0.95)
+        laid.append({"name": name, "count": count, "lines": lines, "y": y})
+        y += len(lines) * _BAR_LINE_H + _BAR_H + _BAR_GAP + 3
+    return laid, max(40, y + 4)
+
+
 def _bars_svg(rows: list[tuple[str, int]]) -> str:
-    row_h, label_w, bar_max_w = 22, 130, 220
-    height = max(60, len(rows) * row_h + 20)
-    total_w = label_w + bar_max_w + 50
+    laid, height = _bars_layout(rows)
+    bar_max_w = BARS_W - _BAR_VALUE_W - 4
     max_val = max((c for _, c in rows), default=1) or 1
     out = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{total_w}" height="{height}" '
-        f'viewBox="0 0 {total_w} {height}" '
-        f'font-family="Liberation Sans, DejaVu Sans, sans-serif">'
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{BARS_W}" height="{height}" '
+        f'viewBox="0 0 {BARS_W} {height}" '
+        f'font-family="DejaVu Sans, Liberation Sans, sans-serif">'
     ]
-    for i, (name, count) in enumerate(rows):
-        y = 10 + i * row_h
-        bar_w = int(bar_max_w * count / max_val)
+    for row in laid:
+        y = row["y"]
+        for n, line in enumerate(row["lines"]):
+            out.append(f'<text x="2" y="{y + 10 + n * _BAR_LINE_H}" font-size="{_BAR_LABEL_PX}" '
+                       f'fill="#46303F">{_x(line)}</text>')
+        bar_y = y + len(row["lines"]) * _BAR_LINE_H + 2
+        bar_w = max(2, int(bar_max_w * row["count"] / max_val))
         out.append(
-            f'<text x="{label_w - 6}" y="{y + 14}" text-anchor="end" font-size="10" '
-            f'fill="#46303F">{_x(name)}</text>'
-            f'<rect x="{label_w}" y="{y + 4}" width="{bar_w}" height="13" fill="#854F0B" rx="2"/>'
-            f'<text x="{label_w + bar_w + 4}" y="{y + 14}" font-size="9" fill="#6B6670">{count}</text>'
+            f'<rect x="2" y="{bar_y}" width="{bar_w}" height="{_BAR_H}" fill="#854F0B" rx="2"/>'
+            f'<text x="{bar_w + 8}" y="{bar_y + 10}" font-size="9" fill="#6B6670">{row["count"]}</text>'
         )
     out.append("</svg>")
     return "".join(out)
@@ -166,7 +227,19 @@ _TEMPLATE = r"""<!DOCTYPE html>
 <title>{{ page_title }}</title>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-@page { size: Letter; margin: 0.7in 0.7in 0.75in 0.7in; }
+/* DejaVu Sans is BUNDLED (api/assets/fonts) rather than left to whatever the host has installed:
+   it is the face that carries the ✓/✗ marks, and a developer machine without it rendered them
+   from a different fallback than production. */
+@font-face { font-family: "DejaVu Sans"; src: url("{{ font_regular_uri }}"); font-weight: 400; }
+@font-face { font-family: "DejaVu Sans"; src: url("{{ font_bold_uri }}"); font-weight: 700; }
+@page {
+  size: Letter; margin: 0.75in 0.7in 0.8in 0.7in;
+  font-family: "Liberation Sans", Arial, "DejaVu Sans", sans-serif; font-size: 7.5pt; color: #6B6670;
+  @top-left { content: {{ page_head_css }}; vertical-align: bottom; padding-bottom: 8pt; }
+  @bottom-left { content: {{ page_foot_css }}; vertical-align: top; padding-top: 8pt; width: 78%; }
+  @bottom-right { content: "Page " counter(page) " of " counter(pages); vertical-align: top;
+                  padding-top: 8pt; text-align: right; width: 22%; }
+}
 body {
   /* Written out here rather than interpolated from a constant. A Jinja variable looked
      tidier and was a bug: this environment autoescapes, so the quotes arrived as
@@ -181,7 +254,7 @@ body {
      cross the File Inventory prints directly, measured with fontTools against the font file
      rather than assumed — so DejaVu Sans follows it purely to supply those two glyphs. Both
      embed; PDF/UA requires embedded fonts. */
-  font-family: "Liberation Sans", "DejaVu Sans", Arial, sans-serif;
+  font-family: "Liberation Sans", Arial, "DejaVu Sans", sans-serif;
   font-size: 9.5pt;
   color: #2B2330;
   line-height: 1.45;
@@ -209,7 +282,12 @@ a { color: #46303F; }
 .certifiable { color: #3B6D11; }
 .not-certifiable { color: #A32D2D; }
 
-table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 8.5pt; }
+h1, h2, h3, h4, h5, p, li, th, td, dd, caption, figcaption { overflow-wrap: anywhere; }
+table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 8.5pt; table-layout: fixed; }
+thead { display: table-header-group; }
+tr { break-inside: avoid; }
+table.inventory col.c-file { width: 46%; }
+table.criteria col.c-crit { width: 52%; }
 caption { text-align: left; font-weight: 600; font-size: 9pt; color: #46303F;
           padding-bottom: 4px; }
 th[scope="col"] { background: #f0edf2; color: #46303F; font-weight: 600; text-align: left;
@@ -236,7 +314,11 @@ tr:nth-child(even) th[scope="row"], tr:nth-child(even) td { background: #faf8fb;
 /* Follow-up guidance may span pages; keep long hashes and proposals in bounds. */
 .remediation-guide { break-before: page; break-inside: auto; }
 .guide-document { margin-top: 12px; overflow-wrap: anywhere; }
-.guide-item { break-inside: avoid; border-left: 3px solid #854F0B; padding: 7px 10px; margin: 8px 0; }
+/* A guide item may be long; keeping every one whole stranded up to half a page before each.
+   Items flow, but a document's heading block and an item's heading stay with what follows. */
+.guide-item { break-inside: auto; border-left: 3px solid #854F0B; padding: 7px 10px; margin: 8px 0; }
+.guide-document > h3, .guide-document > p.muted, .guide-document > h4, .guide-item h5 { break-after: avoid; }
+.guide-item li, .guide-item p { break-inside: avoid; }
 .guide-item.applied { border-color: #3B6D11; }
 .guide-item img { max-width: 100%; max-height: 220px; object-fit: contain; }
 h4, h5 { font-size: 9.5pt; margin: 8px 0 4px; }
@@ -246,7 +328,13 @@ h4, h5 { font-size: 9.5pt; margin: 8px 0 4px; }
 figure { margin: 10px 0; }
 figcaption { font-size: 8pt; color: #6B6670; margin-top: 4px; }
 
-section { page-break-inside: avoid; }
+/* Only SHORT sections refuse to break. `section { page-break-inside: avoid }` on every section
+   pushed a 300-file inventory wholesale onto the next page, leaving most of page 1 blank, and
+   then split it anyway. Long tables flow; their header row repeats (thead above). */
+section { break-inside: auto; }
+section.keep { break-inside: avoid; }
+h2, h3, caption, figcaption { break-after: avoid; }
+figure.chart img { max-width: 100%; height: auto; }
 .scope-list { list-style: disc; padding-left: 18px; font-size: 8.5pt;
               color: #2B2330; line-height: 1.5; }
 dl { font-size: 8.5pt; }
@@ -294,7 +382,7 @@ dd { color: #2B2330; margin-left: 12px; }
 </p>
 {% endif %}
 
-<section>
+<section class="keep">
 <h2>Certification Decision</h2>
 <div class="decision-card">
   <div>
@@ -344,8 +432,9 @@ dd { color: #2B2330; margin-left: 12px; }
 
 <section>
 <h2>File Inventory</h2>
-<table>
+<table class="inventory">
   <caption>Files assessed in this scan</caption>
+  <colgroup><col class="c-file"><col><col><col><col></colgroup>
   <thead>
     <tr>
       <th scope="col">File</th>
@@ -375,13 +464,14 @@ dd { color: #2B2330; margin-left: 12px; }
 <section>
 <h2>Open Issues by Criterion</h2>
 {% if bars_uri %}
-<figure>
-  <figcaption>Files with open issues per criterion</figcaption>
+<figure class="chart">
+  <figcaption>Files with open issues per criterion{% if bars_more %} (the 8 most severe criteria are charted; all {{ open_by_crit|length }} are in the table below){% endif %}</figcaption>
   <img src="{{ bars_uri }}" alt="{{ bars_alt }}" width="{{ bars_w }}" height="{{ bars_h }}">
 </figure>
 {% endif %}
-<table>
+<table class="criteria">
   <caption>Open issues grouped by WCAG criterion</caption>
+  <colgroup><col class="c-crit"><col><col><col></colgroup>
   <thead>
     <tr>
       <th scope="col">Criterion</th>
@@ -452,10 +542,17 @@ dd { color: #2B2330; margin-left: 12px; }
 </section>
 {% endif %}
 
-""" + AUDIT_GUIDE_TEMPLATE + r"""
+""" + AUDIT_GUIDE_TEMPLATE.replace(
+    "{% for doc in remediation_guide %}",
+    "{% if guide_quiet_count %}<p class=\"muted\">{{ guide_quiet_count }} other document"
+    "{{ 's have' if guide_quiet_count != 1 else ' has' }} no remaining item or recorded change in "
+    "this evidence and {{ 'are' if guide_quiet_count != 1 else 'is' }} not listed below; see the "
+    "File Inventory.</p>{% endif %}\n{% for doc in remediation_guide %}", 1) + r"""
 </body>
 </html>
 """
+
+assert "guide_quiet_count" in _TEMPLATE, "AUDIT_GUIDE_TEMPLATE changed; the quiet-document note no longer applies"
 
 _jinja_env = Environment(loader=BaseLoader(), autoescape=True)
 _jinja_env.filters["safe_guide_thumb"] = _safe_guide_thumb
@@ -468,6 +565,15 @@ def render_html(run: dict, files: list, meta: dict, facts: dict | None = None,
     are checked against each other by the structural tests."""
     ctx = _prepare_context(run, files, meta, facts, decisions, evidence)
 
+    # The guide lists what to DO. A document with no remaining item and no recorded change has
+    # nothing to act on; printing a version line and boilerplate for each one buried the real
+    # items (240 of 300 blocks on a long scan). They are counted, not dropped silently, and the
+    # File Inventory above still lists every document.
+    guide = ctx.get("remediation_guide") or []
+    actionable = [d for d in guide if d.get("remaining") or d.get("applied")]
+    ctx["guide_quiet_count"] = len(guide) - len(actionable)
+    ctx["remediation_guide"] = actionable
+
     score = ctx.get("avg_score")
     ctx["ring_uri"] = _svg_data_uri(_score_ring_svg(score)) if score is not None else ""
     ctx["ring_alt"] = _ring_alt(score) if score is not None else ""
@@ -477,13 +583,38 @@ def render_html(run: dict, files: list, meta: dict, facts: dict | None = None,
         svg = _bars_svg(rows)
         ctx["bars_uri"] = _svg_data_uri(svg)
         ctx["bars_alt"] = _bars_alt(rows, ctx["total_files"])
-        ctx["bars_w"] = 130 + 220 + 50
-        ctx["bars_h"] = max(60, len(rows) * 22 + 20)
+        ctx["bars_w"] = BARS_W
+        ctx["bars_h"] = _bars_layout(rows)[1]
+        ctx["bars_more"] = max(0, len(ctx.get("open_by_crit", [])) - len(rows))
     else:
         ctx["bars_uri"] = ctx["bars_alt"] = ""
         ctx["bars_w"] = ctx["bars_h"] = 0
+        ctx["bars_more"] = 0
 
+    ctx["font_regular_uri"] = _FONT_FILE.as_uri()
+    ctx["font_bold_uri"] = _FONT_FILE.with_name("DejaVuSans-Bold.ttf").as_uri()
+    version = (meta or {}).get("platform_version") or _platform_version()
+    run_id = str(ctx.get("run_id") or "not recorded")
+    run_id = run_id if len(run_id) <= 40 else run_id[:20] + "…" + run_id[-19:]
+    foot = (f"Scan {run_id} · generated {ctx.get('report_generated_at')} UTC · "
+            f"Mova iO ACP {version or 'version not recorded'}")
+    ctx["page_foot_css"] = _css_string(foot)
+    ctx["page_head_css"] = _css_string("Accessibility Assessment Report · " + (ctx.get("std") or ""))
     return _jinja_env.from_string(_TEMPLATE).render(**ctx)
+
+
+def _css_string(text: str) -> Markup:
+    """A CSS string literal with every non-trivial character hex-escaped (see report_render)."""
+    out = []
+    for ch in str(text):
+        out.append(ch if ch.isascii() and (ch.isalnum() or ch in " .,:_-()") else "\\%06x" % ord(ch))
+    return Markup('"' + "".join(out) + '"')
+
+
+def _platform_version() -> str | None:
+    import os
+    value = (os.environ.get("ACP_BUILD_VERSION") or "").strip()
+    return value if re.fullmatch(r"[\w.+-]{1,64}", value or "") else None
 
 
 def build_weasy_report(run: dict, files: list, meta: dict,

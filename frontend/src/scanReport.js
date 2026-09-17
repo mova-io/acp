@@ -1,16 +1,29 @@
-// Scan-level (estate) report data-gathering + client-side aggregation. Keeps
-// pdfReport.js a pure renderer: this module fetches the scan-scoped endpoints and
-// rolls them up the SAME way the on-screen panels do — per-rule outcomes exactly
-// like Transparency's RuleBreakdown, per-document routing via sim's
-// recommendationSummary — then hands a fully-aggregated object to exportScanReport.
+// Scan-level (estate) report: data gathering, client-side aggregation, and the renderer-agnostic
+// report MODEL (kind 'scan'). This module fetches the scan-scoped endpoints, rolls them up the SAME
+// way the on-screen panels do — per-rule outcomes exactly like Transparency's RuleBreakdown,
+// per-document routing via sim's recommendationSummary — and turns the result into contract blocks
+// that the server renderer (reportRenderClient.js) and htmlReport.js lay out.
 //
-// Truthful metrics only: "conformant" is a real count of certifiable documents,
-// never an estimated confidence %. Sections with no data are simply omitted.
-import { getScanTraces, listHitlQueue, getConfig } from './api.js'
-import { statusOf, statusCounts as countStatuses, avgScore as avgOf } from './docStatus.js'
+// Evidence truth (the reason this module was rewritten):
+//   * CLASSIFICATION is not EXECUTION. recommendationSummary's 'auto' bucket says a document is
+//     ELIGIBLE for automatic fixing. It was once exported as `routing.fixed` and printed as
+//     "Auto-fixed" — a recommendation reported as work done. Executed edits come only from saved
+//     records: file_records.remediated_at (a corrected copy exists) and remediation_diff.
+//   * VERIFIED is remediation_diff. Those rows are written only for fixes that cleared the post-fix
+//     re-scan (api/store.py list_remediation_diffs), so eligible ≠ saved ≠ verified.
+//   * Missing evidence is null ("Not recorded"), never 0. A failed fetch is not an empty queue.
+//   * "No blocking findings" is a real count of documents, never an estimated confidence %, and
+//     never a claim that a document conforms.
+import { getScanTraces, listHitlQueue, getConfig, getScanRemediationDiffs } from './api.js'
+import { statusOf, statusCounts as countStatuses, avgScore as avgOf, analysedCount } from './docStatus.js'
 import { WCAG } from './wcagCatalog.js'
 import { recommendationSummary } from './sim.js'
 import { fixSteps, hasGuidance, appName } from './remediationGuide.js'
+import {
+  fileIssuesOf, rowsFromFindings, buildFindingCards, rankFindingCards, buildComparison, boundList,
+  changeIdOf, scOfValue, criterionName,
+} from './reportEvidence.js'
+import { MODE_LABEL } from './reportModel.js'
 
 // Normalize a filename to one of the native-app formats the remediation guide keys on.
 const CHECKLIST_CAP = 60
@@ -27,20 +40,47 @@ const assessLevel = (scanId) => {
   try { return JSON.parse(sessionStorage.getItem(`acp-assess-${scanId || 'none'}`) || 'null')?.level || 'AA' } catch { return 'AA' }
 }
 const deptOf = (f) => f.department || f.dept || 'Unassigned'
+const isAdvisory = (i) => String(i?.severity || '').toUpperCase() === 'REVIEW'
 
+// Legacy jsPDF appendix bound — disclosed via appendixTotal. The MODEL lists every file.
 const APPENDIX_CAP = 150
+const MODES = ['summary', 'reviewer', 'full']
+const REVIEWER_FINDING_CAP = 50
+const NR = 'Not recorded'
+const orNR = (v) => (v == null || v === '' ? NR : String(v))
 
-// Gather every scan-scoped input, aggregate, then render the PDF. Both the Overview
-// toolbar and the Assess/Transparency RuleBreakdown header call this.
-export async function generateScanReport({ scanId, files = [], org = 'your organisation' } = {}) {
-  const [rowsRaw, hitlRaw, cfg] = await Promise.all([
-    getScanTraces(scanId).catch(() => []),
-    listHitlQueue(scanId).catch(() => []),
-    getConfig().catch(() => null),
-  ])
-  const rows = Array.isArray(rowsRaw) ? rowsRaw : []
-  const hitlItems = Array.isArray(hitlRaw) ? hitlRaw : []
-  const targetLevel = assessLevel(scanId)
+// getScanRemediationDiffs(scanId, true) answers { items, total, documents, loaded, complete } from a
+// real server, and a bare array in SIM — or [] when the request FAILED (api.js swallows errors).
+// So an empty array is "not recorded", not "zero verified fixes".
+export function normaliseDiffSummary(raw) {
+  if (raw && !Array.isArray(raw) && typeof raw === 'object' && Array.isArray(raw.items)) {
+    const total = Number.isFinite(raw.total) ? raw.total : null
+    return {
+      items: raw.items,
+      total,
+      documents: Number.isFinite(raw.documents) ? raw.documents : null,
+      complete: raw.complete === true || (total != null && raw.items.length === total),
+    }
+  }
+  if (Array.isArray(raw) && raw.length) {
+    return { items: raw, total: raw.length, documents: new Set(raw.map((d) => d.file)).size, complete: true }
+  }
+  return null
+}
+
+const STATUS_TXT = {
+  certifiable: 'No blocking findings', issues: 'Open findings', clean: 'No findings',
+  'not-assessed': 'Not assessed', uncertain: 'Uncertain', unanalysable: 'Could not be analysed',
+}
+const ROUTE_TXT = {
+  auto: 'Eligible for automatic fixing', assisted: 'Recommended: AI-assisted review', review: 'Recommended: human review',
+  manual: 'Recommended: manual remediation', archive: 'Recommended: archive', keep: 'Recommended: keep as is',
+}
+
+// Pure aggregation of fetched inputs into the report data (legacy fields + evidence fields).
+export function aggregateScanReport({ scanId = null, files = [], traces = [], hitlItems = null, cfg = null,
+  diffSummary = null, targetLevel = 'AA', org = 'your organisation', now = new Date(), previous = null, scope } = {}) {
+  const rows = Array.isArray(traces) ? traces : []
 
   // ── Per-rule rollup (identical to RuleBreakdown) ──────────────────────────
   const byRule = {}
@@ -53,8 +93,9 @@ export async function generateScanReport({ scanId, files = [], org = 'your organ
     else byRule[k].skip++
     byRule[k].findings += r.finding_count || 0
   })
-  const rules = Object.values(byRule).sort((a, b) => b.fail - a.fail || a.id.localeCompare(b.id))
-  const topFailing = rules.filter((r) => r.fail > 0).slice(0, 8)
+  const rules = Object.values(byRule).sort((a, b) => b.fail - a.fail || String(a.id).localeCompare(String(b.id)))
+  const failingAll = rules.filter((r) => r.fail > 0)
+  const topFailing = failingAll.slice(0, 8)
 
   // In-scope / automated coverage counts (same scoping as RuleBreakdown's header).
   const targetRank = LEVEL_RANK[targetLevel] || 2
@@ -66,8 +107,8 @@ export async function generateScanReport({ scanId, files = [], org = 'your organ
   const deptByFile = {}
   files.forEach((f) => { deptByFile[f.file] = deptOf(f) })
   const topIds = new Set(topFailing.map((r) => r.id))
-  const cell = {}       // `${ruleId}::${dept}` -> count
-  const deptFail = {}   // dept -> total failing rows across top criteria
+  const cell = {}
+  const deptFail = {}
   rows.forEach((r) => {
     if (String(r.outcome || '').toUpperCase() !== 'FAIL' || !topIds.has(r.rule_id)) return
     const dpt = deptByFile[r.file] || 'Unassigned'
@@ -82,13 +123,12 @@ export async function generateScanReport({ scanId, files = [], org = 'your organ
     rows: topFailing.map((r) => ({ id: r.id, name: r.name, cells: heatDepts.map((dpt) => cell[`${r.id}::${dpt}`] || 0) })),
   }
 
-  // ── Manual remediation checklist: every FAILING criterion × the file format(s) it
-  //    fails in, paired with the native-app menu path to fix it by hand on Mac and Windows.
-  //    Driven entirely by real FAIL traces — no criterion appears that the scan did not flag.
-  //    One row per (SC × format) so the instructions are exact for the app the user opens.
+  // ── Manual remediation checklist: every FAILING criterion × the file format(s) it fails in,
+  //    paired with the native-app menu path to fix it by hand on Mac and Windows. Driven entirely
+  //    by real FAIL traces — no criterion appears that the scan did not flag.
   const fileFmt = {}
   files.forEach((f) => { fileFmt[f.file] = fmtOfName(f.file) || (String(f.type || '').toLowerCase() || null) })
-  const clMap = {}   // `${sc}::${fmt}` -> { sc, name, level, fmt, docs }
+  const clMap = {}
   rows.forEach((r) => {
     if (String(r.outcome || '').toUpperCase() !== 'FAIL') return
     const fmt = fileFmt[r.file]
@@ -98,10 +138,10 @@ export async function generateScanReport({ scanId, files = [], org = 'your organ
     if (!clMap[key]) clMap[key] = { sc, name: byRule[sc]?.name || r.plain_name || sc, level: byRule[sc]?.level || r.level || null, fmt, docs: 0 }
     clMap[key].docs++
   })
-  const manualChecklist = Object.values(clMap)
+  const manualChecklistAll = Object.values(clMap)
     .map((it) => { const s = fixSteps(it.sc, it.fmt); return { ...it, app: appName(it.fmt), where: s.where, mac: s.mac, win: s.win, specific: hasGuidance(it.sc) } })
-    // Most actionable first: criteria with a specific menu path, then most-affected, then by SC.
-    .sort((a, b) => (b.specific - a.specific) || (b.docs - a.docs) || a.sc.localeCompare(b.sc))
+    .sort((a, b) => (b.specific - a.specific) || (b.docs - a.docs) || String(a.sc).localeCompare(String(b.sc)))
+  const manualChecklist = manualChecklistAll
   const checklistTruncated = manualChecklist.length > CHECKLIST_CAP
 
   // ── Document-level rollups ────────────────────────────────────────────────
@@ -109,9 +149,6 @@ export async function generateScanReport({ scanId, files = [], org = 'your organ
   const conformantN = files.filter((f) => statusOf(f) === 'certifiable').length
   const conformantPct = totalFiles ? Math.round((conformantN / totalFiles) * 100) : 0
   const avgScore = avgOf(files)
-  // The shared counter, not a hand-listed set of keys: this object was missing the unscored
-  // bucket, and `statusCounts[statusOf(f)]++` on an absent key is NaN — so one unassessed
-  // document turned a real count in the exported report into "NaN documents".
   const statusCounts = countStatuses(files)
 
   const groupBy = (fn) => files.reduce((m, f) => { const k = fn(f); if (k != null) (m[k] = m[k] || []).push(f); return m }, {})
@@ -125,43 +162,325 @@ export async function generateScanReport({ scanId, files = [], org = 'your organ
   const byDept = rollup(groupBy(deptOf))
   const bySource = files.some((f) => f.sourceName) ? rollup(groupBy((f) => f.sourceName || 'Unknown')) : []
 
-  // ── Remediation throughput (routing) — from sim's estate rollup ───────────
+  // ── Recommended routes — CLASSIFICATION, not work performed ───────────────
   const rec = recommendationSummary(files)
   const bucketN = (a) => rec.buckets.find((b) => b.action === a)?.n || 0
   const routing = {
-    fixed: bucketN('auto'),
+    eligibleAuto: bucketN('auto'),
     humanRouted: bucketN('assisted') + bucketN('review') + bucketN('manual'),
     deferred: bucketN('archive') + bucketN('keep'),
     buckets: rec.buckets,
   }
-  // No savedMin. It was manualMin - remediateMin, both invented per-finding constants, and
-  // this object is an exported report model. autoPct is a real classification (which actions
-  // the recommender chose), not a duration, so it stays.
+  // No savedMin: it was manualMin - remediateMin, both invented per-finding constants.
   const effort = { remediateMin: rec.remediateMin, autoPct: rec.autoPct, remediableDocs: rec.remediableDocs }
 
-  // ── HITL queue status ─────────────────────────────────────────────────────
-  const hc = { pending: 0, approved: 0, rejected: 0, skipped: 0 }
-  hitlItems.forEach((it) => { if (hc[it.status] != null) hc[it.status]++ })
-  const hitl = { ...hc, total: hitlItems.length }
+  // ── Review queue status (null when the queue could not be read) ───────────
+  let hitl = null
+  if (Array.isArray(hitlItems)) {
+    const hc = { pending: 0, approved: 0, rejected: 0, skipped: 0 }
+    hitlItems.forEach((it) => { if (hc[it.status] != null) hc[it.status]++ })
+    hitl = { ...hc, total: hitlItems.length }
+  }
 
-  // ── Appendix: worst-scoring first, capped ─────────────────────────────────
-  const appendix = files
-    .map((f) => ({ file: f.file, dept: deptOf(f), score: f.score ?? null, status: statusOf(f), action: f.rec?.action || null }))
-    .sort((a, b) => (a.score == null ? 999 : a.score) - (b.score == null ? 999 : b.score))
-    .slice(0, APPENDIX_CAP)
+  // ── Executed and verified work — from saved records only ──────────────────
+  const remediatedKnown = files.some((f) => Object.prototype.hasOwnProperty.call(f, 'remediated_at'))
+  const remediatedFiles = files.filter((f) => f.remediated_at)
+  const verified = normaliseDiffSummary(diffSummary)
+  const verifiedByFile = {}
+  if (verified) verified.items.forEach((d) => { verifiedByFile[d.file] = (verifiedByFile[d.file] || 0) + 1 })
+  const publishedKnown = files.some((f) => Object.prototype.hasOwnProperty.call(f, 'published_at'))
+  const execution = {
+    documentsWithSavedEdits: remediatedKnown ? remediatedFiles.length : null,
+    verifiedFixes: verified ? verified.total : null,
+    verifiedDocuments: verified ? verified.documents : null,
+    verifiedComplete: verified ? verified.complete : null,
+    verifiedItems: verified ? verified.items : null,
+    publishedDocuments: publishedKnown ? files.filter((f) => f.published_at).length : null,
+  }
 
-  const now = new Date()
-  const { exportScanReport } = await import('./pdfReport.js')
-  await exportScanReport({
-    org,
-    targetLevel,
-    platformVersion: cfg?.version,
+  // ── Master index: every file, worst-scoring first ─────────────────────────
+  const index = files
+    .map((f) => {
+      const issues = f.issues || []
+      return {
+        file: f.file, dept: deptOf(f), score: f.score ?? null, status: statusOf(f), action: f.rec?.action || null,
+        findings: issues.filter((i) => !isAdvisory(i)).length, advisory: issues.filter(isAdvisory).length,
+        remediatedAt: remediatedKnown ? (f.remediated_at || null) : undefined,
+        verifiedFixes: verified ? (verifiedByFile[f.file] || 0) : null,
+        publishedAt: publishedKnown ? (f.published_at || null) : undefined,
+      }
+    })
+    .sort((a, b) => (a.score == null ? 999 : a.score) - (b.score == null ? 999 : b.score) || String(a.file).localeCompare(String(b.file)))
+  const appendix = index.slice(0, APPENDIX_CAP)
+
+  return {
+    scanId, org, targetLevel,
+    platformVersion: cfg?.version ?? null,
+    generatedAt: now.toISOString(),
     date: now.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }),
     timestamp: now.toLocaleString('en-US', { year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' }),
-    totalFiles, conformantN, conformantPct, avgScore, statusCounts,
+    totalFiles, analysedFiles: analysedCount(files), conformantN, conformantPct, avgScore, statusCounts,
     criteriaAutomated, inScopeCount: inScope.length,
-    topFailing, heatmap, byDept, bySource, routing, effort, hitl, appendix,
+    topFailing, failingAll, heatmap, byDept, bySource, routing, effort, hitl, execution,
+    appendix, appendixTotal: index.length, index,
     manualChecklist: manualChecklist.slice(0, CHECKLIST_CAP), checklistTruncated,
-    checklistTotal: manualChecklist.length,
+    checklistTotal: manualChecklist.length, manualChecklistAll,
+    files, previous, scope,
+  }
+}
+
+// Pure: aggregated scan data → contract report model (kind 'scan').
+export function buildScanReportModel(data = {}) {
+  const mode = MODES.includes(data.mode) ? data.mode : 'summary'
+  const atLeast = (m) => MODES.indexOf(mode) >= MODES.indexOf(m)
+  const files = data.files || []
+  const ex = data.execution || {}
+  const level = data.targetLevel || 'AA'
+  const total = data.totalFiles ?? files.length
+  const analysed = data.analysedFiles ?? null
+  const blocks = []
+  const H = (text, lvl = 1) => blocks.push({ k: 'heading', text, level: lvl })
+  const T = (text, o) => blocks.push({ k: 'text', text, o: o || {} })
+
+  // Remaining findings: only on documents WITHOUT a saved corrected copy. A remediated document's
+  // issue list is the pre-remediation assessment, so counting it would report fixed work as open.
+  const openFiles = files.filter((f) => !f.remediated_at)
+  const awaitingReassess = files.filter((f) => f.remediated_at && (f.issues || []).some((i) => !isAdvisory(i)))
+  const findingsRemaining = files.length || total === 0
+    ? openFiles.reduce((n, f) => n + (f.issues || []).filter((i) => !isAdvisory(i)).length, 0)
+    : null
+  const hitl = data.hitl || null
+  const notAnalysable = data.statusCounts ? (data.statusCounts['not-assessed'] || 0) + (data.statusCounts.unanalysable || 0) : null
+  const eligible = data.routing?.eligibleAuto ?? null
+
+  H('Decision summary')
+  const outstanding = [
+    findingsRemaining ? `${findingsRemaining} open finding${findingsRemaining === 1 ? '' : 's'}` : null,
+    awaitingReassess.length ? `${awaitingReassess.length} corrected document${awaitingReassess.length === 1 ? '' : 's'} awaiting re-assessment` : null,
+    hitl?.pending ? `${hitl.pending} review item${hitl.pending === 1 ? '' : 's'} pending` : null,
+    notAnalysable ? `${notAnalysable} document${notAnalysable === 1 ? '' : 's'} not assessed or not analysable` : null,
+  ].filter(Boolean)
+  blocks.push({
+    k: 'callout',
+    text: `${data.conformantN ?? 0} of ${total} documents came back with no blocking findings among the WCAG 2.1 Level ${level} criteria ACP checked.${outstanding.length ? ` Outstanding: ${outstanding.join('; ')}.` : ''} ${eligible != null ? `${eligible} document${eligible === 1 ? ' is' : 's are'} eligible for automatic fixing — a recommendation, not work performed.` : ''}`.trim(),
+    o: { color: outstanding.length ? AMBER_HEX : GREEN_HEX },
   })
+  blocks.push({
+    k: 'decisionSummary',
+    caption: 'Estate decision evidence',
+    items: [
+      { key: 'documentsAssessed', label: 'Documents assessed', value: analysed, detail: `${total} document${total === 1 ? '' : 's'} in this scan` },
+      { key: 'editsSaved', label: 'Documents with saved edits', value: ex.documentsWithSavedEdits ?? null, detail: ex.documentsWithSavedEdits == null ? 'Saved-copy status was not included in the file list' : 'Documents with a saved corrected copy' },
+      { key: 'findingsVerifiedResolved', label: 'Fixes verified by re-scan', value: ex.verifiedFixes ?? null,
+        detail: ex.verifiedFixes == null ? 'Remediation records could not be loaded' : `Across ${orNR(ex.verifiedDocuments)} documents (remediation records)` },
+      { key: 'findingsRemaining', label: 'Findings remaining', value: findingsRemaining,
+        detail: awaitingReassess.length ? `On documents without a corrected copy; ${awaitingReassess.length} corrected document(s) await re-assessment and are not counted` : 'Blocking findings on documents without a corrected copy' },
+      { key: 'humanChecksPending', label: 'Human checks pending', value: hitl ? hitl.pending : null, detail: hitl ? `${hitl.total} review item(s) in total` : 'The review queue could not be read' },
+      { key: 'checksNotPerformed', label: 'Documents not checked', value: notAnalysable, detail: 'Not assessed yet, or could not be analysed' },
+    ],
+  })
+  const decided = hitl ? hitl.approved + hitl.rejected + hitl.skipped : null
+  blocks.push({
+    k: 'stageStrip',
+    items: [
+      { key: 'suggestions', label: 'Suggestions', value: hitl ? hitl.total : null, status: hitl == null ? 'unknown' : hitl.total ? 'done' : 'not_started', detail: hitl == null ? 'Review queue not loaded' : `${hitl.total} suggestion(s) queued for review; ${eligible ?? NR} document(s) eligible for automatic fixing` },
+      { key: 'savedEdits', label: 'Saved edits', value: ex.documentsWithSavedEdits ?? null, status: ex.documentsWithSavedEdits == null ? 'unknown' : ex.documentsWithSavedEdits ? 'done' : 'not_started', detail: 'Documents with a saved corrected copy' },
+      { key: 'technicalChecks', label: 'Technical re-checks', value: ex.verifiedFixes ?? null, status: ex.verifiedFixes == null ? 'unknown' : awaitingReassess.length ? 'pending' : ex.verifiedFixes ? 'done' : 'not_started', detail: ex.verifiedFixes == null ? NR : `${ex.verifiedFixes} fix record(s) cleared the re-scan${ex.verifiedComplete === false ? ' (partial list)' : ''}` },
+      { key: 'humanConfirmation', label: 'Human confirmation', value: decided, status: hitl == null ? 'unknown' : hitl.pending ? 'pending' : hitl.total ? 'done' : 'not_started', detail: hitl == null ? NR : `${hitl.approved} approved, ${hitl.rejected} rejected, ${hitl.skipped} skipped, ${hitl.pending} pending` },
+      { key: 'publication', label: 'Publication', value: ex.publishedDocuments ?? null, status: ex.publishedDocuments == null ? 'unknown' : ex.publishedDocuments ? 'done' : 'not_started', detail: ex.publishedDocuments == null ? 'Publication status not recorded in this report' : 'Documents published' },
+    ],
+  })
+  T(`Average score across scored documents: ${data.avgScore != null ? `${data.avgScore}/100` : NR} — a secondary indicator.`, { size: 9, color: MUTED_HEX })
+
+  H('What this report covers')
+  blocks.push({
+    k: 'table',
+    headers: ['Field', 'Value'],
+    caption: 'Report scope and identity',
+    rows: [
+      ['Organisation', orNR(data.org)],
+      ['Assessment (scan) id', orNR(data.scanId)],
+      ['Target', `WCAG 2.1 Level ${level}`],
+      ['Documents in scan', String(total)],
+      ['Criteria with automated checks in scope', `${orNR(data.criteriaAutomated)} of ${orNR(data.inScopeCount)}`],
+      ['Report generated', orNR(data.generatedAt || data.timestamp)],
+      ['Platform version', orNR(data.platformVersion)],
+      ['Report mode', MODE_LABEL[mode]],
+    ],
+  })
+  H('Documents by outcome', 2)
+  blocks.push({
+    k: 'table',
+    headers: ['Outcome', 'Documents'],
+    caption: 'Documents by outcome',
+    rows: Object.entries(data.statusCounts || {}).filter(([, n]) => n > 0).map(([k, n]) => [STATUS_TXT[k] || k, String(n)]),
+  })
+
+  H('Since the previous assessment')
+  const current = openFiles.flatMap((f) => fileIssuesOf(f).filter((i) => i.severity !== 'REVIEW'))
+  const cmp = buildComparison(data.previous, { file: null, scope: data.scope === undefined ? null : data.scope, findings: current })
+  if (!data.previous) cmp.reason = typeof data.previousReason === 'string' && data.previousReason ? data.previousReason : 'No comparable earlier estate snapshot was supplied, so no change is reported. Aggregate counts are never subtracted to imply one.'
+  blocks.push(cmp)
+
+  if (atLeast('reviewer')) {
+    H('Remaining work across documents')
+    const cards = rankFindingCards(openFiles.flatMap((f) => buildFindingCards({
+      file: f.file, rows: rowsFromFindings(f), assignee: f.assignee ?? f.owner ?? null,
+    }).map((c) => ({ ...c, title: `${f.file} — ${c.title}`, file: f.file }))))
+    if (awaitingReassess.length) T(`${awaitingReassess.length} document(s) with a saved corrected copy are not listed here until they are re-assessed.`, { size: 9, color: MUTED_HEX })
+    if (cards.length) {
+      const b = boundList(cards, mode === 'full' ? null : REVIEWER_FINDING_CAP)
+      b.shown.forEach((c) => blocks.push(c))
+      if (b.omitted) T(`${b.omitted} more finding${b.omitted === 1 ? '' : 's'} (of ${b.total}) are listed in the Full evidence report.`, { bold: true })
+    } else {
+      T('No open findings are recorded on documents without a corrected copy.', { color: MUTED_HEX })
+    }
+
+    H('Most frequent failing criteria')
+    const failing = mode === 'full' ? (data.failingAll || data.topFailing || []) : (data.topFailing || [])
+    blocks.push({
+      k: 'table',
+      headers: ['WCAG', 'Criterion', 'Level', 'Documents failing', 'Findings'],
+      caption: 'Most frequent failing criteria',
+      rows: failing.map((r) => [r.id, r.name, r.level || NR, String(r.fail), String(r.findings)]),
+    })
+    const failingTotal = (data.failingAll || []).length
+    if (mode !== 'full' && failingTotal > failing.length) T(`Showing ${failing.length} of ${failingTotal} failing criteria; all are in the Full evidence report.`, { size: 9, color: MUTED_HEX })
+
+    if (data.heatmap?.depts?.length) {
+      H('Failures by department', 2)
+      blocks.push({
+        k: 'table',
+        headers: ['Criterion', ...data.heatmap.depts],
+        caption: 'Failing documents per criterion and department',
+        rows: data.heatmap.rows.map((r) => [`${r.id} ${r.name}`, ...r.cells.map(String)]),
+      })
+      if (data.heatmap.moreDepts) T(`${data.heatmap.moreDepts} further department(s) with failures are not shown in this grid; the master index lists every document.`, { size: 9, color: MUTED_HEX })
+    }
+    if ((data.byDept || []).length) {
+      H('By department', 2)
+      blocks.push({
+        k: 'table',
+        headers: ['Department', 'Documents', 'No blocking findings', 'Findings', 'Average score'],
+        caption: 'Outcomes by department',
+        rows: data.byDept.map((g) => [g.label, String(g.docs), String(g.conformant), String(g.findings), g.avg != null ? String(g.avg) : NR]),
+      })
+    }
+    if ((data.bySource || []).length) {
+      H('By source', 2)
+      blocks.push({
+        k: 'table',
+        headers: ['Source', 'Documents', 'No blocking findings', 'Findings', 'Average score'],
+        caption: 'Outcomes by source',
+        rows: data.bySource.map((g) => [g.label, String(g.docs), String(g.conformant), String(g.findings), g.avg != null ? String(g.avg) : NR]),
+      })
+    }
+
+    H('Recommended routes')
+    T('The classifier’s recommendation for each document. These are recommendations, not work performed — saved and verified edits are counted in the decision summary.', { size: 9, color: MUTED_HEX })
+    blocks.push({
+      k: 'table',
+      headers: ['Recommendation', 'Documents'],
+      caption: 'Recommended remediation routes',
+      rows: (data.routing?.buckets || []).map((b) => [ROUTE_TXT[b.action] || b.action, String(b.n)]),
+    })
+
+    H('Manual remediation checklist')
+    const all = data.manualChecklistAll || data.manualChecklist || []
+    const shown = mode === 'full' ? all : all.slice(0, CHECKLIST_CAP)
+    blocks.push({
+      k: 'table',
+      headers: ['WCAG', 'Criterion', 'Format', 'Documents', 'Where', 'macOS', 'Windows'],
+      caption: 'Manual remediation checklist, most actionable first',
+      rows: shown.map((it) => [it.sc, it.name, `${it.fmt} (${it.app})`, String(it.docs), it.where || '', it.mac || '', it.win || '']),
+    })
+    const clTotal = data.checklistTotal ?? all.length
+    if (shown.length < clTotal) T(`Showing ${shown.length} of ${clTotal} checklist rows, most actionable first; every row is in the Full evidence report.`, { bold: true })
+  }
+
+  if (atLeast('full')) {
+    blocks.push({ k: 'pageBreak' })
+    H('Complete evidence appendix')
+    const index = data.index || data.appendix || []
+    blocks.push({
+      k: 'appendixTable',
+      id: 'appendix-documents',
+      complete: index.length === total,
+      totalRecords: total,
+      limitNote: 'the documents included in the file list',
+      headers: ['Document', 'Department', 'Outcome', 'Score', 'Blocking findings', 'Advisory', 'Corrected copy saved', 'Verified fixes', 'Published', 'Recommendation'],
+      caption: 'Master index of every document',
+      rows: index.map((r) => [
+        r.file, r.dept, STATUS_TXT[r.status] || r.status, r.score != null ? String(r.score) : NR,
+        String(r.findings ?? NR), String(r.advisory ?? NR),
+        r.remediatedAt === undefined ? NR : r.remediatedAt ? `Yes · ${r.remediatedAt}` : 'No',
+        r.verifiedFixes == null ? NR : `${r.verifiedFixes}${ex.verifiedComplete === false ? ' (partial)' : ''}`,
+        r.publishedAt === undefined ? NR : r.publishedAt ? `Yes · ${r.publishedAt}` : 'No',
+        r.action ? (ROUTE_TXT[r.action] || r.action) : NR,
+      ]),
+    })
+    const items = ex.verifiedItems
+    blocks.push({
+      k: 'appendixTable',
+      id: 'appendix-verified-fixes',
+      complete: items ? ex.verifiedComplete !== false : false,
+      totalRecords: ex.verifiedFixes ?? null,
+      limitNote: items ? 'the page of remediation records the server returned' : 'remediation records could not be loaded',
+      headers: ['Record id', 'Document', 'Criterion', 'Reason', 'Before', 'After'],
+      caption: 'Verified fix records (full before and after)',
+      rows: (items || []).map((d, i) => {
+        const sc = scOfValue(d.rule_id)
+        return [changeIdOf(d.file, d, i), d.file, `${sc || d.rule_id}${criterionName(sc) ? ` · ${criterionName(sc)}` : ''}`,
+          d.note || 'Reason not recorded', d.before == null ? NR : String(d.before), d.after == null ? NR : String(d.after)]
+      }),
+    })
+  }
+
+  H('What this report is, and is not')
+  T(`A record of what ACP detected, changed and re-verified across this scan against the WCAG 2.1 Level ${level} criteria in scope. It is not a conformance determination, a certification or legal advice; it can support an ADA, Section 508 or EN 301 549 / European Accessibility Act review as evidence alongside a qualified human evaluation.`, { size: 9, color: MUTED_HEX })
+
+  const slugOrg = String(data.org || 'estate').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'estate'
+  return {
+    docTitle: `Accessibility Assessment Report — ${data.org || 'Document estate'}`,
+    filename: `mova-${slugOrg}-scan-${mode === 'full' ? 'evidence' : mode}-report`,
+    lang: 'en-US',
+    mode,
+    kind: 'scan',
+    identity: {
+      scanId: data.scanId ?? null, file: null, sourceSha256: null, correctedSha256: null, artifactVersion: null,
+      generatedAt: data.generatedAt || new Date().toISOString(), platformVersion: data.platformVersion ?? null, targetLevel: level,
+    },
+    targetLevel: level,
+    footerVersion: data.platformVersion ?? null,
+    footerGenerated: data.timestamp || data.generatedAt || null,
+    cover: {
+      title: 'Accessibility Assessment Report',
+      subtitle: `${data.org || 'Document estate'} · WCAG 2.1 Level ${level}`,
+      meta: [`${MODE_LABEL[mode]} · generated ${data.timestamp || data.generatedAt || ''}`.trim(), data.scanId ? `Scan ${data.scanId}` : null].filter(Boolean),
+    },
+    blocks,
+  }
+}
+
+// Palette hexes (kept local so this module does not depend on the file model's colour exports).
+const AMBER_HEX = '#854F0B', GREEN_HEX = '#3B6D11', MUTED_HEX = '#6B6670'
+
+// Gather every scan-scoped input, aggregate, build the model, then render the PDF server-side.
+// Both the Overview toolbar and the Assess/Transparency RuleBreakdown header call this.
+export async function generateScanReport({ scanId, files = [], org = 'your organisation', mode = 'summary', previous = null, scope } = {}) {
+  const [rowsRaw, hitlRaw, cfg, diffRaw] = await Promise.all([
+    getScanTraces(scanId).catch(() => []),
+    // null, not [] — a queue that could not be read is "not recorded", not "nothing pending".
+    listHitlQueue(scanId).catch(() => null),
+    getConfig().catch(() => null),
+    getScanRemediationDiffs(scanId, true).catch(() => null),
+  ])
+  const data = aggregateScanReport({
+    scanId, files, traces: rowsRaw, hitlItems: hitlRaw, cfg, diffSummary: diffRaw,
+    targetLevel: assessLevel(scanId), org, previous, scope,
+  })
+  const model = buildScanReportModel({ ...data, mode })
+  const { renderReportPdf } = await import('./reportRenderClient.js')
+  await renderReportPdf({ scanId, kind: 'scan', file: null, mode: model.mode, model })
+  return model
 }

@@ -56,7 +56,7 @@ def test_evidence_identity_required_and_remaining_checklist(isolated_store, monk
     assert 'Original findings not yet verified fixed</td><td>1' in summary
     checklist = next(a['content'].decode() for a in assets if a['name'].startswith('checklist-one'))
     assert '=Missing &lt;alt&gt;' in checklist
-    assert '<td>Page: 3</td>' in checklist
+    assert '<strong>Location:</strong> Page: 3</p>' in checklist
     csv = assets[-1]['content'].decode('utf-8-sig')
     assert "'=Missing <alt>" in csv
 
@@ -141,7 +141,7 @@ def test_branded_documents_categories_and_escaped_change_details(isolated_store,
     assert 'SC 1.1.1' in summary
     detail = next(a['content'].decode() for a in assets if a['name'].startswith('checklist-one'))
     assert '<th scope="col">Severity</th>' not in detail
-    assert 'Severity: critical' in detail
+    assert '<strong>Severity:</strong> critical' in detail
     assert '&lt;unsafe&gt;' not in detail
     assert 'Recorded changes by success criterion' not in detail
     detail = next(a['content'].decode() for a in assets if a['name'].startswith('changes-one'))
@@ -235,7 +235,7 @@ def test_checklist_omits_automatic_review_coverage_and_unselected_issues(isolate
     assets = build_release_reports(isolated_store, 'scan', OWNER, release)
     checklist = next(a['content'].decode() for a in assets if a['name'].startswith('checklist-one'))
     assert 'Language missing' in checklist
-    assert '<td>3.1.1</td>' in checklist
+    assert 'data-criterion="3.1.1"' in checklist
     assert 'PDF-LANG-001' not in checklist
     assert 'Location: Location:' not in checklist
     assert 'Automatic heading review' not in checklist
@@ -259,7 +259,7 @@ def test_verified_original_issue_removed_only_with_complete_ledger(isolated_stor
     assets = build_release_reports(isolated_store, 'scan', OWNER, release)
     checklist = next(a['content'].decode() for a in assets if a['name'].startswith('checklist-one'))
     assert 'Original missing title' not in checklist
-    assert '<td>2.4.2</td>' not in checklist
+    assert 'data-criterion="2.4.2"' not in checklist
 
 
 def test_report_scope_uses_per_file_effective_selection(isolated_store, monkeypatch):
@@ -272,8 +272,8 @@ def test_report_scope_uses_per_file_effective_selection(isolated_store, monkeypa
     ])
     assets = build_release_reports(isolated_store, 'scan', OWNER, release)
     checklist = next(a['content'].decode() for a in assets if a['name'].startswith('checklist-one'))
-    assert '<td>2.4.4</td>' in checklist
-    assert '<td>1.1.1</td>' not in checklist
+    assert 'data-criterion="2.4.4"' in checklist
+    assert 'data-criterion="1.1.1"' not in checklist
 
 
 def test_change_report_shows_saved_unverified_ai_without_credit(isolated_store, monkeypatch, tmp_path):
@@ -326,3 +326,67 @@ def test_fresh_unknown_copy_report_and_manifest_keep_exact_artifact_uncertainty(
         scan_id='scan', owner=OWNER, snapshot_id='snapshot')
     document = next(row for row in manifest['documents'] if row['file'] == 'one.pdf')
     assert document['corrected_copy_assessment'] == evidence
+
+
+def _two_findings(store, monkeypatch):
+    release = setup(store)
+    store.save_file_result('scan', {'file': 'one.pdf', 'engine': 'pdf', 'status': 'fail', 'score': 0,
+        'compliant': False, 'skipped_rules': 0, 'issues': [
+            {'ruleId': 'SC_1_1_1', 'wcag': '1.1.1', 'severity': 'critical', 'detail': 'Figure missing alt text', 'page': 3, 'location': 'Figure 2'},
+            {'ruleId': 'SC_1_1_1', 'wcag': '1.1.1', 'severity': 'critical', 'detail': 'Second figure needs context', 'page': 5},
+        ]}, '2026-09-09T10:00:00Z')
+    monkeypatch.setattr(store, 'get_scan_traces', lambda *a: [
+        {'file': 'one.pdf', 'rule_id': 'SC_1_1_1', 'outcome': 'FAIL', 'finding_count': 2}])
+    return release
+
+
+def test_each_remaining_finding_is_one_card_with_its_instructions(isolated_store, monkeypatch):
+    """The checklist used to print every finding twice: a checklist card, then the same finding
+    again in a separate offline-guide card (two findings -> four cards, three pages). One card per
+    finding now carries the checklist facts AND the specific steps, verification and follow-up."""
+    import re
+    release = _two_findings(isolated_store, monkeypatch)
+    assets = build_release_reports(isolated_store, 'scan', OWNER, release)
+    checklist = next(a['content'].decode() for a in assets if a['name'].startswith('checklist-one'))
+    cards = re.findall(r'<section class="report-card finding-card"[^>]*>(.*?)</section>', checklist, re.S)
+    assert len(cards) == 2, f'expected one card per finding, got {len(cards)}'
+    for detail, location in [('Figure missing alt text', 'Page: 3; Figure 2'), ('Second figure needs context', 'Page: 5')]:
+        assert checklist.count(detail) == 1, f'{detail!r} is printed more than once'
+        card = next(c for c in cards if detail in c)
+        # Every piece of information the two copies used to carry, together in one card.
+        for expected in [f'<strong>Location:</strong> {location}</p>', '<strong>Severity:</strong> critical',
+                         'Remediation category:', '<strong>Recommended action:</strong>',
+                         '<strong>How to fix:</strong>', 'Acrobat Pro',
+                         'Technical verification not recorded · Human confirmation of meaning not recorded',
+                         'Remediated and rechecked', 'Reviewer / date / notes:',
+                         'does not record anything in ACP', '<strong>Owner:</strong> Unassigned']:
+            assert expected in card, (expected, card)
+    assert checklist.count('Offline remediation guide') == 1
+
+
+def test_unlinked_guide_recommendation_still_gets_its_own_card(isolated_store, monkeypatch):
+    release = setup(isolated_store)
+    monkeypatch.setattr(isolated_store, 'list_hitl_queue', lambda **kw: [
+        {'id': 't', 'file': 'one.pdf', 'rule_id': '4.1.2', 'status': 'pending', 'locator': 'pdf:field:x',
+         'proposals': [{'value': 'Patient full name'}]}])
+    assets = build_release_reports(isolated_store, 'scan', OWNER, release)
+    checklist = next(a['content'].decode() for a in assets if a['name'].startswith('checklist-one'))
+    assert checklist.count('Patient full name') == 1
+    assert checklist.count('class="report-card finding-card"') == checklist.count('data-criterion="4.1.2"') >= 1
+
+
+def test_two_finding_checklist_pdf_is_shorter_and_not_duplicated(isolated_store, monkeypatch, tmp_path):
+    from io import BytesIO
+    from pypdf import PdfReader
+    from release_reports import build_release_reports as build_pdfs
+    release = _two_findings(isolated_store, monkeypatch)
+    asset = next(a for a in build_pdfs(isolated_store, 'scan', OWNER, release) if a['name'].startswith('checklist-one'))
+    (tmp_path / 'checklist.pdf').write_bytes(asset['content'])
+    reader = PdfReader(BytesIO(asset['content']))
+    text = '\n'.join(p.extract_text() for p in reader.pages)
+    # Three pages before the cards were merged; the same evidence now fits in fewer.
+    assert len(reader.pages) < 3, len(reader.pages)
+    assert text.count('Second figure needs context') == 1
+    assert text.count('Remediated and rechecked') == 2
+    assert f'Page 1 of {len(reader.pages)}' in text
+    assert '☐' in text

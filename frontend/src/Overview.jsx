@@ -8,6 +8,7 @@ import { findingsByCriterion, findingsByLevel, levelOfFinding } from './wcagFind
 import { analysedCount, avgScore } from './docStatus.js'
 import { IDENTITY, SIM, remediableCount, recommendationSummary } from './sim.js'
 import { openReport, getScanInventory } from './api.js'
+import ReportModeMenu from './ReportModeMenu.jsx'
 import { loadPublished } from './ontology.js'
 import BalancedSummary from './BalancedSummary.jsx'
 import { reconcileBuckets, assessmentEligible } from './estateFunnel.js'
@@ -66,14 +67,10 @@ export default function Overview({ run, files, trend, trendDates, onGo, scanList
   const reportRef = useRef(null)
   const [exporting, setExporting] = useState(false)
   const [exportError, setExportError] = useState(null)
-  const [scanExporting, setScanExporting] = useState(false)
-  const doScanExport = async () => {
-    setScanExporting(true)
-    try {
-      const { generateScanReport } = await import('./scanReport.js')
-      await generateScanReport({ scanId: run.id, files, org: orgName })
-    } catch (e) { console.error('scan report export failed', e) }
-    finally { setTimeout(() => setScanExporting(false), 600) }
+  // Whole-scan report in the three contract modes; ReportModeMenu shows progress and any failure.
+  const runScanReport = async (mode) => {
+    const { generateScanReport } = await import('./scanReport.js')
+    return generateScanReport({ scanId: run.id, files, org: orgName, mode })
   }
   const doExport = async () => {
     setExportError(null)
@@ -355,7 +352,8 @@ export default function Overview({ run, files, trend, trendDates, onGo, scanList
           <summary className="exportbtn">Reports</summary>
           <div className="reports-menu-items" aria-label="Report exports">
             <button type="button" onClick={doExport} disabled={exporting}>{exporting ? 'Generating PDF…' : 'Quarterly governance report'}</button>
-            <button type="button" onClick={doScanExport} disabled={scanExporting} title="Whole-scan estate report: conformance, WCAG failure heatmap, per-department breakdown, remediation throughput, HITL queue & a per-document appendix">{scanExporting ? 'Generating PDF…' : 'Scan report'}</button>
+            <ReportModeMenu inline label="Scan report" disabled={!run?.id}
+                            formats={[{ key: 'pdf', label: 'PDF', run: runScanReport }]} />
             <button type="button" onClick={exportCsv} title="Every finding as a spreadsheet row">Findings (CSV)</button>
             {!SIM && run?.id && (
               <button type="button" onClick={() => openReport(run.id)} title="Backend-generated WCAG compliance report PDF">Compliance report (PDF)</button>

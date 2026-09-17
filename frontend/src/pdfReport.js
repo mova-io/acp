@@ -5,7 +5,7 @@
 
 import { statusFor } from './exportDeliverables.js'
 import { WCAG } from './wcagCatalog.js'
-import { buildFileCertificationModel, buildRemediationModel, VERIFY_GUIDE } from './reportModel.js'
+import { buildFileCertificationModel, buildFileReportModel, buildRemediationModel, remediationReportModel, VERIFY_GUIDE } from './reportModel.js'
 // AcroForm gives the remediation checklist REAL checkboxes — focusable, announced by a screen
 // reader, tickable in any conformant viewer. See checklist() for why a drawn square will not do.
 import { AcroFormCheckBox } from 'jspdf'
@@ -101,11 +101,16 @@ async function makeDoc({ title = 'mova.io Accessibility Report', lang = 'en-US',
     // is kept on one page when it fits.
     beforeAfter(items) {
       const MONO = 'courier', VS = 8.5, VLH = 11, PAD = 8, MAXCH = 600, MAXLINES = 7
+      // RETIRED PATH (see LEGACY_JSPDF_RENDERERS). It still clamps, but never silently: a clamped
+      // value is followed by a note saying so and where the full text is.
       const clamp = (s) => { s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); return s.length > MAXCH ? s.slice(0, MAXCH - 1) + '…' : s }
-      const wrap = (s) => { const l = doc.splitTextToSize(clamp(s), CW - 4 * PAD - 44); return l.length > MAXLINES ? [...l.slice(0, MAXLINES - 1), l[MAXLINES - 1].replace(/.{1,3}$/, '…')] : l }
+      const wrapped = (s) => { const l = doc.splitTextToSize(clamp(s), CW - 4 * PAD - 44); return l.length > MAXLINES ? [...l.slice(0, MAXLINES - 1), l[MAXLINES - 1].replace(/.{1,3}$/, '…')] : l }
+      const isClamped = (s) => { const t = String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); return t.length > MAXCH || doc.splitTextToSize(t, CW - 4 * PAD - 44).length > MAXLINES }
       items.forEach((it) => {
-        const bl = wrap(it.before), al = wrap(it.after)
-        const noteL = it.note ? doc.splitTextToSize(String(it.note), CW - 24) : []
+        const bl = wrapped(it.before), al = wrapped(it.after)
+        const shortened = isClamped(it.before) || isClamped(it.after)
+        const noteTxt = [it.note, shortened ? 'Shortened here: the full before/after text is in the Full evidence report.' : null].filter(Boolean).join(' ')
+        const noteL = noteTxt ? doc.splitTextToSize(noteTxt, CW - 24) : []
         const rowH = (lines) => lines.length * VLH + 2 * PAD
         const total = 17 + noteL.length * 11 + rowH(bl) + 4 + rowH(al) + 12
         if (st.y + Math.min(total, H - 2 * M) > H - FOOT) { doc.addPage(); st.y = M }
@@ -568,7 +573,7 @@ function renderModelToPdf(p, model) {
   }
 }
 
-export async function exportFileCertification(d) {
+async function exportFileCertificationJsPdfLegacy(d) {
   const model = buildFileCertificationModel(d)
   const p = await makeDoc({
     title: model.docTitle,
@@ -599,7 +604,7 @@ export async function exportFileCertification(d) {
 // estimated, and never a claim that the document conforms.
 const STATUS_TXT = { certifiable: 'No blocking findings', issues: 'Open findings', uncertain: 'Uncertain', unanalysable: 'Unanalysable' }
 
-export async function exportScanReport(d) {
+async function exportScanReportJsPdfLegacy(d) {
   const pct = d.conformantPct ?? 0
   const good = pct >= 80
   const p = await makeDoc({
@@ -683,10 +688,12 @@ export async function exportScanReport(d) {
 
   p.pageBreak()
   p.heading('Remediation throughput')
-  p.text('How the platform routes each document: deterministic auto-fix, routed to a human, or deferred (kept as-is or archived). Routing is derived from each document’s findings and format.', { size: 9, color: MUTED, gapAfter: 10 })
+  p.text('How the platform classifies each document: eligible for automatic fixing, routed to a human, or deferred (kept as-is or archived). This is a classification from each document’s findings and format, not a record of edits made.', { size: 9, color: MUTED, gapAfter: 10 })
   const rt = d.routing || {}
+  // `eligibleAuto` (formerly `fixed`) is a CLASSIFICATION — nothing has been edited because of it.
+  const eligible = rt.eligibleAuto ?? rt.fixed ?? null
   p.metricGrid([
-    { label: 'Auto-fixed', value: rt.fixed || 0, color: GREEN },
+    { label: 'Eligible for automatic fixing', value: eligible ?? 'Not recorded', color: GREEN },
     { label: 'Human-routed', value: rt.humanRouted || 0, color: '#1F5FA8' },
     { label: 'Deferred', value: rt.deferred || 0, color: MUTED },
     { label: 'Automation rate', value: `${d.effort?.autoPct ?? 0}%`, color: GREEN },
@@ -860,7 +867,7 @@ export async function exportConformanceReport(d = {}) {
 // one answers "what did you change to my documents, when, and how do I check it myself?" —
 // which is the question asked by the person who has to defend the estate, and the one a
 // screenshot of a dashboard cannot answer.
-export async function exportRemediationReport(d = {}) {
+async function exportRemediationReportJsPdfLegacy(d = {}) {
   const scNames = Object.fromEntries(WCAG.map((w) => [w.sc, w.name]))
   const m = buildRemediationModel({ ...d, scNames })
   const p = await makeDoc({
@@ -970,3 +977,52 @@ export async function exportRemediationReport(d = {}) {
 
   p.save(d.filename || `mova-remediation-report-${(m.scanId || 'scan')}.pdf`)
 }
+
+// ── Accessible server rendering (the exports the UI calls) ────────────────────────────────────
+//
+// The three jsPDF renderers above produced untagged PDFs: no structure tree, no bookmarks, and a
+// WinAnsi Helvetica that silently drops ✓ and →. The names the app imports now build the shared
+// report MODEL and hand it to the server renderer (reportRenderClient.js → POST
+// /scans/{sid}/report-render), which returns a tagged PDF. When no server is available the client
+// downloads the HTML export of the same model and says so; it never falls back to jsPDF.
+//
+// Each returns the client's result: { ok: true, filename } | { ok: false, fallback, message }.
+
+export async function exportFileCertification(d = {}) {
+  const mode = d.mode || 'full'
+  const model = buildFileReportModel({ ...d, mode })
+  const { renderReportPdf } = await import('./reportRenderClient.js')
+  return renderReportPdf({ scanId: d.scanId, kind: 'file', file: d.file, mode, model })
+}
+
+export async function exportScanReport(d = {}) {
+  const mode = d.mode || 'summary'
+  const { buildScanReportModel } = await import('./scanReport.js')
+  const model = buildScanReportModel({ ...d, mode })
+  const { renderReportPdf } = await import('./reportRenderClient.js')
+  return renderReportPdf({ scanId: d.scanId, kind: 'scan', file: null, mode, model })
+}
+
+export async function exportRemediationReport(d = {}) {
+  const mode = d.mode || 'full'
+  const scNames = Object.fromEntries(WCAG.map((w) => [w.sc, w.name]))
+  const m = buildRemediationModel({ ...d, scNames })
+  const model = remediationReportModel(m, {
+    mode,
+    // NOT d.reviewByFile: that is a count of open queue items per file, not reviewer decisions.
+    reviewsByFile: d.reviewsByFile || null,
+    previewsByFile: d.previewsByFile || null,
+    currentShaByFile: d.currentShaByFile || null,
+  })
+  const { renderReportPdf } = await import('./reportRenderClient.js')
+  return renderReportPdf({ scanId: d.scanId || m.scanId, kind: 'remediation', file: null, mode, model })
+}
+
+// RETIRED, kept in the tree on purpose (repo rule: retire the mount, keep the code). Not wired to
+// any screen — no app module imports this object; the headless jsPDF tests do, so the old output
+// stays checkable and the path can be restored in one commit if it is ever needed.
+export const LEGACY_JSPDF_RENDERERS = Object.freeze({
+  exportFileCertification: exportFileCertificationJsPdfLegacy,
+  exportScanReport: exportScanReportJsPdfLegacy,
+  exportRemediationReport: exportRemediationReportJsPdfLegacy,
+})

@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { WCAG } from './wcagCatalog.js'
-import { exportFileCertification } from './pdfReport.js'
+import { LEGACY_JSPDF_RENDERERS } from './pdfReport.js'
+// The retired jsPDF renderer, still checked headlessly; the UI now renders on the server.
+const { exportFileCertification } = LEGACY_JSPDF_RENDERERS
 
 // Records copied verbatim from what the real Office/HTML remediators emit (api/
 // remediate_office.py, api/remediate.py) when run on the oracle test corpus — the

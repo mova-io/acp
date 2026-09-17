@@ -1121,18 +1121,20 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
     setReportBusy(true); setReportErr(null)
     try {
       const sid = run?.id
-      const [diffs, fixes] = await Promise.all([
-        getScanRemediationDiffs(sid).catch(() => []),
+      const { gatherRemediationEvidence } = await import('./remediationReportData.js')
+      const [evidence, fixes] = await Promise.all([
+        gatherRemediationEvidence(sid),
         getAppliedFixes(sid).catch(() => []),
       ])
-      const diffsByFile = {}
-      ;(diffs || []).forEach((d) => { (diffsByFile[d.file] = diffsByFile[d.file] || []).push(d) })
       const { exportRemediationReport } = await import('./pdfReport.js')
-      await exportRemediationReport({
-        files, diffsByFile, appliedFixes: fixes || [], reviewByFile,
+      const res = await exportRemediationReport({
+        ...evidence, files, appliedFixes: fixes || [], reviewByFile,
         scanId: sid, level: run?.target || 'AA', org: run?.org || '',
         generatedAt: new Date().toISOString(), cappedAt: APPLIED_FIX_CAP,
       })
+      // The server renderer reports a refusal as a value, not an exception — show it too.
+      if (res && res.ok === false && res.fallback === 'html') setReportErr(`PDF not generated; an HTML copy of the report was downloaded instead. ${res.message || ''}`.trim())
+      else if (res && res.ok === false) setReportErr(`Report not generated: ${res.message || 'the report could not be produced.'}`)
     } catch (e) {
       // A report that silently fails to download looks identical to one the user forgot to
       // click. Say it, and keep it on screen.
