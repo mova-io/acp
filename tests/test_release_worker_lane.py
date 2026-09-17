@@ -185,5 +185,6 @@ def test_rollout_preflight_requires_three_live_release_slots():
 
 def test_redeploy_normalizes_existing_release_worker_capacity():
     script = (ROOT / 'deploy/public/remediation_scaler.sh').read_text()
-    assert 'if [ -n "${RELEASE_WORKER:-}" ] && [ "$app" = "$RELEASE_WORKER" ]' in script
+    assert '[ -n "${RELEASE_WORKER:-}" ] && [ "$app" = "$RELEASE_WORKER" ]' in script
+    assert '[ "${DEPLOY_TARGET_ENV:-production}" != staging ]' in script
     assert 'release_capacity=("ACP_WORKERS=3" "ACP_DB_MAX_CONN=6")' in script

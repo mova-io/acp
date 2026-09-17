@@ -187,3 +187,53 @@ _verify_remediation_scaler
     expected['properties']['template']['containers'][0]['env'].append({'name': 'ACP_DEDICATED_RELEASE_WORKERS', 'value': '0'})
     assert patch == expected
     assert list(tmp_path.glob('remediation-*')) == []
+
+
+def test_staging_release_update_passes_each_capacity_key_once(tmp_path):
+    harness = r'''
+set -eo pipefail
+source deploy/public/remediation_scaler.sh
+DEPLOY_TARGET_ENV=staging; DISCOVERY_WORKER=discovery; ASSESS_WORKER=assess
+REMEDIATE_WORKER=remediate; RELEASE_WORKER=release; STAGING_WORKERS_QUIESCED=0
+AZ=(--only-show-errors); RG=test; IMG=new:image; WORKER_TERMINATION_GRACE_SECONDS=600
+WORKER_DRAIN_SECONDS=540; DEDICATED_RELEASE=1
+WORK="${TMPDIR:-/tmp}"
+_aca_retry() { "$@"; }
+az() { printf '%s\n' "$@" > "$1.args"; }
+_update_lane_worker release
+'''
+    result = subprocess.run(['bash', '-c', harness, 'harness'], cwd=tmp_path,
+                            capture_output=True, text=True)
+    # Run from the repository so the sourced helper exists, while recording in tmp_path.
+    if result.returncode != 0:
+        harness = harness.replace('> "$1.args"', f'> "{tmp_path}/command.args"')
+        result = subprocess.run(['bash', '-c', harness], cwd=ROOT,
+                                capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    args = (tmp_path / 'command.args').read_text().splitlines()
+    assert args.count('ACP_WORKERS=3') == 1
+    assert args.count('ACP_DB_MAX_CONN=6') == 1
+
+
+def test_disconnected_worker_update_reconciles_accepted_image_without_second_write(tmp_path):
+    harness = r'''
+set -eo pipefail
+source deploy/public/remediation_scaler.sh
+WORK="$1"; AZ=(--subscription sub); RG=group; IMG=target:image
+attempts=0
+sleep() { :; }
+az() {
+  if [ "$1 $2" = "containerapp update" ]; then
+    attempts=$((attempts + 1)); echo "$attempts" > "$WORK/attempts"
+    echo "ConnectionResetError: [Errno 104] Connection reset by peer" >&2
+    return 1
+  fi
+  if [ "$1 $2" = "containerapp show" ]; then echo "target:image"; return 0; fi
+  return 1
+}
+_update_worker_reconciled release --subscription sub -g group -n release --image target:image
+'''
+    result = subprocess.run(['bash', '-c', harness, 'harness', str(tmp_path)], cwd=ROOT,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / 'attempts').read_text().strip() == '1'

@@ -13,6 +13,48 @@ _prepare_remediation_worker_patch() {
   rm -f "$live"
 }
 
+_update_worker_reconciled() {
+  local app="$1"; shift
+  local err current="" observed=0 attempt
+  err="$(mktemp "$WORK/worker-update-XXXXXX")"
+  for attempt in 1 2; do
+    if az containerapp update "$@" 2>"$err"; then
+      rm -f "$err"
+      return 0
+    fi
+    if _aca_transient "$(cat "$err")"; then
+      rm -f "$err"
+      _aca_retry az containerapp update "$@"
+      return
+    fi
+    case "$(cat "$err")" in
+      *ConnectionResetError*104*|*ConnectionResetError*'Connection reset by peer'*) ;;
+      *) cat "$err" >&2; rm -f "$err"; return 1 ;;
+    esac
+    # A reset can happen after Azure accepted the request. Reconcile the
+    # requested template before issuing it again; the unique image binds this
+    # check to this rollout without exposing environment values.
+    observed=0
+    for _ in $(seq 1 12); do
+      current="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$app" \
+        --query properties.template.containers[0].image -o tsv 2>/dev/null || true)"
+      [ "$current" != "$IMG" ] || { rm -f "$err"; return 0; }
+      [ -z "$current" ] || observed=1
+      sleep 5
+    done
+    [ "$observed" = 1 ] || { cat "$err" >&2; rm -f "$err"; return 1; }
+    # Reissue once only after repeated authoritative reads proved the target
+    # image was not accepted. A second ambiguous reset is reconciled but never
+    # causes a third write.
+  done
+  current="$(az containerapp show "${AZ[@]}" -g "$RG" -n "$app" \
+    --query properties.template.containers[0].image -o tsv 2>/dev/null || true)"
+  [ "$current" = "$IMG" ] && { rm -f "$err"; return 0; }
+  cat "$err" >&2
+  rm -f "$err"
+  return 1
+}
+
 _update_lane_worker() {
   local app="$1"
   local staging_capacity=()
@@ -31,10 +73,11 @@ _update_lane_worker() {
     if [ "${STAGING_WORKERS_QUIESCED:-0}" = 1 ]; then
       restore_scale=(--min-replicas "$(_staging_old_min "$app")")
     fi
-    if [ -n "${RELEASE_WORKER:-}" ] && [ "$app" = "$RELEASE_WORKER" ]; then
+    if [ "${DEPLOY_TARGET_ENV:-production}" != staging ] && \
+        [ -n "${RELEASE_WORKER:-}" ] && [ "$app" = "$RELEASE_WORKER" ]; then
       release_capacity=("ACP_WORKERS=3" "ACP_DB_MAX_CONN=6")
     fi
-    _aca_retry az containerapp update "${AZ[@]}" -g "$RG" -n "$app" --image "$IMG" \
+    _update_worker_reconciled "$app" "${AZ[@]}" -g "$RG" -n "$app" --image "$IMG" \
       --termination-grace-period "$WORKER_TERMINATION_GRACE_SECONDS" \
       "${restore_scale[@]}" \
       --set-env-vars "ACP_SHUTDOWN_DRAIN_SECONDS=$WORKER_DRAIN_SECONDS" \

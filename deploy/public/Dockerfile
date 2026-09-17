@@ -124,4 +124,4 @@ COPY deploy/public/worker-entry.sh /usr/local/bin/acp-worker
 RUN chmod +x /usr/local/bin/acp-worker
 # Materialize the Drive ADC secret (if provided) to a file google-auth can read,
 # then start the server.
-CMD ["sh", "-c", "if [ -n \"$ACP_GOOGLE_ADC\" ]; then printf '%s' \"$ACP_GOOGLE_ADC\" > /tmp/adc.json && export GOOGLE_APPLICATION_CREDENTIALS=/tmp/adc.json; fi; exec python -m uvicorn app:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["sh", "-c", "if [ -n \"$ACP_GOOGLE_ADC\" ]; then printf '%s' \"$ACP_GOOGLE_ADC\" > /tmp/adc.json && export GOOGLE_APPLICATION_CREDENTIALS=/tmp/adc.json; fi; exec python process_main.py"]

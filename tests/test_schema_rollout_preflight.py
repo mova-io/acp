@@ -189,6 +189,533 @@ def test_durable_failed_process_receipt_cannot_be_hidden_by_recovered_process():
     assert not result['ok'] and result['events'] == [durable]
 
 
+def _complete_startup_reads(row, *, restart=0):
+    replicas = [{'properties': {'containers': [
+        {'ready': True, 'started': True, 'restartCount': restart}]}}]
+    system = [{'RevisionName': row['properties']['latestRevisionName'], 'Reason': 'ContainerStarted',
+               'Msg': 'started', 'TimeStamp': 'now', 'Count': 1}]
+    console = [
+        {'Log': '{"event":"schema.boot","state":"completed","version":57}',
+         'TimeStamp': 'now'},
+        {'Log': '{"event":"startup.phase","phase":"workers_start","state":"completed"}',
+         'TimeStamp': 'now'},
+    ]
+    return replicas, system, console
+
+
+def test_complete_post_ready_snapshot_retries_when_logs_arrive_late(monkeypatch):
+    row = app()
+    replicas, system, console = _complete_startup_reads(row)
+    system_reads = 0
+
+    def read(_subscription, *args, **_kwargs):
+        nonlocal system_reads
+        if args[1:3] == ('revision', 'show'):
+            return row
+        if args[1] == 'show':
+            return row
+        if args[1:3] == ('replica', 'list'):
+            return replicas
+        if '--type' in args:
+            system_reads += 1
+            if system_reads == 1:
+                raise RuntimeError('logs not indexed yet')
+            return system
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: None)
+    monkeypatch.setattr(evidence.time, 'sleep', lambda _seconds: None)
+    result = evidence.collect('sub', 'group', 'api-staging', 'old', timeout=20)
+    assert result['ok'] is True and system_reads == 2
+
+
+def test_worker_contract_accepts_task_bootstrap_without_api_startup_phase(monkeypatch):
+    row = app('discovery-worker-staging')
+    container = next(c for c in row['properties']['template']['containers']
+                     if c['name'] == row['name'])
+    container['command'] = ['acp-worker']
+    container['env'].append({'name': 'ACP_WORKER_ROLE', 'value': 'discovery'})
+    replicas, system, console = _complete_startup_reads(row)
+    console = [event for event in console if 'startup.phase' not in event['Log']]
+
+    def read(_subscription, *args, **_kwargs):
+        if args[1:3] == ('revision', 'show') or args[1] == 'show':
+            return row
+        if args[1:3] == ('replica', 'list'):
+            return replicas
+        if '--type' in args:
+            return system
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: None)
+    assert evidence.collect('sub', 'group', row['name'], 'old', timeout=20)['ok'] is True
+
+
+def test_api_contract_still_requires_startup_phase(monkeypatch):
+    row = app()
+    replicas, system, console = _complete_startup_reads(row)
+    console = [event for event in console if 'startup.phase' not in event['Log']]
+    clock = [0.0]
+
+    def read(_subscription, *args, **_kwargs):
+        if args[1:3] == ('revision', 'show') or args[1] == 'show':
+            return row
+        if args[1:3] == ('replica', 'list'):
+            return replicas
+        if '--type' in args:
+            return system
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: None)
+    monkeypatch.setattr(evidence.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(evidence.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    with pytest.raises(evidence.EvidenceUnavailable) as caught:
+        evidence.collect('sub', 'group', row['name'], 'old', timeout=6)
+    assert caught.value.reason == 'console_logs_incomplete'
+
+
+def test_missing_container_started_reports_system_logs_incomplete(monkeypatch):
+    row = app()
+    replicas, _system, console = _complete_startup_reads(row)
+    clock = [0.0]
+
+    def read(_subscription, *args, **_kwargs):
+        if args[1:3] == ('revision', 'show') or args[1] == 'show':
+            return row
+        if args[1:3] == ('replica', 'list'):
+            return replicas
+        if '--type' in args:
+            return []
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: None)
+    monkeypatch.setattr(evidence.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(evidence.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    with pytest.raises(evidence.EvidenceUnavailable) as caught:
+        evidence.collect('sub', 'group', row['name'], 'old', timeout=6)
+    assert caught.value.reason == 'system_logs_incomplete'
+
+
+def test_permanently_missing_post_ready_logs_exhaust_one_deadline(monkeypatch):
+    row = app()
+    replicas, _, console = _complete_startup_reads(row)
+    clock = [0.0]
+
+    def read(_subscription, *args, **_kwargs):
+        if args[1:3] == ('revision', 'show'):
+            return row
+        if args[1] == 'show':
+            return row
+        if args[1:3] == ('replica', 'list'):
+            return replicas
+        if '--type' in args:
+            raise RuntimeError('logs unavailable')
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: None)
+    monkeypatch.setattr(evidence.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(evidence.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    with pytest.raises(evidence.EvidenceUnavailable) as caught:
+        evidence.collect('sub', 'group', 'api-staging', 'old', timeout=6)
+    assert caught.value.reason == 'azure_read_unavailable'
+    assert clock[0] == 6
+
+
+@pytest.mark.parametrize('failure', ['restart', 'durable'])
+def test_proved_startup_failure_is_never_retried_into_success(monkeypatch, failure):
+    row = app()
+    replicas, system, console = _complete_startup_reads(
+        row, restart=1 if failure == 'restart' else 0)
+    reads = 0
+
+    def read(_subscription, *args, **_kwargs):
+        nonlocal reads
+        reads += 1
+        if args[1:3] == ('revision', 'show'):
+            return row
+        if args[1] == 'show':
+            return row
+        if args[1:3] == ('replica', 'list'):
+            return replicas
+        if '--type' in args:
+            return system
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    durable = ({'reason': 'startup.failure', 'state': 'failed', 'phase': 'workers_start',
+                'error_type': 'RuntimeError', 'sqlstate': None}
+               if failure == 'durable' else None)
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: durable)
+    monkeypatch.setattr(evidence.time, 'sleep', lambda _seconds: pytest.fail('fatal evidence retried'))
+    with pytest.raises(evidence.StartupFailure):
+        evidence.collect('sub', 'group', 'api-staging', 'old', timeout=20)
+    assert reads == (3 if failure == 'restart' else 8)
+
+
+@pytest.mark.parametrize('source', ['replica', 'system', 'console', 'durable'])
+def test_each_fatal_source_is_latched_before_a_later_transient_read(monkeypatch, source):
+    row = app()
+    healthy_replicas, healthy_system, healthy_console = _complete_startup_reads(row)
+    state = {'fatal_returned': False, 'transient_sent': False, 'durable_calls': 0}
+
+    def maybe_transient():
+        if state['fatal_returned'] and not state['transient_sent']:
+            state['transient_sent'] = True
+            raise RuntimeError('later Azure read was transient')
+
+    def read(_subscription, *args, **_kwargs):
+        maybe_transient()
+        if args[1:3] == ('revision', 'show'):
+            return row
+        if args[1] == 'show':
+            return row
+        if args[1:3] == ('replica', 'list'):
+            if source == 'replica' and not state['fatal_returned']:
+                state['fatal_returned'] = True
+                return [{'properties': {'containers': [
+                    {'ready': True, 'started': True, 'restartCount': 1}]}}]
+            return healthy_replicas
+        if '--type' in args:
+            if source == 'system' and not state['fatal_returned']:
+                state['fatal_returned'] = True
+                return [{'RevisionName': 'new', 'Reason': 'ContainerTerminated',
+                         'Msg': "exit code '1'", 'TimeStamp': 'now'}]
+            return healthy_system
+        if args[1:3] == ('logs', 'show'):
+            if source == 'console' and not state['fatal_returned']:
+                state['fatal_returned'] = True
+                return [{'Log': '{"event":"startup.phase","phase":"workers_start","state":"failed"}',
+                         'TimeStamp': 'now'}]
+            return healthy_console
+        raise AssertionError(args)
+
+    def durable(*_args):
+        state['durable_calls'] += 1
+        if source == 'durable' and not state['fatal_returned']:
+            state['fatal_returned'] = True
+            return {'reason': 'startup.failure', 'state': 'failed', 'phase': 'workers_start',
+                    'error_type': 'RuntimeError', 'sqlstate': None}
+        return None
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', durable)
+    monkeypatch.setattr(evidence.time, 'sleep', lambda _seconds: None)
+    with pytest.raises(evidence.StartupFailure):
+        evidence.collect('sub', 'group', 'api-staging', 'old', timeout=20)
+    assert state['fatal_returned'] is True
+    assert state['transient_sent'] is False
+
+
+def test_missing_post_ready_container_fields_retry_then_complete(monkeypatch):
+    row = app()
+    healthy_replicas, system, console = _complete_startup_reads(row)
+    replica_reads = 0
+
+    def read(_subscription, *args, **_kwargs):
+        nonlocal replica_reads
+        if args[1:3] == ('revision', 'show'):
+            return row
+        if args[1] == 'show':
+            return row
+        if args[1:3] == ('replica', 'list'):
+            replica_reads += 1
+            if replica_reads == 1:
+                return [{'properties': {'containers': [{'ready': True}]}}]
+            return healthy_replicas
+        if '--type' in args:
+            return system
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: None)
+    monkeypatch.setattr(evidence.time, 'sleep', lambda _seconds: None)
+    result = evidence.collect('sub', 'group', 'api-staging', 'old', timeout=20)
+    assert result['ok'] is True
+    assert replica_reads == 3  # incomplete initial read, then initial+final complete snapshot
+
+
+@pytest.mark.parametrize('container,reason', [
+    ({'ready': False, 'started': True, 'restartCount': 0}, 'container_not_ready'),
+    ({'ready': True, 'started': False, 'restartCount': 0}, 'container_not_ready'),
+    ({'ready': True, 'started': True, 'restartCount': 2}, 'container_restart'),
+    ({'ready': True, 'started': True, 'restartCount': False}, 'container_restart'),
+    ({'ready': True, 'started': True, 'restartCount': -1}, 'container_restart'),
+])
+def test_explicit_post_ready_container_failure_never_retries_to_later_healthy(
+        monkeypatch, container, reason):
+    row = app()
+    healthy_replicas, system, console = _complete_startup_reads(row)
+    replica_reads = 0
+
+    def read(_subscription, *args, **_kwargs):
+        nonlocal replica_reads
+        if args[1:3] == ('revision', 'show'):
+            return row
+        if args[1] == 'show':
+            return row
+        if args[1:3] == ('replica', 'list'):
+            replica_reads += 1
+            return ([{'properties': {'containers': [container]}}]
+                    if replica_reads == 1 else healthy_replicas)
+        if '--type' in args:
+            return system
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: None)
+    monkeypatch.setattr(evidence.time, 'sleep', lambda _seconds: pytest.fail('fatal evidence retried'))
+    with pytest.raises(evidence.StartupFailure) as caught:
+        evidence.collect('sub', 'group', 'api-staging', 'old', timeout=20)
+    assert caught.value.reason == reason
+    assert replica_reads == 1
+
+
+def test_main_artifact_records_only_allowlisted_fatal_reason(monkeypatch, tmp_path):
+    output = tmp_path / 'startup.json'
+
+    def fail(*_args, **_kwargs):
+        raise evidence.StartupFailure('container_restart')
+
+    monkeypatch.setattr(evidence, 'collect', fail)
+    assert evidence.main(['--subscription', 'sub', '--group', 'group', '--image', 'image',
+                          '--output', str(output), 'api-staging']) == 1
+    saved = json.loads(output.read_text())
+    assert saved['roles'] == [
+        {'app': 'api-staging', 'ok': False, 'reason': 'container_restart'}]
+    assert 'exception' not in output.read_text().lower()
+
+
+def test_main_artifact_records_only_allowlisted_missing_evidence_reason(monkeypatch, tmp_path):
+    output = tmp_path / 'startup.json'
+    monkeypatch.setattr(evidence, 'collect',
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                            evidence.EvidenceUnavailable('console_logs_incomplete')))
+    assert evidence.main(['--subscription', 'sub', '--group', 'group', '--image', 'image',
+                          '--output', str(output), 'worker-staging']) == 1
+    assert json.loads(output.read_text())['roles'] == [
+        {'app': 'worker-staging', 'ok': False, 'reason': 'console_logs_incomplete'}]
+
+
+def test_later_role_attempt_cannot_overwrite_first_failed_receipt(monkeypatch, tmp_path):
+    output = tmp_path / 'startup.json'
+    output.write_text(json.dumps({'image': 'image', 'roles': [
+        {'app': 'assess-staging', 'ok': False, 'reason': 'console_logs_incomplete'}]}))
+
+    def collect(_subscription, _group, name, _image, **_kwargs):
+        if name == 'release-staging':
+            raise evidence.EvidenceUnavailable('azure_read_unavailable')
+        return {'app': name, 'ok': True, 'revision': 'new'}
+
+    monkeypatch.setattr(evidence, 'collect', collect)
+    assert evidence.main(['--subscription', 'sub', '--group', 'group', '--image', 'image',
+                          '--output', str(output), '--known-app', 'assess-staging',
+                          '--known-app', 'release-staging', 'assess-staging', 'release-staging']) == 1
+    roles = {row['app']: row for row in json.loads(output.read_text())['roles']}
+    assert roles['assess-staging']['reason'] == 'console_logs_incomplete'
+    assert roles['release-staging']['reason'] == 'azure_read_unavailable'
+
+
+def test_retained_prior_failure_does_not_fail_a_later_successful_attempt(monkeypatch, tmp_path):
+    output = tmp_path / 'startup.json'
+    output.write_text(json.dumps({'image': 'image', 'roles': [
+        {'app': 'assess-staging', 'ok': False, 'reason': 'console_logs_incomplete'}]}))
+    monkeypatch.setattr(evidence, 'collect', lambda *_args, **_kwargs: {
+        'app': 'assess-staging', 'ok': True, 'revision': 'new'})
+    assert evidence.main(['--subscription', 'sub', '--group', 'group', '--image', 'image',
+                          '--output', str(output), '--known-app', 'assess-staging',
+                          'assess-staging']) == 0
+    assert json.loads(output.read_text())['roles'][0]['reason'] == 'console_logs_incomplete'
+
+
+def test_malformed_or_unsanitized_prior_rows_cannot_survive_merge(monkeypatch, tmp_path):
+    output = tmp_path / 'startup.json'
+    output.write_text(json.dumps({'image': 'image', 'roles': [
+        {'app': 'assess-staging', 'ok': False, 'reason': 'raw credential=secret',
+         'exception': 'credential=secret'},
+        {'app': 'unknown-staging', 'ok': False, 'reason': 'container_restart'},
+        {'app': 'release-staging', 'ok': False, 'reason': 'container_restart',
+         'raw': 'credential=secret'}]}))
+    monkeypatch.setattr(evidence, 'collect', lambda *_args, **_kwargs: {
+        'app': 'assess-staging', 'ok': True, 'revision': 'new'})
+    assert evidence.main(['--subscription', 'sub', '--group', 'group', '--image', 'image',
+                          '--output', str(output), '--known-app', 'assess-staging',
+                          '--known-app', 'release-staging', 'assess-staging']) == 0
+    saved = output.read_text()
+    roles = {row['app']: row for row in json.loads(saved)['roles']}
+    assert roles == {
+        'assess-staging': {'app': 'assess-staging', 'ok': True, 'revision': 'new'},
+        'release-staging': {'app': 'release-staging', 'ok': False,
+                            'reason': 'container_restart'}}
+    assert 'credential' not in saved and 'exception' not in saved and 'raw' not in saved
+
+
+def _revision_app(revision, image):
+    result = app()
+    result['properties']['latestRevisionName'] = revision
+    result['properties']['latestReadyRevisionName'] = revision
+    selected = [container for container in result['properties']['template']['containers']
+                if container.get('name') == result['name']]
+    selected[0]['image'] = image
+    return result
+
+
+def test_prior_revision_is_not_latched_before_expected_image_becomes_visible(monkeypatch):
+    old = _revision_app('old-revision', 'old-image')
+    target = _revision_app('target-revision', 'target-image')
+    replicas, system, console = _complete_startup_reads(target)
+    app_reads = 0
+
+    def read(_subscription, *args, **_kwargs):
+        nonlocal app_reads
+        if args[1:3] == ('revision', 'show'):
+            revision = args[args.index('--revision') + 1]
+            return old if revision == 'old-revision' else target
+        if args[1] == 'show':
+            app_reads += 1
+            return old if app_reads == 1 else target
+        if args[1:3] == ('replica', 'list'):
+            return replicas
+        if '--type' in args:
+            return system
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: None)
+    monkeypatch.setattr(evidence.time, 'sleep', lambda _seconds: None)
+    result = evidence.collect('sub', 'group', 'api-staging', 'target-image', timeout=20)
+    assert result['ok'] is True and result['revision'] == 'target-revision'
+    assert app_reads == 3  # old visibility, target latch, final target snapshot
+
+
+def test_prior_image_visibility_exhausts_deadline_without_false_revision_latch(monkeypatch):
+    old = _revision_app('old-revision', 'old-image')
+    clock = [0.0]
+
+    def read(_subscription, *args, **_kwargs):
+        return old
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(evidence.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    with pytest.raises(evidence.EvidenceUnavailable) as caught:
+        evidence.collect('sub', 'group', 'api-staging', 'target-image', timeout=6)
+    assert caught.value.reason == 'target_not_visible'
+    assert clock[0] == 6
+
+
+def test_same_image_prior_revision_termination_is_not_attributed_to_new_target(monkeypatch):
+    prior = _revision_app('old-revision', 'target-image')
+    target = _revision_app('new-revision', 'target-image')
+    replicas, system, console = _complete_startup_reads(target)
+    old_terminated = [{'RevisionName': 'old-revision', 'Reason': 'ContainerTerminated',
+                       'Msg': "exit code '0' reason 'ManuallyStopped'", 'TimeStamp': 'now'}]
+    latest_reads = 0
+
+    def read(_subscription, *args, **_kwargs):
+        nonlocal latest_reads
+        if args[1] == 'show':
+            latest_reads += 1
+            return prior if latest_reads == 1 else target
+        if args[1:3] == ('revision', 'show'):
+            revision = args[args.index('--revision') + 1]
+            return prior if revision == 'old-revision' else target
+        if args[1:3] == ('replica', 'list'):
+            return replicas
+        if '--type' in args:
+            return old_terminated + system
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: None)
+    monkeypatch.setattr(evidence.time, 'sleep', lambda _seconds: None)
+    result = evidence.collect('sub', 'group', 'api-staging', 'target-image', timeout=20,
+                              exclude_revision='old-revision')
+    assert result['revision'] == 'new-revision' and result['ok'] is True
+
+
+def test_termination_on_new_target_revision_remains_fatal(monkeypatch):
+    target = _revision_app('new-revision', 'target-image')
+    replicas, _system, console = _complete_startup_reads(target)
+
+    def read(_subscription, *args, **_kwargs):
+        if args[1] == 'show' or args[1:3] == ('revision', 'show'):
+            return target
+        if args[1:3] == ('replica', 'list'):
+            return replicas
+        if '--type' in args:
+            return [{'RevisionName': 'new-revision', 'Reason': 'ContainerTerminated',
+                     'Msg': "exit code '1'", 'TimeStamp': 'now'}]
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence.time, 'sleep', lambda _seconds: pytest.fail('fatal retried'))
+    with pytest.raises(evidence.StartupFailure) as caught:
+        evidence.collect('sub', 'group', 'api-staging', 'target-image', timeout=20,
+                         exclude_revision='old-revision')
+    assert caught.value.reason == 'system_terminated'
+
+
+@pytest.mark.parametrize('drift,reason', [('revision', 'revision_changed'),
+                                          ('image', 'image_changed')])
+def test_post_target_latch_revision_or_image_drift_is_fatal(monkeypatch, drift, reason):
+    target = _revision_app('target-revision', 'target-image')
+    changed = _revision_app('other-revision' if drift == 'revision' else 'target-revision',
+                            'other-image')
+    replicas, system, console = _complete_startup_reads(target)
+    app_reads = 0
+    revision_reads = 0
+
+    def read(_subscription, *args, **_kwargs):
+        nonlocal app_reads, revision_reads
+        if args[1:3] == ('revision', 'show'):
+            revision_reads += 1
+            return changed if drift == 'image' and revision_reads > 1 else target
+        if args[1] == 'show':
+            app_reads += 1
+            return changed if drift == 'revision' and app_reads > 1 else target
+        if args[1:3] == ('replica', 'list'):
+            return replicas
+        if '--type' in args:
+            return system
+        if args[1:3] == ('logs', 'show'):
+            return console
+        raise AssertionError(args)
+
+    monkeypatch.setattr(evidence, 'read', read)
+    monkeypatch.setattr(evidence, 'durable_failure', lambda *_args: None)
+    monkeypatch.setattr(evidence.time, 'sleep', lambda _seconds: pytest.fail('latched drift retried'))
+    with pytest.raises(evidence.StartupFailure) as caught:
+        evidence.collect('sub', 'group', 'api-staging', 'target-image', timeout=20)
+    assert caught.value.reason == reason
+
+
 @pytest.mark.parametrize('blue_green,active_override', [('0', '0'), ('1', '0'), ('0', '1')])
 def test_real_shell_failure_gate_stops_both_rollout_paths(tmp_path, blue_green, active_override):
     script = (ROOT / 'deploy/public/redeploy.sh').read_text()

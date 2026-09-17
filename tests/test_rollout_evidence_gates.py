@@ -112,6 +112,8 @@ _require_empty_staging_queue() {{ echo queue >> "$LOG"; }}
 _quiesce_staging_workers() {{ echo quiesce >> "$LOG"; }}
 _require_single_revision_mode() {{ echo require-mode >> "$LOG"; }}
 _ensure_single_revision_mode() {{ echo mode >> "$LOG"; }}
+_capture_staging_recovery_state() {{ echo capture >> "$LOG"; }}
+_arm_staging_recovery() {{ echo arm >> "$LOG"; }}
 _schema_preflight() {{ echo schema >> "$LOG"; }}
 _update_api_normal() {{ echo api >> "$LOG"; }}
 _prepare_schema_for_rollout() {{{function}
@@ -122,7 +124,7 @@ _update_api_normal
     harness.chmod(0o755)
     result = subprocess.run([str(harness), environment, str(tmp_path)])
     assert result.returncode == 0
-    expected = ['schema', 'mode', 'api'] if environment == 'staging' else ['schema', 'api']
+    expected = ['schema', 'mode', 'capture', 'arm', 'api'] if environment == 'staging' else ['schema', 'api']
     assert (tmp_path / 'order-log').read_text().splitlines() == expected
 
 
@@ -168,6 +170,66 @@ _restore_staging_workers
     assert ('update_api_image.py' in log) is bool(api_attempted)
 
 
+def test_normal_staging_api_gate_failure_runs_full_old_fleet_recovery(tmp_path):
+    source = (ROOT / 'deploy/public/redeploy.sh').read_text()
+    capture = source.split('_capture_staging_recovery_state() {', 1)[1].split('\n}', 1)[0]
+    arm = source.split('_arm_staging_recovery() {', 1)[1].split('\n}', 1)[0]
+    restore = source.split('_restore_staging_workers() {', 1)[1].split('\n_staging_bootstrap_exit()', 1)[0]
+    on_exit = source.split('_staging_bootstrap_exit() {', 1)[1].split('\n}', 1)[0]
+    harness = tmp_path / 'normal-recovery.sh'
+    harness.write_text(f'''#!/usr/bin/env bash
+set -euo pipefail
+_capture_staging_recovery_state() {{{capture}
+}}
+_arm_staging_recovery() {{{arm}
+}}
+_restore_staging_workers() {{{restore}
+_staging_bootstrap_exit() {{{on_exit}
+}}
+WORK="$1/work"; mkdir -p "$WORK"; LOG="$1/recovery-log"
+APP=api; LANE_WORKERS=(worker); AZ=(fake); RG=g; SUB=s; SRC_ROOT="$2"
+STAGING_OLD_IMAGES=(); STAGING_OLD_MINS=(); STAGING_OLD_REVISIONS=()
+STAGING_OLD_API_IMAGE=""; STAGING_OLD_API_REVISION=""
+STAGING_WORKERS_QUIESCED=0; STAGING_API_TARGET_READY=0; STAGING_API_MUTATION_ATTEMPTED=0
+API_ENV_VARS=(ACP_DB_MAX_CONN=8); WORKER_TERMINATION_GRACE_SECONDS=600
+WORKER_DRAIN_SECONDS=540; RELEASE_WORKER=release
+die() {{ exit 31; }}
+_aca_retry() {{ "$@"; }}
+_wait_recovery_cohort() {{ echo "verified $*" >> "$LOG"; }}
+_update_lane_worker() {{ :; }}
+_wait_rollout_cohort() {{ die; }}
+python3() {{ echo "python $*" >> "$LOG"; }}
+az() {{
+  case "$*" in
+    *"containerapp update"*) echo "az $*" >> "$LOG" ;;
+  esac
+  case "$*" in
+    *"containerapp update"*) : ;;
+    *"-n api"*"containers[0].image"*) echo old-api:image ;;
+    *"-n worker"*"containers[0].image"*) echo old-worker:image ;;
+    *"-n worker"*"scale.minReplicas"*) echo 2 ;;
+    *"revision list"*"-n worker"*) echo worker-old ;;
+    *"-n api"*latestRevisionName*) echo api-new ;;
+    *"-n worker"*latestRevisionName*) echo worker-old ;;
+    *) return 1 ;;
+  esac
+}}
+_capture_staging_recovery_state
+_arm_staging_recovery
+STAGING_API_MUTATION_ATTEMPTED=1
+_wait_rollout_cohort api api-old
+''')
+    harness.chmod(0o755)
+    result = subprocess.run([str(harness), str(tmp_path), str(ROOT)],
+                            capture_output=True, text=True)
+    assert result.returncode == 31
+    log = (tmp_path / 'recovery-log').read_text()
+    assert 'update_api_image.py' in log and '--image old-api:image' in log
+    assert 'containerapp update' in log and '--image old-worker:image' in log
+    assert 'verified api api-new old-api:image 1' in log
+    assert 'verified worker worker-old old-worker:image 2' in log
+
+
 def test_bootstrap_revision_mode_gate_is_read_only_and_fails_closed(tmp_path):
     source = (ROOT / 'deploy/public/redeploy.sh').read_text()
     function = source.split('_require_single_revision_mode() {', 1)[1].split('\n}', 1)[0]
@@ -192,11 +254,11 @@ touch "$1/mutated"
 
 def test_late_worker_snapshot_failure_causes_zero_mutation(tmp_path):
     source = (ROOT / 'deploy/public/redeploy.sh').read_text()
-    function = source.split('_quiesce_staging_workers() {', 1)[1].split('\n}', 1)[0]
+    function = source.split('_capture_staging_recovery_state() {', 1)[1].split('\n}', 1)[0]
     harness = tmp_path / 'snapshot-failure.sh'
     harness.write_text(f'''#!/usr/bin/env bash
 set -euo pipefail
-_quiesce_staging_workers() {{{function}
+_capture_staging_recovery_state() {{{function}
 }}
 WORK="$1"; APP=api; RG=g; AZ=(fake); LANE_WORKERS=(worker1 worker2)
 STAGING_OLD_IMAGES=(); STAGING_OLD_MINS=(); STAGING_OLD_REVISIONS=()
@@ -215,7 +277,7 @@ az() {{
     *) return 1 ;;
   esac
 }}
-_quiesce_staging_workers
+_capture_staging_recovery_state
 ''')
     harness.chmod(0o755)
     result = subprocess.run([str(harness), str(tmp_path)], capture_output=True, text=True)
@@ -339,10 +401,13 @@ def test_older_residual_replica_is_discovered_without_scanning_history(monkeypat
 def test_delayed_configuration_revision_is_observed_and_deactivated(tmp_path):
     source = (ROOT / 'deploy/public/redeploy.sh').read_text()
     function = source.split('_quiesce_staging_workers() {', 1)[1].split('\n}', 1)[0]
+    capture = source.split('_capture_staging_recovery_state() {', 1)[1].split('\n}', 1)[0]
     real_python = sys.executable
     harness = tmp_path / 'quiesce.sh'
     harness.write_text(f'''set -euo pipefail
 _quiesce_staging_workers() {{{function}
+}}
+_capture_staging_recovery_state() {{{capture}
 }}
 REAL_PYTHON={real_python!r}
 WORK="$1"; SRC_ROOT="$2"; SUB=s; RG=g; FQDN=f; APP=api; AZ=(fake)
@@ -351,6 +416,7 @@ CURRENT_API_POOL=16; STAGING_DB_EXTERNAL_CONNECTIONS=3; WORKER_TERMINATION_GRACE
 STAGING_WORKERS_QUIESCED=0; ACTIVE_JOBS=0
 _aca_retry() {{ "$@"; }}
 _staging_bootstrap_exit() {{ :; }}
+_arm_staging_recovery() {{ STAGING_WORKERS_QUIESCED=1; trap _staging_bootstrap_exit EXIT; }}
 die() {{ echo "$*" >&2; return 1; }}
 sleep() {{ :; }}
 curl() {{ echo '{{"queue":{{"active":0}}}}'; }}

@@ -50,7 +50,7 @@ _COUNTS: dict[tuple[str, str], int] = {}
 _MAX_KEYS = 2048
 
 
-def swallowed(op: str, scan_id: str | None = None) -> None:
+def swallowed(op: str, scan_id: str | None = None, *, include_exception: bool = True) -> None:
     """Report a best-effort failure. Call from inside an `except` block, in place of `pass`.
 
     `op` reads "<function>: <what was being attempted> failed", matching the logger.warning
@@ -66,9 +66,15 @@ def swallowed(op: str, scan_id: str | None = None) -> None:
         _COUNTS[key] = n
     if n & (n - 1):          # not a power of two — already reported at a lower count
         return
-    logger.warning("%s for %s%s", op, scan_id or "-",
-                   "" if n == 1 else f" (occurrence {n}; reported at powers of two)",
-                   exc_info=True)
+    try:
+        logger.warning("%s for %s%s", op, scan_id or "-",
+                       "" if n == 1 else f" (occurrence {n}; reported at powers of two)",
+                       exc_info=include_exception)
+    except Exception:
+        # Observability is always secondary to the caller's control flow. A
+        # broken custom logging handler must not turn best-effort reporting
+        # into the failure the caller deliberately contained.
+        return
 
 
 def reset() -> None:

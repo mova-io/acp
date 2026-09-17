@@ -74,8 +74,10 @@ def test_interrupted_bootstrap_restores_old_worker_images_and_floors():
 
 def test_quiescence_targets_pre_update_revision_and_accounts_for_new_active_revision():
     quiesce = SCRIPT.split('_quiesce_staging_workers() {', 1)[1].split('\n}', 1)[0]
+    capture = SCRIPT.split('_capture_staging_recovery_state() {', 1)[1].split('\n}', 1)[0]
     before_update = quiesce.split('--min-replicas 0', 1)[0]
-    assert 'STAGING_OLD_REVISIONS[$index]="$(az containerapp revision list' in before_update
+    assert 'STAGING_OLD_REVISIONS[$index]="$(az containerapp revision list' in capture
+    assert '_capture_staging_recovery_state' in before_update
     assert 'revision="${STAGING_OLD_REVISIONS[$index]}"' in before_update
     after_update = quiesce.split('--min-replicas 0', 1)[1]
     assert '--revision "$revision"' in after_update
