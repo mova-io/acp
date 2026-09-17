@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Background, Controls, Handle, MarkerType, MiniMap, Position, ReactFlow } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import './operations-typography.css'
@@ -6,6 +6,7 @@ import './liveops-typography.css'
 import { cancelLiveOpsStage, getAdminActivity, getWorkerCapacity, openAdminActivityStream,
   resumeLiveOpsRemediation } from './api.js'
 import { ensureResizeObserver } from './resizeObserverFallback.js'
+import { handleWorkflowTabKeyDown } from './workflowTabs.js'
 import LiveOpsDrawer from './LiveOpsDrawer.jsx'
 import LiveOpsCostSummary from './LiveOpsCostSummary.jsx'
 import LiveOpsAiSummary from './LiveOpsAiSummary.jsx'
@@ -990,6 +991,7 @@ export default function AdminLiveTraffic({ me = null, currentScanId = null, onNa
   const [capacity, setCapacity] = useState(null)
   const [capacityState, setCapacityState] = useState('loading')
   const [flowTab, setFlowTab] = useState('infrastructure')
+  const flowTabIds = useId()
   const [flowFilter, setFlowFilter] = useState(null)
   const [jobState, setJobState] = useState('all')
   const history = useRef(new Map())
@@ -1188,6 +1190,8 @@ export default function AdminLiveTraffic({ me = null, currentScanId = null, onNa
     <div role="tablist" aria-label="Live Operations flow views" style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
       {[['infrastructure', 'Infrastructure map'], ['jobs', `Running jobs (${summary.running_workflows ?? summary.active_runs ?? 0})`]].map(([id, label]) =>
         <button key={id} type="button" role="tab" aria-selected={flowTab === id}
+          id={`${flowTabIds}-tab-${id}`} aria-controls={`${flowTabIds}-panel`}
+          tabIndex={flowTab === id ? 0 : -1} onKeyDown={handleWorkflowTabKeyDown}
           className={flowTab === id ? '' : 'ghost'}
           onClick={() => { setFlowTab(id); setFlowFilter(null); setSelectedKey(null) }}
           style={{ padding: '7px 12px', fontSize: 12 }}>{label}</button>)}
@@ -1214,7 +1218,8 @@ export default function AdminLiveTraffic({ me = null, currentScanId = null, onNa
         clipped at exactly the moment it had most to say. WORKER_CARD_MAX is that tallest card
         plus the map's own breathing room, so a fourth worker service widens the box rather than
         cutting one off. */}
-    <div style={{ height: flowTab === 'infrastructure'
+    <div role="tabpanel" id={`${flowTabIds}-panel`} aria-labelledby={`${flowTabIds}-tab-${flowTab}`}
+      style={{ height: flowTab === 'infrastructure'
       ? Math.max(590, WORKER_LANE_TOP + Math.max(0, infrastructureLanes - 1) * WORKER_LANE_GAP + WORKER_CARD_MAX)
       : Math.max(360, 100 + visibleGraph.nodes.filter((node) => node.type === 'workflow').length * 185),
       maxHeight: flowTab === 'infrastructure' ? 900 : 760,

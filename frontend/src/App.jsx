@@ -86,7 +86,7 @@ import ConfirmDialog from './ConfirmDialog.jsx'
 import { AdminInsights } from './AdminInsights.jsx'
 import AcrWorkspace from './AcrWorkspace.jsx'
 import AccessRestricted from './AccessRestricted.jsx'
-import { visibleTabs, isVisible, canOperate, firstPermittedTab, canOpenSettings, mergeBootstrapIdentity } from './access.js'
+import { visibleTabs, isVisible, isAccessPending, canOperate, firstPermittedTab, canOpenSettings, mergeBootstrapIdentity } from './access.js'
 import { deliveryAccess } from './deliveryAccess.js'
 import { timezoneBadge } from './userTimezone.js'
 import { handleWorkflowTabKeyDown } from './workflowTabs.js'
@@ -1805,6 +1805,26 @@ export default function App() {
   // stacking a scope-policy explanation above it made the newest run look like a second alert.
   const showScanHistoryBanner = isTimeTravel && !narrowDefault
     && (explicitTimeTravel || !primaryWorkflow)
+  // The workflow tablist's roving tab stop. Normally the selected tab (`view`). But `view` can be
+  // a tab the role no longer shows — an administrator hid it mid-session and the panel now reads
+  // Access restricted — and then no rendered tab matched, the tablist had no tab stop at all, and
+  // the panel was labelled by the id of a button that no longer exists. So: fall back to the first
+  // rendered tab that is not locked (the arrow-key handler skips disabled tabs, and a disabled
+  // button cannot take focus). This only decides which tab Tab lands on; it selects nothing and
+  // does not navigate, so the Access restricted screen stays. If every rendered tab is locked, or
+  // none is rendered, no tab claims the stop — there is nothing focusable to claim it.
+  const workflowTabs = visibleTabs(access, TABS)
+  const workflowTabLocked = (k, step) => busy && step > 0 && k !== 'discover' && view !== k
+  const viewTabRendered = workflowTabs.some(([k]) => k === view)
+  const workflowTabStop = viewTabRendered ? view
+    : (workflowTabs.find(([k, , , step]) => !workflowTabLocked(k, step)) || [])[0] ?? null
+  // Name for the tabpanel when its tab is not rendered, instead of aria-labelledby pointing at an
+  // id that is not in the document. Mirrors the heading AccessRestricted shows in that case.
+  const viewLabel = (TABS.find(([k]) => k === view) || [])[1] || view
+  const workflowPanelLabel = viewTabRendered ? undefined
+    : isVisible(access, view) ? viewLabel
+      : isAccessPending(access) ? 'Access pending'
+        : `Access restricted: ${viewLabel}`
 
 
   return (
@@ -2055,12 +2075,12 @@ export default function App() {
             // scan would most want to click back into became the one tab they couldn't reach.
             // Found live 2026-08-28 while adding the live-scan nav badge just below: the badge
             // would have pointed at a tab nothing could open.
-            const locked = busy && step > 0 && k !== 'discover' && view !== k
+            const locked = workflowTabLocked(k, step)
             return (
               <button key={k} id={`workflow-tab-${k}`} role="tab" aria-selected={view === k}
                       aria-controls="workflow-panel"
                       aria-current={view === k ? 'step' : undefined}
-                      tabIndex={view === k ? 0 : -1}
+                      tabIndex={workflowTabStop === k ? 0 : -1}
                       disabled={locked}
                       title={locked ? 'A scan or assessment is running — this step opens when it finishes' : rg}
                       className={`tab${view === k ? ' on' : ''}${done ? ' done' : ''}${step ? ' stepTab' : ''}${locked ? ' locked' : ''}`}
@@ -2329,7 +2349,9 @@ export default function App() {
         }} />}
 
       <main id="main-content" tabIndex={-1}>
-      <div id="workflow-panel" role="tabpanel" aria-labelledby={`workflow-tab-${view}`}>
+      <div id="workflow-panel" role="tabpanel"
+           aria-labelledby={viewTabRendered ? `workflow-tab-${view}` : undefined}
+           aria-label={workflowPanelLabel}>
       <ErrorBoundary key={view}>
       {/* PRD §10 — a tab the role does not include renders an explanation instead of its body.
           Wrapping the whole panel rather than gating each `view === 'x'` branch is deliberate:

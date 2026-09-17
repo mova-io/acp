@@ -1,0 +1,9 @@
+/* VersionToast only. The global focus rings (styles.css: --focus-ring #7a5c8e, and WCAG mode's
+   --hc-focus #005fcc, both !important in WCAG mode) sit on the banner's green and measure
+   1.12:1 / 1.19:1 against #15803d — below the 3:1 a focus indicator needs. White on #15803d is
+   5.02:1. The selector outranks `html[data-wcag="on"] :focus-visible` (0,3,0 > 0,2,1), and both
+   are !important, so this ring wins in either theme. */
+.acp-version-toast .acp-version-toast__control:focus-visible {
+  outline: 2px solid #ffffff !important;
+  outline-offset: 2px !important;
+}

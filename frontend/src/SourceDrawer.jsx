@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useId } from 'react'
 import Drawer from './Drawer.jsx'
+import { handleWorkflowTabKeyDown } from './workflowTabs.js'
 import { retentionOf } from './FileDrawer.jsx'
 import {
   listDispositionPolicies, getInventoryDiff, previewDispositionPolicy,
@@ -82,6 +83,7 @@ export default function SourceDrawer({ source, files = [], scans = [], onClose, 
   // `selSrc` is set), so the literal prop-as-initial-state read is enough — no effect needed
   // to keep it in sync with a prop that can't change under an already-mounted drawer.
   const [tab, setTab] = useState(initialTab)
+  const tabIds = useId()
   const [policies, setPolicies] = useState(null)   // null = still loading / unavailable
   const [policyErr, setPolicyErr] = useState('')
   const [invDiff, setInvDiff] = useState(null)     // null = none to show; the line is omitted
@@ -193,7 +195,10 @@ export default function SourceDrawer({ source, files = [], scans = [], onClose, 
     <Drawer title={title} subtitle={subtitle} onClose={onClose}>
       <div className="subtabs" role="tablist" aria-label="Source operations">
         {TABS.map((t) => (
-          <button key={t} role="tab" aria-selected={tab === t} className={`tab${tab === t ? ' on' : ''}`}
+          <button key={t} role="tab" id={`${tabIds}-tab-${t}`} aria-selected={tab === t}
+                  aria-controls={`${tabIds}-panel`} tabIndex={tab === t ? 0 : -1}
+                  onKeyDown={handleWorkflowTabKeyDown}
+                  className={`tab${tab === t ? ' on' : ''}`}
                   style={{ display: 'inline-block', padding: '5px 12px', fontSize: 13 }}
                   onClick={() => setTab(t)}>{t}</button>
         ))}
@@ -218,6 +223,8 @@ export default function SourceDrawer({ source, files = [], scans = [], onClose, 
         <p style={{ marginTop: 16, fontSize: 13, color: TONE.ok[0] }}>✓ No discovery issues</p>
       )}
 
+      {/* The per-tab body. "Needs attention" above is shown on every tab, so it sits outside. */}
+      <div role="tabpanel" id={`${tabIds}-panel`} aria-labelledby={`${tabIds}-tab-${tab}`}>
       {tab === 'Overview' && (
         <>
           <h4 className="drawerh">Discovery summary</h4>
@@ -438,6 +445,7 @@ export default function SourceDrawer({ source, files = [], scans = [], onClose, 
           )}
         </>
       )}
+      </div>
 
       {/* Persistent footer — configuration actions stay reachable from every tab. */}
       <div style={{ position: 'sticky', bottom: 0, marginTop: 22, paddingTop: 12,
