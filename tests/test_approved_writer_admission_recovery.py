@@ -412,3 +412,28 @@ def test_concurrent_retries_for_two_rows_share_one_file_writer(store):
     assert sum(r['accepted'] for r in outcomes) == 1
     assert [r['reason'] for r in outcomes if not r['accepted']] == [store.RETRY_WRITER_BUSY]
     assert len([j for j in writer_jobs(store) if j['status']=='queued']) == 1
+
+
+def test_retry_requires_review_permission_even_for_ones_own_scan(store, monkeypatch):
+    import core, workspace_roles as roles, workspace_rollout as rollout
+    from app import app
+    from fastapi.testclient import TestClient
+    owner, viewer = 'owner@example.com', 'viewer@example.com'
+    monkeypatch.setattr(core, 'store', store)
+    monkeypatch.setattr(core, 'ACCESS_CODE', '')
+    monkeypatch.setattr(core, 'GOOGLE_CLIENT_ID', 'test-client-id')
+    monkeypatch.setattr(core, 'E2E_KEY', None)
+    monkeypatch.setattr(core, 'OWNER_EMAIL', owner)
+    monkeypatch.setattr(core, 'OPEN_ACCESS', True)
+    monkeypatch.setattr(core, 'verify_gis_token', lambda t:t)
+    monkeypatch.setattr(core, 'email_allowed', lambda e:True)
+    monkeypatch.setenv(rollout.MODE_VAR, 'enforce')
+    roles.seed_builtin_roles(store, tenant_id=owner, actor=owner)
+    store.upsert_person({'email':viewer,'workspace_role_id':'viewer','status':'access_ready'})
+    item_id = seed(store)
+    with store._db.cursor() as cur:
+        store._db.execute(cur, 'UPDATE scan_runs SET owner_email=%s WHERE id=%s', (viewer,SID))
+    before = writer_jobs(store)
+    response = TestClient(app).post(f'/hitl/queue/{item_id}/retry-write', headers={'Authorization':f'Bearer {viewer}'})
+    assert response.status_code == 403, response.text
+    assert writer_jobs(store) == before
