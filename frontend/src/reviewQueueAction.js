@@ -1,4 +1,4 @@
-import { laneOf, workflowStatusOf } from './remediationInboxModel.js'
+import { approvedWriteUnconfirmed, laneOf, workflowStatusOf } from './remediationInboxModel.js'
 import { automaticReviewResponsibility } from './automaticReviewResponsibility.js'
 
 // Action ownership is independent of severity, which remains available for priority filters.
@@ -7,6 +7,10 @@ export function reviewQueueAction(row, decisions = {}, automatic = false) {
   const owner = automaticReviewResponsibility(row, decisions)
   if (status === 'completed') return { key: 'results', label: 'Result recorded' }
   if (owner === 'acp') return { key: 'processing', label: 'Processing' }
+  // Approved, not written, not verified. "Review needed" was the wrong ask — the approval is
+  // recorded and no further one will be requested — and the row had no control at all behind it.
+  // Naming the state as recoverable is what routes the reviewer to the recovery pane.
+  if (approvedWriteUnconfirmed(row, decisions)) return { key: 'recover', label: 'Recovery needed' }
   if (status === 'awaiting-validation' || (automatic && owner === 'check')) return { key: 'check', label: 'Status check' }
   const lane = laneOf(row).key
   const manualReason = ['Manual work or no supported proposal writer',

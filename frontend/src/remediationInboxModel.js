@@ -150,6 +150,45 @@ export function isResolved(f, decisions = {}) {
   return !!(d && (d.state === 'accepted' || d.state === 'approved' || d.state === 'rejected' || d.state === 'not_applicable'))
 }
 
+/**
+ * Whether an approval is ALREADY RECORDED for this row — on the row itself (hitl_queue.status,
+ * which outlives the browser session) or in this session's decisions.
+ *
+ * An approval that is recorded is an approval that will never be asked for again: the exact same
+ * proposal cannot be re-approved, and a screen that asks for one is asking for something the
+ * backend would refuse. A rejection, a defer and an assignment are decisions, not approvals, and
+ * are deliberately excluded — that work really is a person's.
+ */
+export function approvalRecordedOn(f, decisions = {}) {
+  const d = decisions[f?.id] ?? decisions[f?.file]
+  if (f?.rejectedFix || ['assigned', 'deferred', 'rejected', 'not_applicable'].includes(d?.state)) return false
+  const st = String(f?.status || '').toLowerCase()
+  if (['approved', 'applied', 'accepted'].includes(st)) return true
+  return ['approved', 'accepted'].includes(d?.state)
+}
+
+/**
+ * An approved change whose WRITE has not been confirmed — the production state behind scan
+ * 6f07d85b39b8: `status='approved'`, `applied=null`, one proposal, and a writer that ran and
+ * declined to write the value (it kept the approved value for retry).
+ *
+ * This is NOT human work. The approval exists, so there is no second approval to request, and the
+ * queue must not ask for one. It is also NOT resolved: nothing was written, the corrected-copy
+ * assessment still lists the criterion, and `workflowStatusOf` deliberately keeps reporting it as
+ * blocked so the Blocked tab, the release blockers and the unresolved-work summary all still carry
+ * it. What it needs is a RECOVERY of the write, which is what the detail pane offers.
+ *
+ * `applied === true` is excluded on purpose: a written-but-unverified fix is a verification
+ * question, already handled by the awaiting-validation path.
+ */
+export function approvedWriteUnconfirmed(f, decisions = {}) {
+  if (!approvalRecordedOn(f, decisions)) return false
+  if (f?.validated || f?.verified === true) return false
+  if (f?.automaticQueued === true) return false
+  if (f?.applied === true || f?.autoApplied === true) return false
+  return workflowStatusOf(f, decisions) === 'blocked'
+}
+
 /** The plain-language issue — the dominant text in a row. Strips the "DOCX · " format prefix that
  *  buildHumanQueue puts on the title, and falls back to the criterion name. */
 export function issueLabel(f) {

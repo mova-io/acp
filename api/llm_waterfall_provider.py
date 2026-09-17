@@ -317,6 +317,14 @@ def managed_generate_attempts(prompt, ctx, generator, *, purpose='draft',
     from ai_generation_chain import normalize_chain, STEP_IDS, ELIGIBLE
     if type(image_prefix) is not bool:
         raise ValueError('explicit image prefix mode required')
+    # Fail closed: a model the zone map does not place ('zones' absent, or the model absent
+    # from it, or mapped to None) is refused exactly like a local one. That is deliberate —
+    # TextModelSpec.zone returns None for NOT REPORTED and must never be read as cloud.
+    # The cost of it is that a WRAPPER which forgets to carry `zones` forward turns every
+    # quality_first dispatch into this refusal, before any ledger or provider call, with no
+    # error anywhere. Any object handed to this function must propagate the real map
+    # (see _CaptionGenerator / _ValidatedGenerator); synthesising one here would trade a
+    # silent refusal for a silent lie about where a document was sent.
     if ctx.policy.get('quality_first') and any(getattr(generator, 'zones', {}).get(model.name) != 'cloud' for model in generator.models):
         return defer_managed('quality_first_cloud_endpoint_required')
     chain = getattr(ctx, 'policy', {}).get('generation_chain')
