@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
 import RemediationCategoryPill, { CATEGORY_SHORT_LABELS, categoryExplanation } from './RemediationCategoryPill.jsx'
 import { REMEDIATION_CATEGORIES } from './remediationCategories.js'
 import { balancedSummaryModel, treemapRects, activityMonths, COVERAGE_STATES, FINDING_GROUPS } from './balancedSummaryModel.js'
@@ -84,7 +84,14 @@ export default function BalancedSummary({ run, files = [], inventory = null, cap
   const ages = [['week', 'Under 7 days'], ['month', '7–30 days'], ['older', 'Over 30 days'], ['unknown', 'Not recorded']]
   const maxAge = Math.max(1, ...Object.values(model.age).map(rows => rows.length))
   let cumulative = 0
-  const detailId = useId()
+  const detailId = useId(), otherId = useId()
+  // The Other breakdown belongs to one scan: it starts collapsed whenever the selected scan changes.
+  const [otherFor, setOtherFor] = useState(null)
+  if (otherFor != null && otherFor !== (run?.id ?? '')) setOtherFor(null)
+  const otherTotal = model.groups.Other.length
+  const otherOpen = otherFor != null && otherTotal > 0
+  const toggleOther = () => setOtherFor(otherOpen ? null : run?.id ?? '')
+  const percent = n => { const p = Math.round(n / otherTotal * 100); return p === 0 && n > 0 ? '<1%' : `${p}%` }
   return <div className={`balanced-summary${calendar ? ' balanced-summary-analytics' : ''}${showSupplemental ? '' : ' balanced-summary-focused'}`}>
     <p className="balanced-context">{run?.id ? <>Estate and finding charts: selected scan <strong>{run.id}</strong>.</> : 'Select an assessed scan to populate the estate and finding charts.'}
       {calendar && ' The activity calendar uses the reporting filters; these selected-scan charts do not aggregate repeated observations.'}</p>
@@ -136,13 +143,27 @@ export default function BalancedSummary({ run, files = [], inventory = null, cap
       <Card title="Finding categories" kind="findings" note={model.findingsKnown ? `${number(model.findings.length)} findings · grouped by criterion` : 'Assessment data is not available yet'}>
         {model.findingsKnown && <div className="balanced-rank-list">{groupRows.map(({ label, rows }) => {
           cumulative += rows.length
-          return <button type="button" className="balanced-rank" key={label} disabled={!rows.length} onClick={() => open(label, findingRows(rows))}>
-            <span>{label}</span><span className="balanced-rank-track"><i style={{ width: `${rows.length / maxGroup * 100}%` }} /></span><strong>{number(rows.length)}</strong>
+          const other = label === 'Other'
+          const parent = <button type="button" className="balanced-rank" key={label} disabled={!rows.length}
+            {...other ? { 'aria-expanded': otherOpen, 'aria-controls': otherId, onClick: toggleOther } : { onClick: () => open(label, findingRows(rows)) }}>
+            <span>{other && <span className="balanced-disclosure" aria-hidden="true">{otherOpen ? '▾' : '▸'}</span>}{label}</span><span className="balanced-rank-track"><i style={{ width: `${rows.length / maxGroup * 100}%` }} /></span><strong>{number(rows.length)}</strong>
             {model.findings.length > 0 && <small>{Math.round(cumulative / model.findings.length * 100)}% cumulative</small>}
           </button>
+          if (!other) return parent
+          return <Fragment key={label}>{parent}
+            <div id={otherId} className="balanced-subrank-list" role="group" aria-label="Other findings by WCAG criterion" hidden={!otherOpen}>
+              {otherOpen && <>
+                <button type="button" className="balanced-link" onClick={() => open('Other', findingRows(rows))}>View all {number(otherTotal)} Other records</button>
+                {model.otherCriteria.map(child => <button type="button" className="balanced-rank balanced-subrank" key={child.sc || '(none)'} onClick={() => open(`Other · ${child.label}`, findingRows(child.rows))}>
+                  <span>{child.label}</span><span className="balanced-rank-track"><i style={{ width: `${child.rows.length / maxGroup * 100}%` }} /></span><strong>{number(child.rows.length)}</strong>
+                  <small>{percent(child.rows.length)} of Other</small>
+                </button>)}
+              </>}
+            </div>
+          </Fragment>
         })}</div>}
         <DataTable caption="Finding categories" columns={['Category', 'Finding instances']} rows={groupRows.map(({ label, rows }) => [label, model.findingsKnown ? number(rows.length) : 'Not assessed'])} />
-        <p className="balanced-note">Structure: 1.3.*; contrast: 1.4.3, 1.4.6, 1.4.11; text alternatives: 1.1.1. Other includes the remaining selected criteria.</p>
+        <p className="balanced-note">Structure: 1.3.*; contrast: 1.4.3, 1.4.6, 1.4.11; text alternatives: 1.1.1. Other includes the remaining selected criteria; select it to break it down by criterion.</p>
       </Card>
       {showSupplemental && <Card title="Human review age" kind="review" note={model.findingsKnown ? `${number(model.reviewCount)} findings in Approve, AI, or Manual routes` : 'Review findings are not available yet'}>
         {model.findingsKnown && <div className="balanced-rank-list">{ages.map(([key, label]) => <button type="button" className="balanced-rank" key={key} disabled={!model.age[key].length} onClick={() => open(`${label} · review findings`, findingRows(model.age[key]))}>
