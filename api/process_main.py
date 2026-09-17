@@ -19,10 +19,10 @@ def _fields(exc):
     }
 
 
-def record_failure(exc):
+def _record_fields(fields):
     revision = (os.environ.get("CONTAINER_APP_REVISION") or "unknown").strip()
-    receipt = {"revision": revision, "phase": "process_startup", **_fields(exc)}
-    print(json.dumps({"event": "startup.process", "state": "failed", **_fields(exc)}),
+    receipt = {"revision": revision, "phase": "process_startup", **fields}
+    print(json.dumps({"event": "startup.process", "state": "failed", **fields}),
           file=sys.stderr, flush=True)
     dsn = os.environ.get("DATABASE_URL")
     if not dsn or revision == "unknown":
@@ -45,26 +45,64 @@ def record_failure(exc):
         return
 
 
-class _UvicornFailureHandler(logging.Handler):
-    def emit(self, record):
+def record_failure(exc):
+    _record_fields(_fields(exc))
+
+
+class _UvicornFailureFilter(logging.Filter):
+    recorded = False
+
+    def filter(self, record):
         try:
             if record.exc_info and record.exc_info[1] is not None:
                 record_failure(record.exc_info[1])
+                self.recorded = True
+                # Uvicorn would otherwise format the original exception and
+                # may expose a DSN or credential. Keep the operational signal
+                # while removing exception text from the centralized channel.
+                record.msg = "Application startup exception captured; details redacted"
+                record.args = ()
+                record.exc_info = None
+                record.exc_text = None
+            else:
+                # Starlette sends lifespan failures to Uvicorn as a traceback
+                # string inside the ASGI message, so no exc_info survives.
+                # Extract only the final exception class and redact the entire
+                # traceback before Uvicorn's handler formats it.
+                message = record.getMessage()
+                if "Traceback (most recent call last)" in message:
+                    match = re.search(r"\n([A-Za-z_][A-Za-z0-9_]{0,59})(?::[^\n]*)?\s*$",
+                                      message)
+                    _record_fields({"error_type": match.group(1) if match else "Exception",
+                                    "sqlstate": None})
+                    self.recorded = True
+                    record.msg = "Application startup exception captured; details redacted"
+                    record.args = ()
         except Exception:
-            return
+            # Logging filters must never break Uvicorn's own control flow.
+            return True
+        return True
 
 
 def main():
     import uvicorn
-    logging.getLogger("uvicorn.error").addHandler(_UvicornFailureHandler())
+    config = uvicorn.Config("app:app", host="0.0.0.0",
+                            port=int(os.environ.get("PORT", "8077")))
+    failure_filter = _UvicornFailureFilter()
+    # Config construction applies Uvicorn's dictConfig. Install after that so
+    # the handler cannot be removed before import/lifespan startup.
+    logging.getLogger("uvicorn.error").addFilter(failure_filter)
     try:
-        uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", "8077")))
+        config.load_app()
+        server = uvicorn.Server(config=config)
+        server.run()
     except BaseException as exc:
-        record_failure(exc)
+        if not failure_filter.recorded:
+            record_failure(exc)
         if isinstance(exc, SystemExit):
             return exc.code if isinstance(exc.code, int) else 1
         return 3
-    return 0
+    return 0 if server.started else 3
 
 
 if __name__ == "__main__":

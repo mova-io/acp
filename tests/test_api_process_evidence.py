@@ -8,21 +8,27 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_whole_process_nonzero_exit_emits_sanitized_evidence(tmp_path):
-    (tmp_path / 'uvicorn.py').write_text('''
-def run(*args, **kwargs):
-    raise ValueError("DATABASE_URL=postgresql://user:secret@host/db")
+def test_real_uvicorn_lifespan_failure_emits_root_sanitized_evidence(tmp_path):
+    process = tmp_path / 'process_main.py'
+    process.write_text((ROOT / 'api/process_main.py').read_text())
+    (tmp_path / 'app.py').write_text('''
+from fastapi import FastAPI
+app = FastAPI()
+@app.on_event("startup")
+def fail():
+    raise RuntimeError("DATABASE_URL=postgresql://user:secret@host/db")
 ''')
-    env = {**os.environ, 'PYTHONPATH': str(tmp_path),
+    env = {**os.environ, 'PYTHONPATH': str(tmp_path), 'PORT': '0',
            'CONTAINER_APP_REVISION': 'api--test'}
     env.pop('DATABASE_URL', None)
-    result = subprocess.run([sys.executable, str(ROOT / 'api/process_main.py')],
-                            env=env, capture_output=True, text=True)
+    result = subprocess.run([sys.executable, str(process)], cwd=tmp_path,
+                            env=env, capture_output=True, text=True, timeout=20)
     assert result.returncode == 3
     rows = [json.loads(line) for line in result.stderr.splitlines() if line.startswith('{')]
     assert rows == [{'event': 'startup.process', 'state': 'failed',
-                     'error_type': 'ValueError', 'sqlstate': None}]
+                     'error_type': 'RuntimeError', 'sqlstate': None}]
     assert 'secret' not in result.stderr and 'DATABASE_URL' not in result.stderr
+    assert 'details redacted' in result.stderr
 
 
 def test_durable_receipt_is_first_write_wins(monkeypatch):
