@@ -11,7 +11,7 @@ describe('Review queue action pills', () => {
   it('distinguishes scope-bound PDF map editing from native-tag approval without trusting stale reasons', () => {
     const policy={enabled:true,supported:true,run_id:'r',source_revision:1}
     const base={id:71,file:'document.pdf',rule_id:'1.3.1',status:'pending',hasProposal:true,after:'draft',
-      _raw:{scan_id:'s',proposal_snapshot_ids:['p']},automatic_approval:{state:'blocked',responsibility:'human',
+      _raw:{scan_id:'s',proposal_snapshot_ids:['p'],source_revision:1,decision_version:0},automatic_approval:{state:'blocked',responsibility:'human',
         scan_id:'s',proposal_snapshot_ids:['p'],run_id:'r',source_revision:1}}
     const mapReason='This PDF needs headings or table structure added in the original document. ACP cannot apply this draft automatically.'
     const nativeReason='This PDF structure draft was created from document rules and needs your review before ACP applies it.'
