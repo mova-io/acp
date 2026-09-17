@@ -431,6 +431,7 @@ jobs:
         run: |
           python -m pytest tests/test_schema_boot_locks.py tests/test_pg_job_queue.py \
             tests/test_pg_result_fencing.py tests/test_db_mutation_reserve.py \
+            tests/test_ai_spending_budget.py \
             tests/test_document_wide_chunk_store.py \
             tests/test_pg_hitl_idempotency.py tests/test_pg_pool_growth.py tests/test_pg_scheduled_execution.py tests/test_pg_schema_preflight.py \
             -v --no-header -p no:warnings
@@ -452,6 +453,7 @@ jobs:
           set -euo pipefail
           python -m pytest tests/test_schema_boot_locks.py tests/test_pg_job_queue.py \
             tests/test_pg_result_fencing.py tests/test_pg_hitl_idempotency.py tests/test_pg_pool_growth.py tests/test_pg_scheduled_execution.py tests/test_pg_schema_preflight.py \
+            tests/test_ai_spending_budget.py \
             tests/test_document_wide_chunk_store.py \
             -q --no-header -p no:warnings > /tmp/pg.txt 2>&1 || { cat /tmp/pg.txt; exit 1; }
           cat /tmp/pg.txt

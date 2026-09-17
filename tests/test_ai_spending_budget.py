@@ -13,16 +13,19 @@ from ai_spending_budget import (  # noqa: E402
 from store import _SQLiteAdapter, _PgAdapter  # noqa: E402
 
 
-@pytest.fixture(params=["sqlite"] + (["postgres"] if os.getenv("ACP_BUDGET_TEST_PG_URL") else []))
+PG_URL = os.getenv("ACP_BUDGET_TEST_PG_URL") or os.getenv("DATABASE_URL")
+
+
+@pytest.fixture(params=["sqlite"] + (["postgres"] if PG_URL else []))
 def ledger(tmp_path, request):
     if request.param == "postgres":
         from conftest import require_disposable_postgres
         from urllib.parse import urlparse
-        url = os.environ["ACP_BUDGET_TEST_PG_URL"]
+        url = PG_URL
         require_disposable_postgres(url)
         parsed = urlparse(url)
         assert parsed.hostname in ("127.0.0.1", "localhost")
-        assert parsed.path == "/acp_budget_test", "only a dedicated disposable test DB is allowed"
+        assert parsed.path in ("/acp_budget_test", "/acp_ci"), "only a dedicated disposable test DB is allowed"
         adapter = _PgAdapter(url)
     else:
         adapter = _SQLiteAdapter(str(tmp_path / "budget.db"))
@@ -53,6 +56,14 @@ def close(ledger):
 
 def reserve(ledger, attempt="a", cost=60):
     return ledger.reserve("owner", "run", attempt, cost, "fixture-price-v1")
+
+
+def reserve_many(ledger, *attempts):
+    return ledger.reserve_many("owner", "run", [
+        {"attempt_id": attempt, "max_cost_units": cost,
+         "pricing_ref": "fixture-price-v1"}
+        for attempt, cost in attempts
+    ])
 
 
 def test_cap_is_reserved_before_dispatch(ledger):
@@ -170,6 +181,94 @@ def test_concurrent_independent_connections_cannot_overreserve(ledger):
         admitted = list(pool.map(worker, range(40)))
     assert sum(admitted) == 14
     assert ledger.snapshot("owner", "run")["held_units"] == 98
+
+
+def test_many_is_all_or_none_and_exact_replay_is_ordered(ledger):
+    with pytest.raises(BudgetExceeded):
+        reserve_many(ledger, ("a", 60), ("b", 41))
+    assert ledger.snapshot("owner", "run")["held_units"] == 0
+    first = reserve_many(ledger, ("b", 40), ("a", 60))
+    replay = reserve_many(ledger, ("b", 40), ("a", 60))
+    assert [row["attempt_id"] for row in first] == ["b", "a"]
+    assert replay == first
+    assert ledger.snapshot("owner", "run")["held_units"] == 100
+
+
+def test_many_conflict_and_duplicate_never_leave_partial_holds(ledger):
+    reserve(ledger, "existing", 10)
+    with pytest.raises(AttemptConflict):
+        reserve_many(ledger, ("new", 10), ("existing", 11))
+    with pytest.raises(AttemptConflict, match="duplicate"):
+        reserve_many(ledger, ("duplicate", 10), ("duplicate", 10))
+    snapshot = ledger.snapshot("owner", "run")
+    assert snapshot["held_units"] == 10
+    with pytest.raises(BudgetError):
+        ledger.claim_dispatch("owner", "run", "new")
+    with pytest.raises(BudgetError):
+        ledger.claim_dispatch("owner", "run", "duplicate")
+
+
+def test_many_mixed_replay_counts_only_new_exposure(ledger):
+    reserve_many(ledger, ("existing", 40))
+    rows = reserve_many(ledger, ("existing", 40), ("new", 60))
+    assert [row["state"] for row in rows] == ["reserved", "reserved"]
+    assert ledger.snapshot("owner", "run")["held_units"] == 100
+
+
+@pytest.mark.parametrize("finish", ["settled", "released"])
+def test_many_terminal_full_replay_returns_evidence_but_cannot_admit_new(ledger, finish):
+    reserve_many(ledger, ("done", 40))
+    if finish == "settled":
+        ledger.claim_dispatch("owner", "run", "done")
+        ledger.settle("owner", "run", "done", 20)
+    else:
+        ledger.release("owner", "run", "done")
+    assert reserve_many(ledger, ("done", 40))[0]["state"] == finish
+    assert ledger.claim_dispatch("owner", "run", "done") is False
+    with pytest.raises(AttemptConflict, match="advanced"):
+        reserve_many(ledger, ("done", 40), ("new", 1))
+    with pytest.raises(BudgetError):
+        ledger.claim_dispatch("owner", "run", "new")
+
+
+def test_many_uncertain_batch_blocks_without_partial_reservations(ledger):
+    reserve(ledger, "uncertain", 10)
+    ledger.claim_dispatch("owner", "run", "uncertain")
+    ledger.mark_uncertain("owner", "run", "uncertain")
+    with pytest.raises(BudgetError):
+        reserve_many(ledger, ("a", 20), ("b", 20))
+    assert ledger.snapshot("owner", "run")["held_units"] == 10
+
+
+def test_concurrent_many_batches_cannot_overreserve(ledger):
+    def worker(prefix):
+        independent = independent_ledger(ledger)
+        try:
+            reserve_many(independent, (prefix + "-1", 30), (prefix + "-2", 30))
+            return True
+        except BudgetExceeded:
+            return False
+        finally:
+            close(independent)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        admitted = list(pool.map(worker, ["a", "b", "c", "d"]))
+    assert sum(admitted) == 1
+    assert ledger.snapshot("owner", "run")["held_units"] == 60
+
+
+def test_many_commit_failure_returns_no_success_and_rolls_back(ledger):
+    from contextlib import contextmanager
+    original = ledger.db.cursor
+    @contextmanager
+    def failing_cursor():
+        with original() as cur:
+            yield cur
+            raise OSError("simulated commit failure")
+    ledger.db.cursor = failing_cursor
+    with pytest.raises(OSError):
+        reserve_many(ledger, ("a", 20), ("b", 20))
+    ledger.db.cursor = original
+    assert ledger.snapshot("owner", "run")["held_units"] == 0
 
 
 def test_concurrent_duplicate_attempt_dispatches_once(ledger):
