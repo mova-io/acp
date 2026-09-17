@@ -202,9 +202,16 @@ describe('canonical stage card', () => {
     expect(canonicalStageCardModel({ ...SNAPSHOT, state: 'failed' }).stateLabel).toBe('Failed')
   })
 
-  it('uses the concise Complete label once stage processing has finished', () => {
-    expect(canonicalStageCardModel({ ...SNAPSHOT, state: 'processing_complete' }).stateLabel).toBe('Complete')
-    expect(canonicalStageCardModel({ ...SNAPSHOT, state: 'succeeded' }).stateLabel).toBe('Complete')
+  it('names finished processing without claiming verified fixes or publication', () => {
+    expect(canonicalStageCardModel({ ...SNAPSHOT, stage: 'remediate', state: 'processing_complete' }).stateLabel).toBe('Processing finished')
+    expect(canonicalStageCardModel({ ...SNAPSHOT, stage: 'remediate', state: 'succeeded' }).stateLabel).toBe('Processing finished')
+  })
+
+  it.each(['processing_complete', 'succeeded'])('does not claim publication from a terminal release state %s', (state) => {
+    const html = render({ ...SNAPSHOT, stage: 'release', state })
+    expect(html).toContain('Publication processing finished')
+    expect(html).not.toContain('>Complete<')
+    expect(html).not.toContain('>Delivery complete<')
   })
 
   it('keeps the canonical partition visible while leased work drains after a stop request', () => {
@@ -219,7 +226,7 @@ describe('canonical stage card', () => {
   it('does not equate completed work items with resolved findings', () => {
     const html = render({ ...SNAPSHOT, state: 'succeeded',
       sealed_output: { manifest_id: 'manifest-1' } })
-    expect(html).toContain('canonical-stage-card__state is-complete">Complete')
+    expect(html).toContain('canonical-stage-card__state is-complete">Publication processing finished')
     expect(html).toContain('manifest-1')
     expect(html).toContain('does not mean every accessibility finding was resolved')
     expect(html).not.toContain('all findings resolved')
