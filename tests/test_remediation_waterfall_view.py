@@ -167,3 +167,22 @@ def test_stage_models_require_same_run_owner_scan_and_dispatched_attempt(isolate
     assert 'never-called' not in json.dumps(result)
     assert 'wrong-scan' not in json.dumps(result)
     assert read_waterfall(s, 'owner', 'scan', 'different-run').get('stages', []) == []
+
+
+def test_saved_ai_policy_is_allowlisted_and_bound_to_run(isolated_store):
+    s = isolated_store
+    batch = seed(s)
+    with s._db.cursor() as cur:
+        s._db.execute(cur, 'UPDATE ai_spending_run_policies SET policy_json=%s WHERE owner_id=%s AND run_id=%s',
+                      (json.dumps({'ai': 1, 'quality_first': True, 'ai_zone': 'any',
+                                   'secret': 'private-endpoint-and-key'}), 'owner', batch))
+    view = read_waterfall(s, 'owner', 'scan', batch)
+    assert view['saved_ai_policy'] == {'level': 1, 'quality_first': True, 'zone': 'any'}
+    assert 'private-endpoint-and-key' not in json.dumps(view)
+    assert 'saved_ai_policy' not in read_waterfall(s, 'owner', 'scan', 'other-batch')
+
+
+def test_legacy_policy_does_not_invent_quality_mode(isolated_store):
+    batch = seed(isolated_store)
+    view = read_waterfall(isolated_store, 'owner', 'scan', batch)
+    assert view['saved_ai_policy']['quality_first'] is None
