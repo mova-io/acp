@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { balancedSummaryModel, reviewAge, treemapRects, activityMonths } from './balancedSummaryModel.js'
+import { balancedSummaryModel, reviewAge, treemapRects, activityMonths, criterionBreakdown } from './balancedSummaryModel.js'
 
 const now = Date.parse('2026-09-14T12:00:00Z')
 const issue = extra => ({ wcag: '1.3.1', severity: 'SERIOUS', ...extra })
@@ -34,6 +34,20 @@ describe('balanced summary accounting', () => {
   it('uses frozen criteria and excludes resolved findings from the assessment population', () => {
     const m = balancedSummaryModel({ run: { ...run, scope: { ...run.scope, scan_scope: { '1.1.1': true } } }, files: [file('a.docx', [issue(), issue({ wcag: '1.1.1' }), issue({ wcag: '1.1.1', resolution: 'fixed' })])], cap, now })
     expect(m.findings).toHaveLength(1); expect(m.groups['Text alternatives']).toHaveLength(1)
+  })
+  it('breaks Other down by actual in-scope criterion, summing exactly to the parent', () => {
+    const scope = { ...run.scope, scan_scope: { '1.3.1': true, '2.4.2': true, '1.4.4': true, '3.1.1': true } }
+    const files = [file('a.docx', [issue(), issue({ wcag: '2.4.2' }), issue({ wcag: '1.4.4' }), issue({ wcag: 'SC_3_1_1' }), issue({ wcag: '2.4.4' })]),
+      file('b.docx', [issue({ wcag: '2.4.2 Page Titled' }), issue({ wcag: '3.1.1' }), issue({ wcag: '2.4.2', resolution: 'fixed' })])]
+    const m = balancedSummaryModel({ run: { ...run, scope }, files, cap, now })
+    expect(m.otherCriteria.map(r => [r.label, r.rows.length])).toEqual([['2.4.2 Page Titled', 2], ['3.1.1 Language of Page', 2], ['1.4.4 Resize Text', 1]])
+    expect(m.otherCriteria.reduce((sum, r) => sum + r.rows.length, 0)).toBe(m.groups.Other.length)
+    expect(m.otherCriteria.flatMap(r => r.rows).every(r => m.groups.Other.includes(r))).toBe(true)
+    expect(balancedSummaryModel().otherCriteria).toEqual([])
+  })
+  it('labels missing and uncatalogued criteria honestly and orders ties deterministically', () => {
+    const rows = criterionBreakdown([{ sc: '9.9.9' }, {}, { sc: '1.4.10' }, { sc: '1.4.4' }, { sc: ' ' }])
+    expect(rows.map(r => [r.label, r.rows.length])).toEqual([['Criterion not recorded', 2], ['1.4.4 Resize Text', 1], ['1.4.10 Reflow', 1], ['9.9.9 · title not in catalog', 1]])
   })
   it('uses finding first-seen dates, keeps missing/future dates unknown, and handles age boundaries', () => {
     const ago = days => new Date(now - days * 86400000).toISOString()

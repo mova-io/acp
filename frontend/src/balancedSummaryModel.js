@@ -2,6 +2,7 @@ import { documentRow } from './assessMetrics.js'
 import { remediationCategory, aiAppliedUnverified, REMEDIATION_CATEGORIES } from './remediationCategories.js'
 import { assessmentEligible } from './estateFunnel.js'
 import { runScopeCriteria } from './runScopeCriteria.js'
+import { SC_NAME } from './wcagCatalog.js'
 
 export const FORMAT_NAMES = { pdf: 'PDF', docx: 'Word', pptx: 'PowerPoint', xlsx: 'Excel', html: 'HTML', image: 'Images', av: 'Video / audio', other: 'Other' }
 export const COVERAGE_STATES = [['assessed', 'Assessed'], ['pending', 'Awaiting assessment'], ['ineligible', 'Ineligible'], ['blocked', 'Could not assess'], ['unknown', 'Not recorded']]
@@ -21,6 +22,19 @@ export function findingGroup(sc) {
   if (['1.4.3', '1.4.6', '1.4.11'].includes(sc)) return 'Contrast'
   if (sc?.startsWith('1.3.')) return 'Structure'
   return 'Other'
+}
+// One row per actual criterion, largest first. Every input finding lands in exactly one row, so the
+// rows always sum to the parent. A missing criterion or an uncatalogued title is said so, not guessed.
+export function criterionBreakdown(findings = []) {
+  const by = new Map()
+  for (const finding of findings) {
+    const sc = typeof finding.sc === 'string' ? finding.sc.trim() : ''
+    if (!by.has(sc)) by.set(sc, [])
+    by.get(sc).push(finding)
+  }
+  return [...by].map(([sc, rows]) => ({ sc, rows,
+    label: !sc ? 'Criterion not recorded' : `${sc} ${SC_NAME[sc] || '· title not in catalog'}` }))
+    .sort((a, b) => b.rows.length - a.rows.length || !a.sc - !b.sc || a.sc.localeCompare(b.sc, 'en', { numeric: true }))
 }
 // Only a finding's recorded first-seen timestamp can establish its age. Never use the
 // document creation/modification time or the scan completion time as a substitute.
@@ -100,7 +114,7 @@ export function balancedSummaryModel({ run, files = [], inventory = null, cap, a
   const findingsKnown = measured.length > 0
   return { discovered, eligible, assessed: measured.length, rate, formats: formatRows, inconsistent,
     formatTotal: formatRows.reduce((sum, row) => sum + row.total, 0), truncated: !!summary?.truncated,
-    findingsKnown, findings, tags, groups, departments: [...departments].sort((a, b) => b[1].length - a[1].length), age,
+    findingsKnown, findings, tags, groups, otherCriteria: criterionBreakdown(groups.Other), departments: [...departments].sort((a, b) => b[1].length - a[1].length), age,
     reviewCount: Object.values(age).reduce((sum, items) => sum + items.length, 0), now }
 }
 
