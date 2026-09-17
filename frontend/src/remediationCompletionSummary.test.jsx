@@ -61,5 +61,5 @@ it('keeps finished processing, verified findings and partial publication distinc
   expect(c.textContent).toContain('Findings awaiting resolution60')
   expect(c.textContent).not.toContain('Awaiting your review')
   expect(c.textContent).not.toContain('provide any missing content')
-  expect(c.textContent).toContain('use Status checks for recovery and Needs your input for decisions or manual edits')
+  expect(c.textContent).toContain('check recovery actions, review suggestions, or make manual edits')
 })

@@ -21,7 +21,7 @@ export default function RemediationCompletionSummary({ snapshot, view, exact = f
   const stopped = ['failed', 'cancelled'].includes(snapshot.state)
   const next = stopped || failed > 0
     ? 'Inspect unsuccessful work before deciding what to retry.'
-    : review > 0 ? 'Open the review workspace; use Status checks for recovery and Needs your input for decisions or manual edits.'
+    : review > 0 ? 'Open the review workspace to check recovery actions, review suggestions, or make manual edits.'
       : awaitingRelease > 0 ? 'Track corrected copies in Release. Covered copies publish automatically when Q3 approved publication.'
         : 'Inspect the recorded outcomes for any remaining or unassessed work.'
   return <section className="wf-completion" aria-label="Remediation run summary">
