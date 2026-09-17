@@ -82,7 +82,11 @@ def read_waterfall(store, owner, scan_id, batch_id):
             stages[tier]['operations'] = len(operations[tier])
             stages[tier]['models'] = [dict(provider=provider, model=model, recorded_attempts=total)
                                       for (provider, model), total in sorted(model_counts[tier].items())]
-        result.update(stages=list(stages.values()), other_attempts=other,
+        result.update(saved_ai_policy={
+                          'quality_first': policy.get('quality_first') if type(policy.get('quality_first')) is bool else None,
+                          'level': policy.get('ai') if type(policy.get('ai')) is int else None,
+                          'zone': policy.get('ai_zone') if policy.get('ai_zone') in ('local', 'any') else None,
+                      }, stages=list(stages.values()), other_attempts=other,
                       ai_enabled=policy['ai'] > 0 and rows[0]['cap_units'] > 0,
                       spending={'cap_units': rows[0]['cap_units'], 'currency': rows[0]['currency'],
                                 'spent_units': spent, 'held_units': held,
