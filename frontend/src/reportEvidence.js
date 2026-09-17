@@ -145,12 +145,19 @@ export function fileIssuesOf(file, { locationHref = null } = {}) {
       seen.set(base, n)
       id = n === 1 ? base : `${base}-${n}`
     }
+    // The source's OWN remediation guidance, verbatim, under every name the engines use for it.
+    // `recommended_action` is the common one (scanner.py, the office analyser); `remediation` turns
+    // up in imported findings. It is preferred over ACP's generic per-criterion steps, which are
+    // written for a criterion rather than for this finding.
+    const recommendedAction = str(i.recommended_action ?? i.recommendedAction ?? i.remediation
+      ?? i.recommendation ?? i.remediation_action)
     return {
       id, sc, ruleId, file: name,
       detail,
       severity: str(i.severity) ? String(i.severity).toUpperCase() : null,
       location,
-      action: str(i.fix ?? i.action),
+      recommendedAction,
+      action: str(i.fix ?? i.action) || recommendedAction,
       impact: str(i.impact),
       auto: typeof i.auto === 'boolean' ? i.auto : null,
       owner: str(i.assignee?.name ?? i.assignee ?? i.owner),
@@ -201,17 +208,42 @@ export function normaliseRowIssues(row, fileName, opts = {}) {
 export const changeIdOf = (file, diff, index = 0) =>
   `${fileNameOf(file)}::${diff?.rule_id ?? diff?.ruleId ?? 'unknown'}::${diff?.seq ?? `i${index}`}`
 
-const VERDICT_STATUS = { accepted: 'accepted', edited: 'edited', rejected: 'rejected', unable: 'unable' }
+// The stored verdict → the status a report may print. `edited` is deliberately NOT 'accepted with
+// edits': the change_review PUT records a PROPOSED value and writes no bytes, so an `edited`
+// decision is a CORRECTION REQUESTED — outstanding work, never a confirmation.
+const VERDICT_STATUS = { accepted: 'accepted', edited: 'correction_requested', rejected: 'rejected', unable: 'unable' }
 
-export function humanStatusOf(review, currentSha256 = null) {
+// Every human status EXCEPT 'accepted' means a person still has something to do. 'accepted' is the
+// single status that closes a change, and only when the decision's freshness is known (below).
+export const HUMAN_OUTSTANDING = Object.freeze(
+  ['pending', 'correction_requested', 'rejected', 'unable', 'stale', 'freshness_unknown'])
+export const isHumanOutstanding = (status) => HUMAN_OUTSTANDING.includes(status)
+
+// Freshness is KNOWN only when something proves it: the server evaluated staleness (`stale: false`),
+// or the decision's bound artifact matches the current one. `stale: null` and a missing current
+// identity are UNKNOWN — they are not evidence that the decision still applies to these bytes.
+export function humanStatusOf(review, currentSha256 = null, { loaded = true } = {}) {
   if (!review || typeof review !== 'object') {
-    return { status: 'pending', reviewer: null, at: null, note: null, boundSha256: null, currentSha256 }
+    return {
+      status: 'pending', reviewer: null, at: null, note: null, editedValue: null, verdict: null,
+      boundSha256: null, currentSha256, stale: null, staleReason: null, freshness: 'not_applicable',
+      confirmed: false, loaded,
+    }
   }
   const verdict = VERDICT_STATUS[review.verdict] || null
   const bound = str(review.artifact_sha256 ?? review.boundSha256)
-  const stale = review.stale === true || (bound != null && currentSha256 != null && bound !== currentSha256)
+  const digestChanged = review.current_change_digest != null && review.change_digest != null
+    && String(review.current_change_digest) !== String(review.change_digest)
+  const stale = review.stale === true || digestChanged
+    || (bound != null && currentSha256 != null && bound !== currentSha256)
+  const freshnessKnown = !stale
+    && (review.stale === false || (bound != null && currentSha256 != null && bound === currentSha256))
+  let status
+  if (stale) status = 'stale'
+  else if (verdict === 'accepted') status = freshnessKnown ? 'accepted' : 'freshness_unknown'
+  else status = verdict || 'pending'
   return {
-    status: stale && verdict ? 'stale' : verdict || 'pending',
+    status,
     reviewer: str(review.reviewer?.name ?? review.reviewer),
     at: str(review.at),
     note: str(review.note),
@@ -219,30 +251,86 @@ export function humanStatusOf(review, currentSha256 = null) {
     verdict,
     boundSha256: bound,
     currentSha256,
+    stale: stale ? true : review.stale === false ? false : null,
+    staleReason: str(review.staleReason ?? review.stale_reason),
+    freshness: stale ? 'stale' : freshnessKnown ? 'known' : 'unknown',
+    confirmed: status === 'accepted',
+    loaded,
   }
 }
 
+// A saved change's TECHNICAL state. Facts carry `verification`; the legacy remediation_diff row
+// carries `verified`. An applied-but-unverified change is not a failure — it is precisely the work
+// a human has to look at, so it is reported, never hidden.
 export function technicalStatusOf(diff) {
-  if (diff?.verified === true) {
-    return { status: 'verified', detail: 'The re-scan after this edit no longer reported the finding (remediation record).' }
+  const v = verificationOf(diff)
+  const detail = str(diff?.verificationDetail)
+  if (v === 'verified') {
+    return { status: 'verified', detail: detail || 'The re-scan after this edit no longer reported the finding (remediation record).' }
   }
-  if (diff?.verified === false) return { status: 'pending', detail: 'Edit saved; re-validation has not been recorded.' }
-  return { status: 'unknown', detail: 'Verification status was not recorded with this change.' }
+  if (v === 'not_verified') {
+    return { status: 'pending', detail: detail || 'AI applied this edit to the corrected copy; no re-scan result has been recorded for it.' }
+  }
+  return { status: 'unknown', detail: detail || 'Verification status was not recorded with this change.' }
+}
+
+// 'verified' | 'not_verified' | null (not recorded), from either input shape.
+export function verificationOf(x) {
+  if (x?.verification === 'verified' || x?.verification === 'not_verified') return x.verification
+  if (x?.verified === true) return 'verified'
+  if (x?.verified === false) return 'not_verified'
+  return null
 }
 
 const TECH_TXT = { verified: 'Verified by re-scan', pending: 'Re-validation pending', not_run: 'Not run', unknown: 'Not recorded' }
-const HUMAN_TXT = { pending: 'Awaiting confirmation', accepted: 'Accepted', edited: 'Accepted with edits', rejected: 'Rejected', unable: 'Unable to verify', stale: 'Stale — the file changed after this decision' }
+const HUMAN_TXT = {
+  pending: 'Awaiting confirmation',
+  accepted: 'Accepted',
+  // Never "Accepted with edits": nothing was written. The reviewer asked for a different value.
+  correction_requested: 'Correction requested — not applied',
+  edited: 'Correction requested — not applied',
+  rejected: 'Rejected',
+  unable: 'Unable to verify',
+  stale: 'Stale — the file changed after this decision',
+  freshness_unknown: 'Accepted, but the file version it was recorded against is unknown — recheck',
+}
+const VERIFICATION_TXT = { verified: 'Verified by re-scan', not_verified: 'AI applied · not verified' }
 export const technicalText = (s) => TECH_TXT[s] || 'Not recorded'
 export const humanText = (s) => HUMAN_TXT[s] || 'Not recorded'
+export const verificationText = (s) => VERIFICATION_TXT[s] || 'Not recorded'
+// Said wherever a clipped value is shown. The store keeps no untruncated copy, so there is nowhere
+// to point the reader — the corrected copy itself is the only full text.
+export const clippedNote = (maxChars) => 'This value was clipped by the store to '
+  + `${maxChars != null ? Number(maxChars).toLocaleString('en-US') : 'the store'}`
+  + ' characters when it was recorded. The untruncated text was not kept; the corrected copy is the only complete source.'
 
-// diffs: the FULL list of remediation_diff rows for this file.
+// How a supplied preview image may be captioned. The existing /page route prefers the ORIGINAL but
+// can fall back to the remediated blob, so its provenance is ambiguous — captioning that render
+// "after the edit" is a false claim about which bytes the reader is looking at. Only an
+// exact-bytes source (artifact/{sha256}/page/{n}) earns a definite caption.
+const shortSha = (s) => (s ? String(s).slice(0, 12) : null)
+export function previewCaption(provenance, label) {
+  const kind = provenance && typeof provenance === 'object' ? provenance.kind : provenance
+  const sha = shortSha(provenance && typeof provenance === 'object' ? provenance.sha256 : null)
+  const where = label || 'the changed content'
+  if (kind === 'corrected') return `Corrected copy${sha ? ` (sha ${sha})` : ''} — ${where}`
+  if (kind === 'original') return `Original${sha ? ` (sha ${sha})` : ''} — ${where}`
+  return `Document preview — version not verified — ${where}`
+}
+
+// diffs: the FULL list of saved changes for this file — facts `savedChanges` entries (verified AND
+// applied-but-unverified) or legacy remediation_diff rows. Unverified changes are NOT filtered out:
+// they are the ones a human must review.
 export function buildChangeCards({ file, diffs = [], reviews = null, previews = null, currentSha256 = null,
-  names = {}, locationHref = null, clamp = false, fullRefPrefix = '' } = {}) {
+  names = {}, locationHref = null, clamp = false, fullRefPrefix = '', previewProvenance = null,
+  valueMaxChars = null } = {}) {
   const name = fileNameOf(file)
   const fmt = fmtOfFile(name)
   return (diffs || []).filter((x) => x && (x.before != null || x.after != null)).map((x, idx) => {
-    const id = changeIdOf(name, x, idx)
-    const sc = scOfValue(x.rule_id ?? x.ruleId)
+    // The server supplies the id for facts-shaped changes and it is the key into `reviews` and the
+    // change-review PUT path — it is used VERBATIM, never re-derived.
+    const id = str(x.id) || changeIdOf(name, x, idx)
+    const sc = scOfValue(x.sc) || scOfValue(x.rule_id ?? x.ruleId)
     const cname = names[sc] || criterionName(sc)
     const location = locationOf(x, { fmt, locationHref })
     const before = x.before == null ? null : String(x.before)
@@ -256,21 +344,39 @@ export function buildChangeCards({ file, diffs = [], reviews = null, previews = 
       if (isSafeImageSrc(cand)) src = cand
     }
     const review = reviews && typeof reviews === 'object' ? reviews[id] : null
+    const verification = verificationOf(x)
+    const technical = technicalStatusOf(x)
+    const caption = previewCaption(previewProvenance, location ? location.label : null)
+    // Clipping is a property of the RECORD, not of this report's layout: the store truncated the
+    // value when it wrote it and kept no full copy. Distinct from beforeTruncated/afterTruncated,
+    // which only say this card shows a shortened view of a value the report still holds in full.
+    const valueClipped = x.valueClipped === true
+      || (valueMaxChars != null && ((before != null && before.length >= valueMaxChars)
+        || (after != null && after.length >= valueMaxChars)))
     return {
       k: 'changeCard',
       id,
-      title: `${sc || x.rule_id || 'Change'}${cname ? ` · ${cname}` : ''}`,
-      criterion: sc || str(x.rule_id),
+      title: `${sc || x.ruleId || x.rule_id || 'Change'}${cname ? ` · ${cname}` : ''}`,
+      criterion: sc || str(x.ruleId ?? x.rule_id),
       criterionName: cname,
+      ruleId: str(x.ruleId ?? x.rule_id),
       location,
       before, after,
       beforeTruncated: bT, afterTruncated: aT,
       fullRef: (bT || aT) ? `${fullRefPrefix}${id}` : null,
       reason: str(x.note),
-      image: src ? { src, alt: `Preview of ${location ? location.label : 'the changed content'} after the edit`, caption: location ? `${location.label} — after the edit` : 'After the edit' } : null,
+      image: src ? { src, alt: `Preview of ${location ? location.label : 'the changed content'}. ${caption}`, caption } : null,
       imageStatus: src ? 'available' : 'unavailable',
-      technical: technicalStatusOf(x),
-      human: reviews == null ? { ...humanStatusOf(null, currentSha256), status: 'pending', loaded: false } : humanStatusOf(review, currentSha256),
+      technical,
+      verification,
+      verificationDetail: technical.detail,
+      valueClipped,
+      valueMaxChars: valueClipped ? (valueMaxChars ?? null) : null,
+      findingIds: Array.isArray(x.findingIds) ? x.findingIds.map(String) : null,
+      changeDigest: str(x.changeDigest ?? x.change_digest),
+      artifactSha256: str(x.artifactSha256 ?? x.artifact_sha256),
+      source: str(x.source),
+      human: humanStatusOf(reviews == null ? null : review, currentSha256, { loaded: reviews != null }),
       responseOptions: [...RESPONSE_OPTIONS],
       responseNotice: RESPONSE_NOTICE,
       seq: x.seq ?? null,
@@ -319,9 +425,14 @@ const HUMAN_STEPS = {
 }
 export const humanStepsFor = (sc) => HUMAN_STEPS[sc] || ['Review the flagged content against the WCAG success criterion']
 
+// The source's own guidance goes FIRST and verbatim; ACP's per-criterion steps are the generic
+// fallback behind it, never a replacement for it.
+export const recommendedActionOf = (issue) => (issue && (issue.recommendedAction || issue.action)) || null
+
 function stepsFor(sc, fmt, issue) {
   const out = []
-  if (issue && issue.action) out.push(issue.action)
+  const own = recommendedActionOf(issue)
+  if (own) out.push(own)
   const g = fixSteps(sc, fmt)
   if (g.where) out.push(`Where to look: ${g.where}`)
   if (g.mac && g.win && g.mac === g.win) out.push(g.mac)
@@ -358,6 +469,7 @@ export function buildFindingCards({ file, rows = [], assignee = null, locationHr
           title: `${sc} · ${cname}`,
           criterion: sc, criterionName: criterionName(sc) || r.name || null,
           location: i ? i.location : null,
+          recommendedAction: recommendedActionOf(i),
           description: i ? (i.detail || 'Finding recorded without a description.')
             : `${r.count || 'An unknown number of'} finding${r.count === 1 ? '' : 's'} recorded for this criterion; the individual findings were not itemised in this export.`,
           impact: impactFor(sc, i),
@@ -379,6 +491,7 @@ export function buildFindingCards({ file, rows = [], assignee = null, locationHr
         title: `${sc} · ${cname}`,
         criterion: sc, criterionName: criterionName(sc) || r.name || null,
         location: i ? i.location : null,
+        recommendedAction: recommendedActionOf(i),
         description: i?.detail || 'Automated checks cannot decide this criterion; a person must verify it.',
         impact: impactFor(sc, i),
         steps: humanStepsFor(sc),
@@ -397,6 +510,7 @@ export function buildFindingCards({ file, rows = [], assignee = null, locationHr
         title: `${sc} · ${cname}`,
         criterion: sc, criterionName: criterionName(sc) || r.name || null,
         location: null,
+        recommendedAction: null,
         description: 'ACP has no automated check for this criterion on this file type. It was not checked — this is not a pass.',
         impact: impactFor(sc, null),
         steps: [...humanStepsFor(sc), 'Record the result in ACP as an attestation, or mark the criterion out of scope with a reason.'],
@@ -484,4 +598,105 @@ export function buildComparison(previous, current) {
     previous: prevRef,
     resolved, introduced, persisting,
   }
+}
+
+// ── Server facts (report-facts v1) ──────────────────────────────────────────────────────────
+//
+// The server owns report facts; this layer only re-shapes them. Nothing below derives a count the
+// server did not record: where the server says null, the report says "Not recorded".
+
+// A finding's state → the card status a report prints for it.
+const FINDING_STATE_STATUS = {
+  open: 'open', unresolved: 'open', unknown: 'open', awaiting_review: 'human_check',
+}
+// Resolution is a per-finding fact. Only these states mean "this finding is no longer outstanding".
+export const RESOLVED_FINDING_STATES = Object.freeze(['resolved_verified'])
+export const isOutstandingFinding = (f) => !RESOLVED_FINDING_STATES.includes(f?.state)
+
+// facts.findings → the fileIssue shape the rest of this module speaks.
+export function factsFindings(facts, { locationHref = null } = {}) {
+  const list = Array.isArray(facts?.findings) ? facts.findings : []
+  const name = str(facts?.identity?.file) || ''
+  const fmt = fmtOfFile(name)
+  return list.map((f) => {
+    const sc = scOfValue(f.sc) || scOfValue(f.ruleId)
+    const location = f.location && typeof f.location === 'object'
+      ? locationOf({ location: f.location }, { fmt, locationHref })
+      : locationOf(f, { fmt, locationHref })
+    return {
+      id: str(f.id), ledgerFindingId: str(f.ledgerFindingId), sc, ruleId: str(f.ruleId), file: name,
+      detail: str(f.detail),
+      severity: str(f.severity) ? String(f.severity).toUpperCase() : null,
+      location,
+      recommendedAction: str(f.recommendedAction),
+      action: str(f.recommendedAction),
+      impact: null,
+      state: str(f.state) || 'unknown',
+      stateReason: str(f.stateReason),
+      page: location?.page ?? null, slide: location?.slide ?? null, sheet: location?.sheet ?? null,
+      cell: location?.cell ?? null, element: location?.element ?? null,
+    }
+  })
+}
+
+// One findingCard per OUTSTANDING finding in the server's list — never per criterion, and never
+// from the coverage catalog, which holds rows for files the scan may never have opened.
+export function findingCardsFromFacts(facts, { assignee = null, locationHref = null } = {}) {
+  const name = str(facts?.identity?.file) || ''
+  const fmt = fmtOfFile(name)
+  const cards = factsFindings(facts, { locationHref }).filter(isOutstandingFinding).map((f) => {
+    const status = FINDING_STATE_STATUS[f.state] || 'open'
+    const sc = f.sc
+    const g = fixSteps(sc, fmt)
+    const cname = criterionName(sc)
+    return {
+      k: 'findingCard',
+      id: f.id,
+      status,
+      priority: f.severity === 'CRITICAL' || f.severity === 'SERIOUS' ? 'high' : 'medium',
+      severity: f.severity,
+      title: `${sc || f.ruleId || 'Finding'}${cname ? ` · ${cname}` : ''}`,
+      criterion: sc, criterionName: cname,
+      location: f.location,
+      recommendedAction: f.recommendedAction,
+      description: f.detail || 'Finding recorded without a description.',
+      impact: impactFor(sc, f),
+      steps: status === 'human_check' && !f.recommendedAction ? humanStepsFor(sc) : stepsFor(sc, fmt, f),
+      owner: ownerOf(f, assignee),
+      recheck: status === 'human_check'
+        ? 'A reviewer records the outcome in ACP — an attestation with notes, or a finding to fix.'
+        : `Re-run the ACP assessment on the corrected copy: this finding must no longer be reported for WCAG ${sc}.${g.completion ? ` ${g.completion}` : ''}`,
+      state: f.state,
+      stateReason: f.stateReason,
+    }
+  })
+  return rankFindingCards(cards)
+}
+
+// Comparison built ONLY from a real comparable snapshot the server supplied. There is no fallback
+// that subtracts aggregate counts: "fewer findings than last time" is not evidence that a
+// particular finding was resolved, and this is the one place that temptation lives.
+export function buildComparisonFromFacts(facts, { locationHref = null } = {}) {
+  const reason = str(facts?.previousReason)
+  const prev = facts?.previous && typeof facts.previous === 'object' ? facts.previous : null
+  if (!prev) {
+    const c = buildComparison(null, {})
+    if (reason) c.reason = reason
+    return c
+  }
+  const id = facts.identity || {}
+  const scopeOf = (scopeDigest, scanScope) => (scopeDigest == null && scanScope == null
+    ? null
+    : { scopeDigest: scopeDigest ?? null, scanScope: scanScope ?? null })
+  return buildComparison({
+    scanId: prev.scanId, generatedAt: prev.generatedAt, sha256: prev.sha256, file: prev.file,
+    scope: scopeOf(prev.scopeDigest, prev.scanScope),
+    findings: Array.isArray(prev.findings)
+      ? prev.findings.map((f) => ({ ...f, location: f.location || null }))
+      : null,
+  }, {
+    file: id.file ?? null,
+    scope: scopeOf(id.scopeDigest, id.scanScope),
+    findings: factsFindings(facts, { locationHref }),
+  })
 }

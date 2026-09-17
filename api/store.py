@@ -6074,6 +6074,44 @@ class Store:
                 (scan_id, file, kind, value, owner, when))
             self._bump_scan_revision(cur, scan_id)
 
+    def save_change_review(self, scan_id: str, file: str, kind: str, value: str,
+                           owner: str, when: str, *, expected_artifact: str,
+                           log_action: str, log_rule_id: str | None,
+                           log_detail: str) -> bool:
+        """Record a reviewer verdict ONLY while the artifact identity is still the reviewed one.
+
+        A compare-and-set, in one transaction, and the reason it is one is the review's finding:
+        the route used to read the current identity, validate against it, and then save — three
+        steps with a window between them in which the corrected copy can be rewritten. A decision
+        that lands in that window is bound to bytes the reviewer never saw, and nothing about the
+        stored row says so. Here the identity is re-read inside the same transaction as the write
+        and a mismatch aborts it, so the losing decision is REFUSED (409) rather than silently
+        recorded against the wrong artifact.
+
+        The audit row is written in the same transaction, so there is never a decision_log entry
+        for a verdict that did not commit, nor a committed verdict with no audit trail.
+
+        Returns False when the artifact moved; the caller answers 409.
+        """
+        with self.transaction():
+            with self._db.cursor() as cur:
+                self._db.execute(cur,
+                    "SELECT corrected_sha256,checksum,remediated_at FROM file_records "
+                    "WHERE scan_id=%s AND file=%s", (scan_id, file))
+                row = self._db.fetchone(cur) or {}
+                # The saved copy's digest and nothing else — report_facts.decision_binding_sha256.
+                # The source checksum does NOT identify the bytes a reviewer looked at, and a
+                # file remediated without a recorded digest has no identity at all (None), which
+                # can never equal `expected_artifact`.
+                import report_facts as _facts
+                current = _facts.decision_binding_sha256(row)
+                if not current or current != expected_artifact:
+                    return False
+            self.save_decision(scan_id, file, kind, value, owner, when)
+            self.log_decision(owner, log_action, scan_id=scan_id, file=file,
+                              rule_id=log_rule_id, detail=log_detail)
+        return True
+
     def delete_decision(self, scan_id: str, file: str, kind: str) -> None:
         with self._db.cursor() as cur:
             self._db.execute(cur, "DELETE FROM scan_decisions WHERE scan_id=%s AND file=%s AND kind=%s",
@@ -14115,6 +14153,78 @@ class Store:
                 params.append(owner)
             self._db.execute(cur, sql, tuple(params))
             return self._db.fetchone(cur)
+
+    def list_stage_execution_ids(self, scan_id: str, stage: str, *,
+                                 owner: str | None = None) -> list[str]:
+        """Execution ids for one scan's `stage`, current run first, then newest.
+
+        The report facts builder needs the REMEDIATE run id before it can ask
+        remediation_contribution which finding a verified write actually resolved — and without
+        a per-finding answer it reports `null` rather than crediting a whole criterion. The
+        current execution is ordered first so the newest complete ledger wins; older runs are
+        still returned because `is_current` moves on a supersede while the ledger that can
+        answer the question may belong to the run that did the work.
+        """
+        with self._db.cursor() as cur:
+            sql = ("SELECT execution_id FROM stage_executions WHERE scan_id=%s AND stage=%s")
+            params = [scan_id, stage]
+            if owner is not None:
+                sql += " AND owner_email=%s"
+                params.append(owner)
+            sql += " ORDER BY is_current DESC, created_at DESC, execution_id DESC"
+            self._db.execute(cur, sql, tuple(params))
+            return [row["execution_id"] for row in self._db.fetchall(cur)]
+
+    def previous_assessment_for_file(self, scan_id: str, file: str, *,
+                                     owner: str) -> dict | None:
+        """The most recent EARLIER assessment of the same document, or None.
+
+        "Same document" is source identity — the provider's own file id when there is one, else
+        the same source system and the same path. Explicitly NOT the checksum: a remediated copy
+        has a different hash and would silently disqualify a perfectly good baseline, while two
+        unrelated files that happen to share a name would qualify on the name alone. The caller
+        additionally compares rubric and frozen scope before it calls the result comparable; this
+        method only establishes that the two rows describe the same document, owned by the same
+        person, assessed before this one.
+        """
+        with self._db.cursor() as cur:
+            self._db.execute(cur,
+                "SELECT r.*, f.drive_file_id FROM scan_runs r "
+                "LEFT JOIN file_records f ON f.scan_id=r.id AND f.file=%s WHERE r.id=%s",
+                (file, scan_id))
+            current = self._db.fetchone(cur)
+            if not current or current.get("owner_email") != owner:
+                return None
+            when = current.get("assessed_at") or current.get("completed_at") or current.get("started_at")
+            drive_file_id = current.get("drive_file_id")
+            sql = ("SELECT r.id AS run_id, f.* FROM file_records f "
+                   "JOIN scan_runs r ON r.id=f.scan_id "
+                   "WHERE r.owner_email=%s AND r.id<>%s AND r.source=%s "
+                   "AND COALESCE(r.assessed_at,r.completed_at,r.started_at) < %s ")
+            params = [owner, scan_id, current.get("source"), when or ""]
+            if drive_file_id:
+                sql += "AND f.drive_file_id=%s "
+                params.append(drive_file_id)
+            else:
+                sql += "AND f.drive_file_id IS NULL AND f.file=%s "
+                params.append(file)
+            sql += "ORDER BY COALESCE(r.assessed_at,r.completed_at,r.started_at) DESC LIMIT 1"
+            self._db.execute(cur, sql, tuple(params))
+            previous_file = self._db.fetchone(cur)
+            if not previous_file:
+                return None
+            self._db.execute(cur, "SELECT * FROM scan_runs WHERE id=%s", (previous_file["scan_id"],))
+            run = self._db.fetchone(cur)
+            run = self._fill_run_aggregate(cur, run)
+            import json as _json
+            raw = run.get("scope")
+            scope = _json.loads(raw) if isinstance(raw, str) and raw else (raw or None)
+            run["scan_scope"] = scope.get("scan_scope") if isinstance(scope, dict) else None
+            self._db.execute(cur,
+                "SELECT rule_id,wcag,severity,detail,page,location FROM issue_records "
+                "WHERE scan_id=%s AND file=%s", (previous_file["scan_id"], previous_file["file"]))
+            issues = self._db.fetchall(cur)
+        return {"run": run, "file_row": previous_file, "issues": issues}
 
     def stage_work_item_for_job(self, job_id: str | None) -> dict | None:
         if not job_id:

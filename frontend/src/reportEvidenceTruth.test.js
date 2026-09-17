@@ -41,18 +41,37 @@ describe('ready wording is earned, never assumed', () => {
     expect(decision(m).checksNotPerformed).toBe(1)
   })
 
-  it('a FIXED row verified by a remediation_diff record can read as nothing outstanding', () => {
+  it('a verified criterion is technically complete, but its FINDINGS are not credited without a ledger', () => {
     const m = buildFileReportModel(base([row('1.1.1', 'PASS'), row('3.1.1', 'FIXED', { count: 1 })], {
       diffs: [{ rule_id: '3.1.1', seq: 0, before: '(none)', after: 'en-US', verified: true }],
     }))
-    expect(m.ready).toBe(true)
-    expect(blocksOf(m, 'callout')[0].text).toMatch(/^No outstanding items for "deck\.pptx"/)
-    expect(decision(m).findingsVerifiedResolved).toBe(1)
+    expect(m.technicalReady).toBe(true)
+    // Was: ready true and findingsVerifiedResolved 1. A criterion-wide verification record is not a
+    // per-finding one, and nobody has confirmed the change, so neither claim is available.
+    expect(m.ready).toBe(false)
+    expect(decision(m).findingsVerifiedResolved).toBeNull()
+    expect(m.findingsAccounting).toMatchObject({ ledger: 'none', attributed: false })
+    expect(text(m)).not.toMatch(READY)
   })
 
-  it('row.verified is honoured without diffs', () => {
-    const m = buildFileReportModel(base([row('3.1.1', 'FIXED', { count: 2, verified: true })], { diffs: [], diffsTotal: 1 }))
+  it('a verified criterion with NO findings and a confirmed reviewer decision does read as nothing outstanding', () => {
+    const diff = { rule_id: '3.1.1', seq: 0, before: '(none)', after: 'en-US', verified: true }
+    const m = buildFileReportModel(base([row('1.1.1', 'PASS'), row('3.1.1', 'FIXED', { count: 0 })], {
+      diffs: [diff], artifact: { currentSha256: 'cur' },
+      reviews: { [changeIdOf('deck.pptx', diff)]: { verdict: 'accepted', reviewer: 'qa', artifact_sha256: 'cur', stale: false } },
+    }))
     expect(m.ready).toBe(true)
+    expect(blocksOf(m, 'callout')[0].text).toMatch(/^No outstanding items for "deck\.pptx"/)
+    // Technical completion and human confirmation are said separately, never merged into one word.
+    expect(blocksOf(m, 'callout')[0].text).toMatch(/Technical checks: .*Human confirmation: /s)
+  })
+
+  it('row.verified is honoured for the criterion, and its two findings are still unaccounted', () => {
+    const m = buildFileReportModel(base([row('3.1.1', 'FIXED', { count: 2, verified: true })], { diffs: [], diffsTotal: 1 }))
+    expect(m.technicalReady).toBe(true)
+    expect(m.ready).toBe(false)
+    expect(decision(m).findingsVerifiedResolved).toBeNull()
+    expect(decision(m).findingsRemaining).toBeNull()
   })
 
   it('the checklist never prints Pass over an unchecked or unverified criterion', () => {
@@ -110,8 +129,12 @@ describe('missing evidence is Not recorded, never 0', () => {
     }))
     expect(blocksOf(m, 'stageStrip')[0].items.find((s) => s.key === 'humanConfirmation').detail).toMatch(/could not be read: HTTP 500/)
     expect(blocksOf(m, 'changeCard')[0].beforeStoredClipped).toBe(true)
-    expect(text(m)).toMatch(/2,000-character storage limit/)
-    expect(m.blocks.find((b) => b.id === 'appendix-changes').rows[0][7]).toMatch(/may be incomplete/)
+    expect(blocksOf(m, 'changeCard')[0].valueClipped).toBe(true)
+    // The store keeps no untruncated copy, so the note discloses the clip and points at the
+    // corrected copy — never at a "full evidence report" that does not have the text either.
+    expect(text(m)).toMatch(/clipped by the store to 2,000 characters when it was recorded/)
+    expect(text(m)).not.toMatch(/clipped[^.]*Full evidence report/)
+    expect(m.blocks.find((b) => b.id === 'appendix-changes').rows[0][7]).toMatch(/Clipped by the store/)
   })
 
   it('a missing location says so', () => {
@@ -220,12 +243,20 @@ describe('human confirmation is recorded, never invented', () => {
     expect(html).toMatch(/Stale — the file changed after this decision/)
   })
 
-  it('a loaded review map without an entry is pending; an accepted one is accepted', () => {
+  it('a loaded review map without an entry is pending; an accepted one needs KNOWN freshness', () => {
     const d2 = { ...diff, seq: 5 }
     const m = buildFileReportModel(base([row('1.1.1', 'FIXED')], {
       diffs: [diff, d2], reviews: { [changeIdOf('deck.pptx', d2)]: { verdict: 'accepted', reviewer: 'r' } },
     }))
-    expect(blocksOf(m, 'changeCard').map((c) => c.human.status)).toEqual(['pending', 'accepted'])
+    // Was ['pending', 'accepted']. The second decision names no artifact and the server did not
+    // evaluate staleness, so its freshness is UNKNOWN — which is not a confirmation.
+    expect(blocksOf(m, 'changeCard').map((c) => c.human.status)).toEqual(['pending', 'freshness_unknown'])
+    expect(blocksOf(m, 'changeCard')[1].human.confirmed).toBe(false)
+    const fresh = buildFileReportModel(base([row('1.1.1', 'FIXED')], {
+      diffs: [d2], artifact: { currentSha256: 'cur' },
+      reviews: { [changeIdOf('deck.pptx', d2)]: { verdict: 'accepted', reviewer: 'r', artifact_sha256: 'cur', stale: false } },
+    }))
+    expect(blocksOf(fresh, 'changeCard')[0].human).toMatchObject({ status: 'accepted', confirmed: true, freshness: 'known' })
     expect(blocksOf(m, 'changeCard')[0].responseNotice).toMatch(/does not record a decision/)
     expect(blocksOf(m, 'changeCard')[0].responseOptions).toEqual(['Accept', 'Edit', 'Reject', 'Unable to verify'])
   })
@@ -287,7 +318,10 @@ describe('modes', () => {
     expect(m.mode).toBe('summary')
     expect(blocksOf(m, 'decisionSummary')).toHaveLength(1)
     expect(blocksOf(m, 'decisionSummary')[0].items.map((i) => i.key)).toEqual(['documentsAssessed', 'editsSaved', 'findingsVerifiedResolved', 'findingsRemaining', 'humanChecksPending', 'checksNotPerformed'])
-    expect(blocksOf(m, 'stageStrip')[0].items.map((i) => i.key)).toEqual(['suggestions', 'savedEdits', 'technicalChecks', 'humanConfirmation', 'publication'])
+    // The stage strip is reviewer-and-up: summary is ONE page, and it repeats the counts above.
+    expect(blocksOf(m, 'stageStrip')).toHaveLength(0)
+    expect(blocksOf(buildFileReportModel(d('reviewer')), 'stageStrip')[0].items.map((i) => i.key))
+      .toEqual(['suggestions', 'savedEdits', 'technicalChecks', 'humanConfirmation', 'publication'])
     expect(blocksOf(m, 'changeCard')).toHaveLength(0)
     expect(blocksOf(m, 'findingCard')).toHaveLength(0)
     expect(blocksOf(m, 'appendixTable')).toHaveLength(0)
@@ -330,7 +364,12 @@ describe('scan report: eligible ≠ saved ≠ verified', () => {
     expect(m.kind).toBe('scan')
     const dv = decision(m)
     expect(dv.editsSaved).toBe(1)
-    expect(dv.findingsVerifiedResolved).toBe(1)
+    // Was 1 — but that 1 is a CHANGE that cleared the re-scan, not a FINDING known to be resolved.
+    // Changes, findings and criteria are three counts; the key named findings holds only findings.
+    expect(dv.findingsVerifiedResolved).toBeNull()
+    const basis = blocksOf(m, 'decisionSummary')[0].items.find((i) => i.key === 'findingsVerifiedResolved').detail
+    expect(basis).toMatch(/1 saved change\(s\) across 1 document\(s\) cleared the re-scan/)
+    expect(basis).toMatch(/a change count, not a finding count/)
     expect(dv.findingsRemaining).toBe(2)          // b.pdf's pre-remediation finding is not "open"
     expect(text(m)).not.toMatch(/Auto-fixed/i)
     expect(text(m)).toMatch(/eligible for automatic fixing — a recommendation, not work performed/)

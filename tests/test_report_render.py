@@ -14,6 +14,7 @@ import base64
 import io
 import json
 import re
+import shutil
 import subprocess
 import sys
 from collections import Counter
@@ -124,6 +125,11 @@ def model(blocks=None, **over):
 
 
 RECORD = {"checksum": "0123abcd-md5-from-drive", "corrected_sha256": "c" * 64}
+# The token a client sends to say WHICH facts it built its model from (contract v2). Every body
+# below carries one, so a 422 in these tests means what the test says it means and not "you forgot
+# the digest". The digest's own rules get their own tests (test_facts_digest_is_mandatory,
+# tests/test_report_render_routes.py::test_a_stale_facts_digest_is_409).
+DIGEST = "d" * 64
 
 
 def identity(kind="file", file="report.docx", record=RECORD, client=None):
@@ -132,7 +138,8 @@ def identity(kind="file", file="report.docx", record=RECORD, client=None):
 
 
 def render(m=None, mode="reviewer", base_url="https://acp.example.com", kind="file", file="report.docx"):
-    req = rr.validate_request({"kind": kind, "file": file, "mode": mode, "model": m or model()})
+    req = rr.validate_request({"kind": kind, "file": file, "mode": mode, "factsDigest": DIGEST,
+                               "model": m or model()})
     return rr.render_pdf(req["model"], identity(kind=kind, file=file), mode, base_url)
 
 
@@ -287,9 +294,16 @@ def test_a_model_identity_table_is_replaced_by_the_server_one():
               {"k": "table", "role": "identity", "caption": "Document and report identity", "headers": ["Field", "Value"],
                "rows": [["Source SHA-256", "Not recorded"], ["Platform version", "client-version"]]}]
     html = rr.render_html(rr.validate_request({"kind": "file", "file": "report.docx", "mode": "summary",
+                                               "factsDigest": DIGEST,
                                                "model": model(blocks)})["model"], identity(), "summary")
-    assert html.count('class="identity"') == 1          # the cover does not print a second one
+    assert html.count('class="identity') == 1           # the cover does not print a second one
     assert "client-version" not in html and "0123abcd-md5-from-drive" in html
+    # …and the same in the other two modes, where the cost of a duplicate is only clutter.
+    for mode in ("reviewer", "full"):
+        other = rr.render_html(rr.validate_request({"kind": "file", "file": "report.docx", "mode": mode,
+                                                    "factsDigest": DIGEST,
+                                                    "model": model(blocks)})["model"], identity(), mode)
+        assert other.count('class="identity') == 1, mode
 
 
 # ── untrusted input ──────────────────────────────────────────────────────────────────────────
@@ -333,7 +347,8 @@ def _refused(body):
 
 
 def _body(blocks, **over):
-    return {"kind": "file", "file": "report.docx", "mode": "reviewer", "model": model(blocks), **over}
+    return {"kind": "file", "file": "report.docx", "mode": "reviewer", "factsDigest": DIGEST,
+            "model": model(blocks), **over}
 
 
 @pytest.mark.parametrize("src", [
@@ -374,12 +389,31 @@ def test_oversize_inputs_are_refused_not_truncated(monkeypatch):
     _body([{"text": "no kind"}]),
     _body([{"k": "heading", "text": "x"}], kind="estate"),
     _body([{"k": "heading", "text": "x"}], mode="everything"),
-    {"kind": "file", "file": None, "mode": "full", "model": model()},
-    {"kind": "scan", "file": None, "mode": "full", "model": {"blocks": "nope"}},
-    {"kind": "scan", "file": None, "mode": "full", "model": [1, 2]},
+    {"kind": "file", "file": None, "mode": "full", "factsDigest": DIGEST, "model": model()},
+    {"kind": "scan", "file": None, "mode": "full", "factsDigest": DIGEST, "model": {"blocks": "nope"}},
+    {"kind": "scan", "file": None, "mode": "full", "factsDigest": DIGEST, "model": [1, 2]},
 ])
 def test_malformed_requests_are_422(body):
     assert _refused(body) == 422
+
+
+@pytest.mark.parametrize("digest", [None, "", "not-a-digest", "d" * 63, "d" * 65, "g" * 64, 12345,
+                                    ["d" * 64]])
+def test_facts_digest_is_mandatory_and_must_be_a_sha256(digest):
+    """No digest, no render. The server stamps ITS identity onto the client's model, so a model
+    built before the document changed would otherwise be printed under the checksums the document
+    has now — the one failure mode nothing on the page would reveal."""
+    body = _body([{"k": "heading", "text": "x"}])
+    if digest is None:
+        body.pop("factsDigest")
+    else:
+        body["factsDigest"] = digest
+    assert _refused(body) == 422
+
+
+def test_the_digest_is_returned_normalised():
+    req = rr.validate_request(_body([{"k": "heading", "text": "x"}], factsDigest="  " + "AB" * 32 + " "))
+    assert req["factsDigest"] == "ab" * 32
 
 
 def test_url_fetcher_refuses_anything_but_our_pngs_and_fonts():
@@ -424,8 +458,148 @@ def test_stale_decision_names_both_hashes():
     m = model([change(0, human={"status": "stale", "reviewer": "ana@example.com", "at": "2026-09-10",
                                 "note": "ok", "boundSha256": "a" * 64, "currentSha256": "b" * 64})])
     html = rr.render_html(rr.validate_request(_body(m["blocks"]))["model"], identity(), "reviewer")
-    assert "Stale: the file changed after this decision (ana@example.com · 2026-09-10)" in html
+    assert "Stale: the file changed after this decision" in html
+    assert "(ana@example.com · 2026-09-10)" in html
     assert "a" * 64 in html and "b" * 64 in html
+
+
+# ── what the evidence actually says ──────────────────────────────────────────────────────────
+#
+# Each of these was wrong in the first pass, and each wrong in the same direction: a record that
+# nobody had confirmed read as confirmed. That is the failure mode worth testing, because the
+# reader of a PDF has no way to check it.
+
+def _card_html(**over):
+    m = model([change(0, **over)])
+    return rr.render_html(rr.validate_request(_body(m["blocks"]))["model"], identity(), "reviewer")
+
+
+def test_an_unverified_ai_change_says_so_in_those_words():
+    html = _card_html(verification="not_verified",
+                      verificationDetail="Saved to the corrected copy. No re-scan result recorded.",
+                      technical={"status": "pending", "detail": "ignored when verification is given"})
+    assert "AI applied · not verified" in html
+    assert "No re-scan result recorded." in html
+    assert "ignored when verification is given" not in html
+
+
+def test_a_verified_change_is_not_flagged():
+    html = _card_html(verification="verified", verificationDetail="A remediation_diff record exists.")
+    assert "Verified by re-scan" in html and "AI applied" not in html
+
+
+@pytest.mark.parametrize("status", ["edited", "correction_requested"])
+def test_a_requested_correction_is_never_reported_as_accepted(status):
+    """change_review's PUT records a PROPOSED value; it does not write bytes. "Accepted with
+    edits" claimed an edit that exists nowhere."""
+    html = _card_html(human={"status": status, "reviewer": "ana@example.com", "at": "2026-09-16",
+                             "note": None, "editedValue": "A clearer description",
+                             "boundSha256": None, "currentSha256": None})
+    assert "Correction requested — not applied" in html
+    assert "Accepted with edits" not in html
+    assert "Correction the reviewer asked for — not applied" in html
+    assert "A clearer description" in html
+
+
+def test_unknown_freshness_is_not_a_confirmation():
+    html = _card_html(human={"status": "freshness_unknown", "reviewer": "ana@example.com",
+                             "at": "2026-09-16", "note": None, "boundSha256": "e" * 64,
+                             "currentSha256": None})
+    assert "Freshness unknown — recheck" in html
+    assert "e" * 64 in html and "is not recorded" in html
+    assert ">Accepted<" not in html
+
+
+def test_none_of_the_new_evidence_keys_are_refused():
+    """A key the frontend emits and the server rejects is a 422 on every download of that report,
+    so the new fields are accepted, not merely tolerated."""
+    body = _body([change(0, verification="not_verified", verificationDetail="d", valueClipped=True,
+                         changeDigest="9" * 64, findingIds=["abc"], source="unverified_changes",
+                         human={"status": "correction_requested", "loaded": False,
+                                "editedValue": "x", "boundSha256": None, "currentSha256": None}),
+                  finding(0, recommendedAction="Add a text alternative naming the clinic.",
+                          ledgerFindingId=None, state="open", stateReason="Present in the "
+                          "current assessment")])
+    req = rr.validate_request(body)
+    assert len(req["model"]["blocks"]) == 2
+
+
+def test_a_store_clipped_value_does_not_promise_the_full_text_elsewhere():
+    """A value the STORE truncated at its 2,000-character cap is not in the Full evidence report
+    either — it is not held anywhere. Pointing a reader there would send them for something that
+    has never existed."""
+    html = _card_html(beforeStoredClipped=True, before="x" * 2000)
+    assert "clipped by the store" in html
+    assert "The full text is in the Full evidence report" not in html
+
+
+def test_a_recommended_action_is_printed_verbatim():
+    action = "Add a text alternative describing the referral pathway; mark decorative only if the caption repeats it."
+    m = model([finding(0, recommendedAction=action)])
+    html = rr.render_html(rr.validate_request(_body(m["blocks"]))["model"], identity(), "reviewer")
+    assert escape_ok(action) in html
+
+
+def escape_ok(text):
+    from html import escape as _e
+    return _e(text, quote=True)
+
+
+# ── nothing is fetched, ever ─────────────────────────────────────────────────────────────────
+
+def test_a_model_full_of_urls_makes_no_network_request(monkeypatch):
+    """The bite check the fetcher's unit test cannot make: render a whole document whose model is
+    full of https images, https links and @import-shaped text, record every URL WeasyPrint asks
+    for, and forbid the socket layer outright. A URL the renderer resolved would either appear in
+    the log or raise from socket()."""
+    import socket
+    import weasyprint
+
+    asked = []
+    real = rr._fetcher
+
+    def spy(url, *args, **kwargs):
+        asked.append(url)
+        return real(url, *args, **kwargs)
+
+    class NoNetwork(socket.socket):
+        def __init__(self, *a, **k):
+            raise AssertionError("the report renderer opened a socket")
+
+    monkeypatch.setattr(rr, "_fetcher", spy)
+    monkeypatch.setattr(socket, "socket", NoNetwork)
+    monkeypatch.setattr(socket, "create_connection",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("connect attempted")))
+
+    hostile = [
+        {"k": "heading", "text": "@import url('https://evil.example/x.css');"},
+        {"k": "text", "text": "<style>@import url(https://evil.example/y.css)</style>"},
+        {"k": "text", "text": "url(https://evil.example/z.png) and file:///etc/passwd"},
+        {"k": "link", "text": "Remote", "href": "https://evil.example/tracker"},
+        {"k": "link", "text": "App", "href": "/scans/s1"},
+        change(0, image={"src": png(), "alt": "Embedded", "caption": "Re-encoded by Pillow"},
+               imageStatus="available"),
+        {"k": "table", "caption": "https://evil.example/caption.png", "headers": ["A"],
+         "rows": [["https://evil.example/cell.png"]]},
+    ]
+    req = rr.validate_request(_body(hostile))
+    pdf_data = weasyprint.HTML(string=rr.render_html(req["model"], identity(), "reviewer",
+                                                     "https://acp.example.com"),
+                               url_fetcher=rr._fetcher).write_pdf(pdf_variant="pdf/ua-1")
+    assert pdf_data.startswith(b"%PDF")
+    assert asked, "the fetcher was never called — this test would pass for the wrong reason"
+    for url in asked:
+        assert url.startswith("data:image/png;base64,") or url in rr._FONT_URLS, url
+    assert not any("evil.example" in u for u in asked)
+    # The URLs are still printed as literal text, escaped — dropped links must not become silence.
+    text = pdftext(pdf_data)
+    assert "https://evil.example/x.css" in text and "@import" in text
+
+
+def test_an_https_image_in_the_model_is_refused_before_any_render():
+    assert _refused(_body([{"k": "image", "src": "https://evil.example/pixel.png", "alt": "x"}])) == 422
+    assert _refused(_body([change(0, imageStatus="available",
+                                  image={"src": "https://evil.example/p.png", "alt": "x"})])) == 422
 
 
 # ── long documents lay out sanely ────────────────────────────────────────────────────────────
@@ -504,21 +678,195 @@ def test_table_header_repeats_on_every_page_of_a_long_table(long_pdf):
 
 
 # ── the real models the frontend builds ──────────────────────────────────────────────────────
+#
+# These are not models written in this file. tests/fixtures/build_report_render_js_models.mjs runs
+# frontend/src/reportModel.js and frontend/src/scanReport.js — the actual builders, as ES modules,
+# not a copy — over facts-shaped input, and writes what they return. A renderer-only fake would
+# stay green through a block kind the frontend emits and the server refuses, which is a 422 on
+# every download of that report; test_the_fixture_matches_the_builders re-runs the generator and
+# fails when the checked-in JSON has drifted.
 
 FIXTURE = ACP / "tests" / "fixtures" / "report_render_js_models.json"
+GENERATOR = ACP / "tests" / "fixtures" / "build_report_render_js_models.mjs"
+MODELS = json.loads(FIXTURE.read_text())
+NODE = shutil.which("node") or next(
+    (p for p in ("/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node",
+                 str(Path.home() / ".nvm/versions/node/current/bin/node")) if Path(p).exists()), None)
+
+# The case names encode kind, data shape and mode: "file-long-summary".
+CASES = sorted(MODELS)
+SUMMARY_CASES = [n for n in CASES if n.endswith("-summary")]
+LONG_PATH = (MODELS["file-long-summary"].get("identity") or {}).get("file")
 
 
-@pytest.mark.parametrize("name", sorted(json.loads(FIXTURE.read_text())))
-def test_every_frontend_model_validates_and_renders(name):
-    """Models dumped from reportModel.js / scanReport.js builders (see the fixture). A block kind
-    the frontend emits and the server does not accept would 422 every download of that report."""
-    kind, mode = name.split("-")
-    m = json.loads(FIXTURE.read_text())[name]
-    req = rr.validate_request({"kind": kind, "mode": mode, "file": "deck.pptx" if kind == "file" else None, "model": m})
-    data = rr.render_pdf(req["model"], identity(kind=kind, file=req["file"]), mode)
+def fixture_render(name):
+    kind, case, mode = name.split("-")
+    model_ = MODELS[name]
+    file = (model_.get("identity") or {}).get("file") if kind == "file" else None
+    # A case that recorded nothing gets a store record that holds nothing: no checksum, no
+    # corrected copy, no build stamp. Handing it hashes would hide the very thing it is for.
+    blank = case == "missing"
+    req = rr.validate_request({"kind": kind, "mode": mode, "file": file,
+                               "factsDigest": DIGEST, "model": model_})
+    ident = rr.server_identity(
+        scan_id="scan-2026-09-17-a", kind=kind, file=req["file"], record={} if blank else RECORD,
+        client_identity={"targetLevel": "AA"},
+        platform_version=None if blank else "2026.9.17.3")
+    return rr.render_pdf(req["model"], ident, mode)
+
+
+@pytest.fixture(scope="module")
+def rendered():
+    return {}
+
+
+def fixture_pdf(rendered, name):
+    if name not in rendered:
+        rendered[name] = fixture_render(name)
+    return rendered[name]
+
+
+def test_the_fixture_matches_the_builders(tmp_path):
+    """Re-run the generator and diff. A builder change that alters the model must land in the
+    fixture in the same commit, or the renderer is being tested against a model nobody ships."""
+    if NODE is None:
+        pytest.skip("node is not installed; the fixture cannot be checked against the builders")
+    proc = subprocess.run([NODE, str(GENERATOR)], capture_output=True, cwd=str(ACP))
+    if proc.returncode != 0:
+        pytest.skip(f"node could not run the generator: {proc.stderr.decode()[:400]}")
+    current = json.loads(FIXTURE.read_text())
+    assert set(current) == set(MODELS), "cases changed; re-read the fixture"
+    drifted = sorted(k for k in current if current[k] != MODELS[k])
+    assert not drifted, (f"the frontend builders now return different models for {drifted}. "
+                         f"Run: node {GENERATOR.relative_to(ACP)}")
+
+
+@pytest.mark.parametrize("name", CASES)
+def test_every_frontend_model_validates_and_renders(name, rendered):
+    data = fixture_pdf(rendered, name)
     with pikepdf.open(io.BytesIO(data)) as doc:
         tags, _ = walk(doc)
         assert tags["H1"] == 1 and tags["H2"] >= 1 and tags["Table"] >= 1
+        assert "/StructTreeRoot" in doc.Root and str(doc.Root.Lang) == "en-US"
+        assert doc.Root.get("/MarkInfo") is not None and bool(doc.Root.MarkInfo.Marked)
+        assert str(doc.open_metadata().get("dc:title") or doc.docinfo.get("/Title") or "")
+
+
+@pytest.mark.parametrize("name", SUMMARY_CASES)
+def test_summary_mode_is_one_page_for_every_kind(name, rendered):
+    """Contract v2: summary is ONE page, for file, scan and remediation reports alike, including
+    the 30-change case and the one with a 150-character path. It got there by printing less, not
+    by printing smaller — test_the_summary_does_not_shrink_the_type is the other half."""
+    with pikepdf.open(io.BytesIO(fixture_pdf(rendered, name))) as doc:
+        assert len(doc.pages) == 1, f"{name} is {len(doc.pages)} pages"
+
+
+@pytest.mark.parametrize("name", SUMMARY_CASES)
+def test_the_summary_prints_identity_exactly_once(name, rendered):
+    """A "Report identity" table on page 1 above a "Document identity" table on page 2 is the
+    same eight facts twice, and it is half of why the summary used to run to two pages."""
+    text = pdftext(fixture_pdf(rendered, name))
+    body = text.split("\f")[0]
+    assert body.count("Artifact version") == 1, body
+    assert body.count("Platform version") == 1, body
+
+
+@pytest.mark.parametrize("name", SUMMARY_CASES)
+def test_the_summary_leaves_out_method_and_says_where_the_rest_is(name, rendered):
+    text = pdftext(fixture_pdf(rendered, name))
+    flat = re.sub(r"\s+", " ", text)
+    for gone in ("What this report is, and is not", "About this PDF",
+                 "This PDF is generated with a tagged structure"):
+        assert gone not in flat, f"{name} still prints {gone!r}"
+    assert "Full evidence report" in flat, f"{name} does not say where the rest of the record is"
+
+
+def test_the_summary_does_not_shrink_the_type():
+    """The one-page rule must not be met by making the page unreadable. Body text in a summary is
+    the same size as in the full report; only spacing and layout differ."""
+    full = pdftext(fixture_render("file-base-full"), "-bbox")
+    summary = pdftext(fixture_render("file-base-summary"), "-bbox")
+
+    def body_line_heights(bbox):
+        return sorted(round(float(m.group(2)) - float(m.group(1)), 1) for m in
+                      re.finditer(r'<word xMin="[\d.]+" yMin="([\d.]+)" xMax="[\d.]+" yMax="([\d.]+)">', bbox))
+
+    a, b = body_line_heights(full), body_line_heights(summary)
+    assert a and b
+    # Compare the commonest glyph height (the body face) in each.
+    assert Counter(a).most_common(1)[0][0] == Counter(b).most_common(1)[0][0], (a[:5], b[:5])
+
+
+def test_the_missing_evidence_case_says_not_recorded_and_never_invents_a_zero(rendered):
+    """A document nothing has opened must read "Not recorded", not "0". A zero is an assertion
+    that somebody looked; it is exactly the wrong way round for a report to be wrong."""
+    # -layout keeps a table row on one line, so "field … value" can be read as a pair.
+    text = pdftext(fixture_pdf(rendered, "file-missing-summary"), "-layout")
+    identity_block = text.split("Document and report identity", 1)[1]
+    for field in ("Source checksum", "Corrected copy SHA-256", "Platform version"):
+        line = next((ln for ln in identity_block.splitlines() if ln.strip().startswith(field)), None)
+        assert line and "Not recorded" in line, (field, line)
+    # And the counts a never-assessed document cannot honestly report are not zeros.
+    summary_block = text.split("Decision evidence", 1)[1].split("Document and report identity")[0]
+    for measure in ("Documents assessed", "Edits saved", "Findings verified resolved"):
+        line = next((ln for ln in summary_block.splitlines() if ln.strip().startswith(measure)), None)
+        assert line and "Not recorded" in line, (measure, line)
+
+
+@pytest.mark.parametrize("name", ["file-large-full", "file-large-reviewer", "scan-large-full",
+                                  "remediation-large-full"])
+def test_the_large_cases_are_multi_page_and_numbered(name, rendered):
+    data = fixture_pdf(rendered, name)
+    with pikepdf.open(io.BytesIO(data)) as doc:
+        pages = len(doc.pages)
+    assert pages > 3, f"{name} is only {pages} pages; it is meant to be the long case"
+    text = pdftext(data)
+    assert f"Page {pages} of {pages}" in text
+    assert "Page 1 of %d" % pages in text
+    # Nothing off the page, no replacement glyphs, no broken bookmark tree.
+    assert "�" not in text
+    with pikepdf.open(io.BytesIO(data)) as doc:
+        assert "/Outlines" in doc.Root and int(doc.Root.Outlines.get("/Count", 0)) > 0
+
+
+@pytest.mark.parametrize("name", ["file-long-summary", "file-long-reviewer", "file-long-full"])
+def test_a_long_path_is_printed_whole_not_clipped(name, rendered):
+    flat = re.sub(r"\s+", "", pdftext(fixture_pdf(rendered, name), "-raw"))
+    assert LONG_PATH
+    assert re.sub(r"\s+", "", LONG_PATH) in flat
+
+
+@pytest.mark.parametrize("name", ["file-base-full", "scan-base-full", "remediation-base-full"])
+def test_fonts_are_embedded_in_every_kind(name, rendered):
+    with pikepdf.open(io.BytesIO(fixture_pdf(rendered, name))) as doc:
+        fonts = [f for page in doc.pages
+                 for f in (page.get("/Resources", {}).get("/Font", {}) or {}).values()]
+        assert fonts
+        for font in fonts:
+            descendant = (font.get("/DescendantFonts") or [font])[0]
+            desc = descendant.get("/FontDescriptor")
+            assert desc is not None and any(k in desc for k in ("/FontFile", "/FontFile2", "/FontFile3")), font
+
+
+@pytest.mark.skipif(not VERAPDF_OK, reason=NO_VERAPDF)
+@pytest.mark.parametrize("name", ["file-base-summary", "file-base-reviewer", "file-base-full",
+                                  "scan-base-summary", "scan-base-reviewer", "scan-base-full",
+                                  "remediation-base-summary", "remediation-base-reviewer",
+                                  "remediation-base-full", "file-large-full"])
+def test_verapdf_ua1_over_every_kind_and_mode(tmp_path, name, rendered):
+    """veraPDF's AUTOMATED PDF/UA-1 checks over each kind x mode of the real models.
+
+    What this establishes: the machine-checkable clauses — tagged structure, /Lang, document
+    title and DisplayDocTitle, embedded fonts, figures with alternate text, no untagged content.
+    What it does NOT establish, and what the report itself never claims: PDF/UA CONFORMANCE.
+    Clauses about whether a heading level is the RIGHT one, whether an alt text is meaningful, and
+    whether reading order matches the visual order are not machine-decidable; veraPDF reports them
+    as human-verification items. A screen-reader pass and a PAC 2024 check remain manual.
+    """
+    out = tmp_path / f"{name}.pdf"
+    out.write_bytes(fixture_pdf(rendered, name))
+    result = validate(out)
+    assert result.compliant, result.summary()
 
 
 @pytest.mark.skipif(not VERAPDF_OK, reason=NO_VERAPDF)

@@ -9,7 +9,12 @@ every registered route (core.is_public), and owner-scoped like /scans/{sid}/repo
   * identity (scan, file, checksums, generation time, platform version) comes from the store and
     overwrites the client's — a report must not be able to claim a hash the server never recorded;
   * the body is size-capped BEFORE it is read in full, then validated (413 / 422, never silent
-    truncation — see report_render.validate_request).
+    truncation — see report_render.validate_request);
+  * the body MUST carry the `factsDigest` the model was built from, and the server recomputes it
+    (api/report_facts.py) — a mismatch is 409 "report data is out of date; regenerate the report".
+    Without that the two bullets above combine into the worst outcome available: a model built
+    from evidence recorded before the file changed, printed under the checksums it has now, with
+    nothing on the page to say the two do not belong together.
 """
 from __future__ import annotations
 
@@ -44,6 +49,22 @@ async def _read_capped(request: Request) -> bytes:
     return b"".join(chunks)
 
 
+def current_facts_digest(sid: str, file: str | None, owner) -> str | None:
+    """The facts digest this scan/file has RIGHT NOW, or None when there is nothing to show.
+
+    The seam onto api/report_facts.py (stream D), imported lazily so this router stays importable
+    on its own, and so a test can replace exactly this function. A report the server cannot bind
+    to a version of the facts is one whose evidence may predate the identity printed beside it —
+    which is the failure this exists to stop — so an unavailable facts module is an error, never
+    a skipped check.
+
+    None means "no facts visible to this owner", which the route answers 404 with, like every
+    other not-yours case here: a 409 would confirm the scan exists.
+    """
+    from report_facts import current_digest
+    return current_digest(core.store, sid, file, owner=owner)
+
+
 def _platform_version() -> str | None:
     try:
         from routes.system import _build_info
@@ -74,6 +95,18 @@ async def report_render_pdf(sid: str, request: Request):
         if not any(f.get("file") == file for f in scan.get("files") or []):
             raise HTTPException(404, "file not found in this scan")
         record = core.store.get_file_record(sid, file) or {}
+    # Bind the model to the facts it was built from BEFORE stamping server identity on it. A
+    # 'scan' or 'remediation' report is bound to the scan-level digest; a 'file' report to its
+    # file's. Anything else — a mismatch, or a facts module that cannot answer — refuses.
+    try:
+        current = current_facts_digest(sid, file if request_["kind"] == "file" else None, owner)
+    except ImportError as exc:  # pragma: no cover — the facts module is part of the app
+        raise HTTPException(503, "report facts are unavailable, so this report cannot be shown "
+                                 "to describe the current document") from exc
+    if not current:
+        raise HTTPException(404, "scan not found")
+    if current != request_["factsDigest"]:
+        raise HTTPException(409, report_render.STALE_FACTS_DETAIL)
     model = request_["model"]
     identity = report_render.server_identity(
         scan_id=sid, kind=request_["kind"], file=file, record=record,

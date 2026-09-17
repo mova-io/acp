@@ -1,0 +1,140 @@
+{
+  "factsVersion": 1,
+  "factsDigest": "06098117656b036b1dc85489d7eb7ff93b4588229cfa96db6356e8456c45fae4",
+  "generatedAt": "2026-09-17T20:12:31.170878+00:00",
+  "kind": "scan",
+  "identity": {
+    "scanId": "scan-2026-09-17-a",
+    "file": null,
+    "source": "drive",
+    "platformVersion": null,
+    "targetLevel": "AA",
+    "targetLevelSource": "workspace_config",
+    "scopeDigest": "1735fda4cda5ec871de7ec8ff1bc8571ee802686a203a65bb427c3e453b17244",
+    "scanScope": null,
+    "rubricHash": "rubric-9f21"
+  },
+  "scan": {
+    "status": "done",
+    "startedAt": "2026-09-17T09:00:00+00:00",
+    "assessedAt": "2026-09-17T09:06:00+00:00"
+  },
+  "totals": {
+    "documents": 3,
+    "assessed": 2,
+    "notAssessed": 0,
+    "error": 1,
+    "partial": 0,
+    "findingsTotal": 3,
+    "savedChangesVerified": 1,
+    "savedChangesUnverified": 1
+  },
+  "accounting": {
+    "findingsTotal": 3,
+    "findingsOpen": null,
+    "findingsResolvedVerified": null,
+    "resolutionLedger": "none",
+    "accountingReason": "at least one document has no per-finding ledger, so the scan-level resolved count cannot be stated",
+    "savedChangesVerified": 1,
+    "savedChangesUnverified": 1,
+    "humanReviews": {
+      "pending": 1,
+      "accepted": 0,
+      "correctionRequested": 1,
+      "rejected": 0,
+      "unable": 0,
+      "stale": 0
+    }
+  },
+  "previous": null,
+  "previousReason": "scan-level comparison is reported per document",
+  "limits": {
+    "valueMaxChars": 2000,
+    "savedChangesLimit": 500,
+    "filePageMax": 500
+  },
+  "files": [
+    {
+      "file": "Policies/2026/Broken.xlsx",
+      "assessment": {
+        "state": "error",
+        "stateReason": "the analyser did not produce a result for this document"
+      },
+      "score": null,
+      "findingsTotal": 0,
+      "findingsOpen": null,
+      "findingsResolvedVerified": null,
+      "resolutionLedger": "none",
+      "savedChangesVerified": 0,
+      "savedChangesUnverified": 0,
+      "humanReviews": {
+        "pending": 0,
+        "accepted": 0,
+        "correctionRequested": 0,
+        "rejected": 0,
+        "unable": 0,
+        "stale": 0
+      },
+      "currentArtifact": {
+        "kind": "unknown",
+        "sha256": null
+      }
+    },
+    {
+      "file": "Policies/2026/Employee handbook.docx",
+      "assessment": {
+        "state": "assessed",
+        "stateReason": "the document was assessed and every in-scope rule was evaluated"
+      },
+      "score": 72,
+      "findingsTotal": 3,
+      "findingsOpen": null,
+      "findingsResolvedVerified": null,
+      "resolutionLedger": "none",
+      "savedChangesVerified": 1,
+      "savedChangesUnverified": 1,
+      "humanReviews": {
+        "pending": 1,
+        "accepted": 0,
+        "correctionRequested": 1,
+        "rejected": 0,
+        "unable": 0,
+        "stale": 0
+      },
+      "currentArtifact": {
+        "kind": "corrected",
+        "sha256": "7d2b000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "file": "Policies/2026/Leave policy.pdf",
+      "assessment": {
+        "state": "assessed",
+        "stateReason": "the document was assessed and every in-scope rule was evaluated"
+      },
+      "score": 100,
+      "findingsTotal": 0,
+      "findingsOpen": 0,
+      "findingsResolvedVerified": null,
+      "resolutionLedger": "none",
+      "savedChangesVerified": 0,
+      "savedChangesUnverified": 0,
+      "humanReviews": {
+        "pending": 0,
+        "accepted": 0,
+        "correctionRequested": 0,
+        "rejected": 0,
+        "unable": 0,
+        "stale": 0
+      },
+      "currentArtifact": {
+        "kind": "source",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    }
+  ],
+  "filesTotal": 3,
+  "offset": 0,
+  "limit": 100,
+  "complete": true
+}

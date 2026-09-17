@@ -7,7 +7,7 @@ import { loadDiscoveryInventory, inventoryOnlyRows } from './discoveryInventory.
 import { findingsByCriterion, findingsByLevel, levelOfFinding } from './wcagFinding.js'
 import { analysedCount, avgScore } from './docStatus.js'
 import { IDENTITY, SIM, remediableCount, recommendationSummary } from './sim.js'
-import { openReport, getScanInventory } from './api.js'
+import { openReport, getScanInventory, getScanReportFacts } from './api.js'
 import ReportModeMenu from './ReportModeMenu.jsx'
 import { loadPublished } from './ontology.js'
 import BalancedSummary from './BalancedSummary.jsx'
@@ -68,9 +68,31 @@ export default function Overview({ run, files, trend, trendDates, onGo, scanList
   const [exporting, setExporting] = useState(false)
   const [exportError, setExportError] = useState(null)
   // Whole-scan report in the three contract modes; ReportModeMenu shows progress and any failure.
+  //
+  // The report is built from the SERVER's facts, not from this screen's rollups: identity, the
+  // per-document index, the accounting rules, the recorded baseline, and the factsDigest that lets
+  // the render route refuse a report describing evidence that has since moved (409 →
+  // "regenerate"). The index is PAGINATED, so it is read to the end and anything missing is named
+  // in the report rather than silently capped at page one.
+  const [factsProgress, setFactsProgress] = useState(null)
   const runScanReport = async (mode) => {
-    const { generateScanReport } = await import('./scanReport.js')
-    return generateScanReport({ scanId: run.id, files, org: orgName, mode })
+    const [{ loadScanReportFacts, scanComparisonFromFacts }, { generateScanReport }] = await Promise.all([
+      import('./fileReportData.js'), import('./scanReport.js'),
+    ])
+    setFactsProgress({ loaded: 0, total: null, complete: false })
+    try {
+      const got = await loadScanReportFacts(run.id, { getScanReportFacts, onProgress: setFactsProgress })
+      const cmp = scanComparisonFromFacts(got.facts, run?.target || 'AA')
+      // generateScanReport resolves the RENDERER's outcome ({ok, fallback, message, model}); it is
+      // returned unchanged so the menu can say "HTML was downloaded instead" rather than reporting
+      // a PDF that was never produced.
+      return await generateScanReport({
+        scanId: run.id, files, org: orgName, mode,
+        facts: got.facts, factsDigest: got.facts?.factsDigest ?? null,
+        factsIndexComplete: got.complete, factsIncompleteReason: got.incompleteReason || got.factsError || null,
+        previous: cmp.previous, previousReason: cmp.previousReason, scope: cmp.scope,
+      })
+    } finally { setFactsProgress(null) }
   }
   const doExport = async () => {
     setExportError(null)
@@ -353,6 +375,7 @@ export default function Overview({ run, files, trend, trendDates, onGo, scanList
           <div className="reports-menu-items" aria-label="Report exports">
             <button type="button" onClick={doExport} disabled={exporting}>{exporting ? 'Generating PDF…' : 'Quarterly governance report'}</button>
             <ReportModeMenu inline label="Scan report" disabled={!run?.id}
+                            progress={factsProgress && `Reading report evidence\u2026 ${factsProgress.loaded}${factsProgress.total != null ? ` of ${factsProgress.total}` : ''} document(s)`}
                             formats={[{ key: 'pdf', label: 'PDF', run: runScanReport }]} />
             <button type="button" onClick={exportCsv} title="Every finding as a spreadsheet row">Findings (CSV)</button>
             {!SIM && run?.id && (

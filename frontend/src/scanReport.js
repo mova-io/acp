@@ -20,8 +20,8 @@ import { WCAG } from './wcagCatalog.js'
 import { recommendationSummary } from './sim.js'
 import { fixSteps, hasGuidance, appName } from './remediationGuide.js'
 import {
-  fileIssuesOf, rowsFromFindings, buildFindingCards, rankFindingCards, buildComparison, boundList,
-  changeIdOf, scOfValue, criterionName,
+  fileIssuesOf, rowsFromFindings, buildFindingCards, rankFindingCards, buildComparison,
+  buildComparisonFromFacts, boundList, changeIdOf, scOfValue, criterionName,
 } from './reportEvidence.js'
 import { MODE_LABEL } from './reportModel.js'
 
@@ -79,7 +79,8 @@ const ROUTE_TXT = {
 
 // Pure aggregation of fetched inputs into the report data (legacy fields + evidence fields).
 export function aggregateScanReport({ scanId = null, files = [], traces = [], hitlItems = null, cfg = null,
-  diffSummary = null, targetLevel = 'AA', org = 'your organisation', now = new Date(), previous = null, scope } = {}) {
+  diffSummary = null, targetLevel = 'AA', org = 'your organisation', now = new Date(), previous = null, scope,
+  facts = null } = {}) {
   const rows = Array.isArray(traces) ? traces : []
 
   // ── Per-rule rollup (identical to RuleBreakdown) ──────────────────────────
@@ -226,6 +227,7 @@ export function aggregateScanReport({ scanId = null, files = [], traces = [], hi
     manualChecklist: manualChecklist.slice(0, CHECKLIST_CAP), checklistTruncated,
     checklistTotal: manualChecklist.length, manualChecklistAll,
     files, previous, scope,
+    facts: facts && typeof facts === 'object' ? facts : null,
   }
 }
 
@@ -235,6 +237,11 @@ export function buildScanReportModel(data = {}) {
   const atLeast = (m) => MODES.indexOf(mode) >= MODES.indexOf(m)
   const files = data.files || []
   const ex = data.execution || {}
+  // Scan-level report facts (stream D). When present they are the authority for the counts below,
+  // exactly as at file level: the client re-shapes, it does not re-derive.
+  const facts = data.facts && typeof data.facts === 'object' ? data.facts : null
+  const acc = facts?.accounting || null
+  const factsFiles = facts && Array.isArray(facts.files) ? facts.files : null
   const level = data.targetLevel || 'AA'
   const total = data.totalFiles ?? files.length
   const analysed = data.analysedFiles ?? null
@@ -252,6 +259,20 @@ export function buildScanReportModel(data = {}) {
   const hitl = data.hitl || null
   const notAnalysable = data.statusCounts ? (data.statusCounts['not-assessed'] || 0) + (data.statusCounts.unanalysable || 0) : null
   const eligible = data.routing?.eligibleAuto ?? null
+  // "Documents assessed" is a count of ASSESSMENTS, from each file's recorded assessment state —
+  // not of catalog rows, and not of documents that merely appear in the file list.
+  // The server totals the assessment states itself; files[] is the fallback for a paginated page.
+  const totals = facts?.totals || null
+  const assessedN = totals && Number.isFinite(totals.assessed)
+    ? totals.assessed + (Number.isFinite(totals.partial) ? totals.partial : 0)
+    : factsFiles
+      ? factsFiles.filter((f) => f?.assessment?.state === 'assessed' || f?.assessment?.state === 'partial').length
+      : analysed
+  const notAssessedN = totals && Number.isFinite(totals.documents) ? totals.documents - assessedN
+    : factsFiles ? factsFiles.length - assessedN : null
+  const ledger = acc?.resolutionLedger ?? null
+  const findingsResolved = ledger === 'per_finding' && Number.isFinite(acc?.findingsResolvedVerified)
+    ? acc.findingsResolvedVerified : null
 
   H('Decision summary')
   const outstanding = [
@@ -269,10 +290,17 @@ export function buildScanReportModel(data = {}) {
     k: 'decisionSummary',
     caption: 'Estate decision evidence',
     items: [
-      { key: 'documentsAssessed', label: 'Documents assessed', value: analysed, detail: `${total} document${total === 1 ? '' : 's'} in this scan` },
+      { key: 'documentsAssessed', label: 'Documents assessed', value: assessedN,
+        detail: facts
+          ? `${totals?.documents ?? total} document${(totals?.documents ?? total) === 1 ? '' : 's'} in this scan; ${notAssessedN} not assessed, errored or only partly assessed — an empty finding list for those is not "no findings"`
+          : `${total} document${total === 1 ? '' : 's'} in this scan` },
       { key: 'editsSaved', label: 'Documents with saved edits', value: ex.documentsWithSavedEdits ?? null, detail: ex.documentsWithSavedEdits == null ? 'Saved-copy status was not included in the file list' : 'Documents with a saved corrected copy' },
-      { key: 'findingsVerifiedResolved', label: 'Fixes verified by re-scan', value: ex.verifiedFixes ?? null,
-        detail: ex.verifiedFixes == null ? 'Remediation records could not be loaded' : `Across ${orNR(ex.verifiedDocuments)} documents (remediation records)` },
+      // FINDINGS resolved, which is not the same number as CHANGES verified. Without a per-finding
+      // ledger this is "Not recorded"; the verified-change count is stated in the basis instead.
+      { key: 'findingsVerifiedResolved', label: 'Findings verified resolved', value: findingsResolved,
+        detail: findingsResolved != null
+          ? `Counted finding by finding from the resolution ledger`
+          : `NOT RECORDED — ${acc?.accountingReason || 'no per-finding ledger links a saved change to the finding it resolved'}. ${ex.verifiedFixes == null ? 'Remediation records could not be loaded' : `${ex.verifiedFixes} saved change(s) across ${orNR(ex.verifiedDocuments)} document(s) cleared the re-scan`}, which is a change count, not a finding count.` },
       { key: 'findingsRemaining', label: 'Findings remaining', value: findingsRemaining,
         detail: awaitingReassess.length ? `On documents without a corrected copy; ${awaitingReassess.length} corrected document(s) await re-assessment and are not counted` : 'Blocking findings on documents without a corrected copy' },
       { key: 'humanChecksPending', label: 'Human checks pending', value: hitl ? hitl.pending : null, detail: hitl ? `${hitl.total} review item(s) in total` : 'The review queue could not be read' },
@@ -317,9 +345,15 @@ export function buildScanReportModel(data = {}) {
   })
 
   H('Since the previous assessment')
-  const current = openFiles.flatMap((f) => fileIssuesOf(f).filter((i) => i.severity !== 'REVIEW'))
-  const cmp = buildComparison(data.previous, { file: null, scope: data.scope === undefined ? null : data.scope, findings: current })
-  if (!data.previous) cmp.reason = typeof data.previousReason === 'string' && data.previousReason ? data.previousReason : 'No comparable earlier estate snapshot was supplied, so no change is reported. Aggregate counts are never subtracted to imply one.'
+  let cmp
+  if (facts) {
+    // Only a real comparable snapshot the server supplied. Aggregate counts are never subtracted.
+    cmp = buildComparisonFromFacts(facts)
+  } else {
+    const current = openFiles.flatMap((f) => fileIssuesOf(f).filter((i) => i.severity !== 'REVIEW'))
+    cmp = buildComparison(data.previous, { file: null, scope: data.scope === undefined ? null : data.scope, findings: current })
+    if (!data.previous) cmp.reason = typeof data.previousReason === 'string' && data.previousReason ? data.previousReason : 'No comparable earlier estate snapshot was supplied, so no change is reported. Aggregate counts are never subtracted to imply one.'
+  }
   blocks.push(cmp)
 
   if (atLeast('reviewer')) {
@@ -447,9 +481,14 @@ export function buildScanReportModel(data = {}) {
     mode,
     kind: 'scan',
     identity: {
-      scanId: data.scanId ?? null, file: null, sourceSha256: null, correctedSha256: null, artifactVersion: null,
+      scanId: data.scanId ?? facts?.identity?.scanId ?? null, file: null,
+      sourceChecksum: null, sourceChecksumKind: null, sourceSha256: null, correctedSha256: null,
+      currentArtifact: null, artifactVersion: null,
       generatedAt: data.generatedAt || new Date().toISOString(), platformVersion: data.platformVersion ?? null, targetLevel: level,
+      // The server render route recomputes this and answers 409 when the facts have moved on.
+      factsDigest: data.identity?.factsDigest ?? facts?.factsDigest ?? data.factsDigest ?? null,
     },
+    factsDigest: data.identity?.factsDigest ?? facts?.factsDigest ?? data.factsDigest ?? null,
     targetLevel: level,
     footerVersion: data.platformVersion ?? null,
     footerGenerated: data.timestamp || data.generatedAt || null,
@@ -467,7 +506,7 @@ const AMBER_HEX = '#854F0B', GREEN_HEX = '#3B6D11', MUTED_HEX = '#6B6670'
 
 // Gather every scan-scoped input, aggregate, build the model, then render the PDF server-side.
 // Both the Overview toolbar and the Assess/Transparency RuleBreakdown header call this.
-export async function generateScanReport({ scanId, files = [], org = 'your organisation', mode = 'summary', previous = null, scope } = {}) {
+export async function generateScanReport({ scanId, files = [], org = 'your organisation', mode = 'summary', previous = null, scope, facts = null } = {}) {
   const [rowsRaw, hitlRaw, cfg, diffRaw] = await Promise.all([
     getScanTraces(scanId).catch(() => []),
     // null, not [] — a queue that could not be read is "not recorded", not "nothing pending".
@@ -477,10 +516,13 @@ export async function generateScanReport({ scanId, files = [], org = 'your organ
   ])
   const data = aggregateScanReport({
     scanId, files, traces: rowsRaw, hitlItems: hitlRaw, cfg, diffSummary: diffRaw,
-    targetLevel: assessLevel(scanId), org, previous, scope,
+    targetLevel: assessLevel(scanId), org, previous, scope, facts,
   })
   const model = buildScanReportModel({ ...data, mode })
   const { renderReportPdf } = await import('./reportRenderClient.js')
-  await renderReportPdf({ scanId, kind: 'scan', file: null, mode: model.mode, model })
-  return model
+  // The renderer's OWN outcome is returned, not discarded. It answers {format:'html'} when the
+  // server PDF is unavailable, and a caller that only sees the model reports "PDF complete" for a
+  // download that was an HTML fallback.
+  const render = await renderReportPdf({ scanId, kind: 'scan', file: null, mode: model.mode, model })
+  return { ...(render && typeof render === 'object' ? render : {}), model }
 }

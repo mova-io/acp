@@ -61,7 +61,10 @@ describe('buildFileReportData', () => {
     expect(d.diffsComplete).toBe(true)
     expect(d.diffsTotal).toBe(30)
     expect(d.identity).toEqual({
-      scanId: 's1', file: 'guide.pdf', sourceSha256: null, correctedSha256: SHA, artifactVersion: SHA,
+      scanId: 's1', file: 'guide.pdf', sourceSha256: null, sourceChecksum: null, sourceChecksumKind: null,
+      correctedSha256: SHA, artifactVersion: SHA,
+      currentArtifact: { kind: 'unknown', sha256: SHA },
+      factsDigest: null, remediatedAt: null,
       generatedAt: '2026-09-17T12:00:00.000Z', platformVersion: '2026.9.17.1', targetLevel: 'AA',
     })
     expect(d.reviews['guide.pdf::1.1.1::0']).toMatchObject({ verdict: 'accepted', stale: false })
@@ -95,7 +98,11 @@ describe('collectPreviews', () => {
     const { previews, status } = await collectPreviews({ scanId: 's', file: many, diffs: [], getFilePage })
     expect(getFilePage.mock.calls.map((c) => c[2])).toEqual([3, 4, 5, 6, 7, 8, 9, 10])
     expect(Object.keys(previews).map(Number)).toEqual([3, 4, 5, 6, 7, 8, 9, 10])
-    expect(previews[3]).toMatch(/^data:image\/png;base64,/)
+    // Every entry says which VERSION it is. Here no digest is recorded, so the honest answer is
+    // "not verified" — never "after the edit".
+    expect(previews[3].src).toMatch(/^data:image\/png;base64,/)
+    expect(previews[3].provenance).toBe('unverified')
+    expect(previews[3].caption).toBe('Document preview — version not verified — page 3')
     expect(status.notIncluded).toEqual([11, 12, 13])
     expect(status.reason).toMatch(/3 more referenced pages are not included \(pages 11, 12, 13\)/)
   })

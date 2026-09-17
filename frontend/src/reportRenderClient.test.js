@@ -33,6 +33,16 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks())
 
 describe('renderReportPdf', () => {
+  it('preserves every evidence record in HTML when the PDF exceeds its size limit', async () => {
+    const model = { ...MODEL, mode: 'full', blocks: Array.from({ length: 1500 }, (_, i) => ({ k: 'text', text: `Evidence ${i}` })) }
+    post.mockResolvedValue(errResponse(413, 'report request is too large'))
+    const res = await renderReportPdf({ scanId: 's1', kind: 'file', mode: 'full', model })
+    expect(res).toMatchObject({ ok: false, fallback: 'html' })
+    expect(res.message).toMatch(/PDF size limit/)
+    expect(downloadModelHtml).toHaveBeenCalledWith(model)
+    expect(downloadModelHtml.mock.calls[0][0].blocks).toHaveLength(1500)
+    expect(jspdfLoaded).not.toHaveBeenCalled()
+  })
   it('uses the exact UI labels for the three modes', () => {
     expect(REPORT_MODES).toEqual({ summary: 'Summary', reviewer: 'Reviewer packet', full: 'Full evidence' })
   })
@@ -72,7 +82,6 @@ describe('renderReportPdf', () => {
 
   it.each([
     [404, /not available to your account/],
-    [413, /too large/],
     [422, /not accepted.*unsupported block kind/],
   ])('a %i refusal produces no document and a message', async (status, text) => {
     post.mockResolvedValue(errResponse(status, 'block 3: unsupported block kind (script)'))

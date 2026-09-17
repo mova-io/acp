@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { openTraceUrl, getTraceStatus, getScanTraces } from './api.js'
+import { openTraceUrl, getTraceStatus, getScanTraces, getScanReportFacts } from './api.js'
 import SegmentDrawer from './SegmentDrawer.jsx'
 import ReportModeMenu from './ReportModeMenu.jsx'
 import FileDrawer from './FileDrawer.jsx'
@@ -216,9 +216,25 @@ export function RuleBreakdown({ scanId, files }) {
     : { total: criteria.size, noun: 'criteria tracked for this engagement',
         question: `what do we track? — the ${criteria.size} criteria Mova iO follows, of the ${CORE_SCS.size} document core` }
   const [hideNA, setHideNA] = useState(true)   // default to hiding the N/A rows; the toggle reveals them
+  // Same server-facts path as Overview's scan report: the facts index is read to the end, the
+  // recorded baseline supplies "since the previous assessment", and the renderer's own outcome is
+  // returned so an HTML fallback is never reported as a PDF.
+  const [factsProgress, setFactsProgress] = useState(null)
   const runScanReport = async (mode) => {
-    const { generateScanReport } = await import('./scanReport.js')
-    return generateScanReport({ scanId, files: files || [], mode })
+    const [{ loadScanReportFacts, scanComparisonFromFacts }, { generateScanReport }] = await Promise.all([
+      import('./fileReportData.js'), import('./scanReport.js'),
+    ])
+    setFactsProgress({ loaded: 0, total: null, complete: false })
+    try {
+      const got = await loadScanReportFacts(scanId, { getScanReportFacts, onProgress: setFactsProgress })
+      const cmp = scanComparisonFromFacts(got.facts, targetLevel)
+      return await generateScanReport({
+        scanId, files: files || [], mode,
+        facts: got.facts, factsDigest: got.facts?.factsDigest ?? null,
+        factsIndexComplete: got.complete, factsIncompleteReason: got.incompleteReason || got.factsError || null,
+        previous: cmp.previous, previousReason: cmp.previousReason, scope: cmp.scope,
+      })
+    } finally { setFactsProgress(null) }
   }
   useEffect(() => {
     if (!scanId) { setRows(null); return }
@@ -320,6 +336,7 @@ export function RuleBreakdown({ scanId, files }) {
           </button>
           <span style={{ marginLeft: 8, fontSize: 11 }}>
             <ReportModeMenu label="Export scan report" disabled={!scanId}
+                            progress={factsProgress && `Reading report evidence\u2026 ${factsProgress.loaded}${factsProgress.total != null ? ` of ${factsProgress.total}` : ''} document(s)`}
                             formats={[{ key: 'pdf', label: 'PDF', run: runScanReport }]} />
           </span></span>
       </div>

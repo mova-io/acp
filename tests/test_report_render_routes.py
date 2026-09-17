@@ -38,8 +38,23 @@ def _model(**over):
 
 
 def _body(**over):
-    body = {"kind": "file", "file": "report.docx", "mode": "summary", "model": _model()}
+    body = {"kind": "file", "file": "report.docx", "mode": "summary", "model": _model(),
+            "factsDigest": None}
     body.update(over)
+    return body
+
+
+def digest(store, sid="scan-1", file="report.docx", owner=OWNER):
+    """The digest a client that has just READ the facts would send — computed by stream D's own
+    helper, not restated here, so this test cannot drift into agreeing with a stale copy."""
+    import report_facts
+    return report_facts.current_digest(store, sid, file, owner=owner)
+
+
+def fresh(store, **over):
+    """A body whose factsDigest describes the store as it is right now."""
+    body = _body(**over)
+    body["factsDigest"] = digest(store, file=body["file"])
     return body
 
 
@@ -67,13 +82,22 @@ def client(monkeypatch, isolated_store):
         "file": "elsewhere.docx", "engine": "docx", "status": "done", "score": 80, "compliant": False,
         "skipped_rules": 0, "issues": []}, "2026-09-17T10:00:00Z")
     isolated_store.record_remediation("scan-1", "report.docx", corrected_sha256=CORRECTED)
-    return TestClient(app)
+    made = TestClient(app)
+    made.acp_store = isolated_store          # the tests need it to compute a real facts digest
+    return made
 
 
 def post(client, sid="scan-1", body=None, user=OWNER, **kw):
     headers = {"Authorization": f"Bearer {user}"} if user else {}
     headers.update(kw.pop("headers", {}))
-    data = body if isinstance(body, (bytes, str)) else json.dumps(body if body is not None else _body())
+    if body is None:
+        body = fresh(client.acp_store)
+    elif isinstance(body, dict) and body.get("factsDigest", "keep") is None:
+        # None is _body()'s "fill this in for me"; an ABSENT key is a test about absence.
+        # kinds 'scan' and 'remediation' bind to the SCAN-level digest (file=None), per contract v2.
+        target = body.get("file") if body.get("kind") == "file" else None
+        body = {**body, "factsDigest": digest(client.acp_store, sid, target) or "0" * 64}
+    data = body if isinstance(body, (bytes, str)) else json.dumps(body)
     return client.post(f"/scans/{sid}/report-render", content=data,
                        headers={"Content-Type": "application/json", **headers}, **kw)
 
@@ -148,3 +172,75 @@ def test_oversize_body_is_refused_before_it_is_parsed(client, monkeypatch):
     monkeypatch.setattr(report_render, "MAX_BODY_BYTES", 2048)
     r = post(client, body=_body(model=_model(blocks=[{"k": "text", "text": "x" * 4000}])))
     assert r.status_code == 413
+
+
+# ── the model must be bound to the facts it was built from ───────────────────────────────────
+#
+# The route overwrites identity from the store. Without this binding, a client holding a model
+# built before the document changed gets that old evidence printed under the CURRENT checksums —
+# a report that is wrong in the one way a reader cannot detect. So: no digest, no render; wrong
+# digest, no render.
+
+def test_a_request_without_a_facts_digest_is_422(client):
+    body = _body()
+    body.pop("factsDigest")
+    r = post(client, body=body)
+    assert r.status_code == 422
+    assert "factsDigest" in r.text
+
+
+def test_a_stale_facts_digest_is_409_with_the_contract_wording(client):
+    r = post(client, body=_body(factsDigest="e" * 64))
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"] == "report data is out of date; regenerate the report"
+
+
+def test_the_digest_of_a_DIFFERENT_file_does_not_pass(client):
+    """A digest is a claim about one artifact. Any valid-looking digest passing would make the
+    check decorative."""
+    other = digest(client.acp_store, "scan-2", "elsewhere.docx")
+    assert other and other != digest(client.acp_store)
+    assert post(client, body=_body(factsDigest=other)).status_code == 409
+
+
+def test_a_digest_read_before_the_document_changed_stops_being_accepted(client):
+    """The bite check: the SAME body renders now and is refused after the file is re-saved. If it
+    still rendered, this whole section would be ceremony."""
+    body = fresh(client.acp_store)
+    assert post(client, body=body).status_code == 200, "the fresh digest must be accepted first"
+    client.acp_store.record_remediation("scan-1", "report.docx", corrected_sha256="d" * 64)
+    r = post(client, body=body)
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"] == "report data is out of date; regenerate the report"
+    # …and re-reading the facts makes the very same model renderable again.
+    assert post(client, body={**body, "factsDigest": digest(client.acp_store)}).status_code == 200
+
+
+def test_a_scan_report_binds_to_the_scan_level_digest(client):
+    scan_digest = digest(client.acp_store, file=None)
+    file_digest = digest(client.acp_store)
+    assert scan_digest and scan_digest != file_digest
+    assert post(client, body=_body(kind="scan", file=None, mode="summary",
+                                   factsDigest=scan_digest)).status_code == 200
+    assert post(client, body=_body(kind="scan", file=None, mode="summary",
+                                   factsDigest=file_digest)).status_code == 409
+
+
+def test_ownership_is_still_decided_before_the_digest(client):
+    """A 409 on a scan you do not own would say the scan exists. It answers 404 like everything
+    else on this route."""
+    assert post(client, sid="scan-other", body=_body(factsDigest="e" * 64)).status_code == 404
+
+
+def test_an_unavailable_facts_module_refuses_rather_than_skipping_the_check(client, monkeypatch):
+    """A check that silently passes when its dependency is missing is worse than no check: it
+    reports success for the exact case it exists to catch."""
+    import routes.report_render as route
+
+    def boom(*a, **k):
+        raise ImportError("no module named report_facts")
+
+    monkeypatch.setattr(route, "current_facts_digest", boom)
+    r = post(client)
+    assert r.status_code == 503
+    assert "current document" in r.text

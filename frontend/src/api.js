@@ -24,6 +24,13 @@ export const clearAllTokens = () => {
   googleToken = null; msToken = null; driveToken = null; spToken = null
   noteAuthChange(had, null)
 }
+// Re-exported deliberately. `SIM` is defined in sim.js and most modules import it from there, but
+// the transport wrappers below are the reason a caller cares about it at all — "is there a server
+// to talk to?" — so a module that imports one of them reaches for `SIM` here. Without this line
+// `import { SIM } from './api.js'` type-checks in vitest (a module mock supplies it) and FAILS THE
+// PRODUCTION BUILD with `[MISSING_EXPORT] "SIM" is not exported by "src/api.js"`, which is a green
+// suite and no bundle. changeReview.js shipped exactly that shape on this branch.
+export { SIM }
 export const getToken = () => googleToken || msToken || null
 // The Authorization bearer is Google's token when present, else the Microsoft one — tagged with
 // X-Auth-Provider so the backend verifies it against the right issuer (Graph, not Google's
@@ -645,6 +652,46 @@ export const getFileRemediationDiffs = (scanId, file, { strict = false } = {}) =
   return fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/files/${encodeURIComponent(file)}/remediation-diffs`,
                { headers: headers() }).then(j).catch(error => { if (strict) throw error; return [] })
 }
+// ── Server-computed report FACTS (api/report_facts.py) ──────────────────────────────────────
+// The report is built from these, not from the client's own rollups: the server owns identity,
+// the finding list, the saved-change list (verified AND applied-but-unverified), the recorded
+// reviewer decisions, and the accounting rules that say when a number may be stated at all.
+// `factsDigest` binds a rendered report to the evidence it was built from — POST /report-render
+// answers 409 when they no longer agree.
+//
+// These THROW on failure (via j), deliberately: a report built from silently-missing facts is
+// exactly the failure this endpoint exists to stop. Callers state the gap instead of filling it.
+// SIM resolves null — demo mode has no server, and a fabricated digest would be a lie the
+// renderer could not detect.
+export const getFileReportFacts = (scanId, file) => (SIM || !scanId || !file
+  ? sim(null)
+  : fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/files/${encodeURIComponent(file)}/report-facts`,
+          { headers: headers(), cache: 'no-store' }).then(j))
+// Scan-level facts. Paginated over the per-file index (`offset`/`limit`/`complete`); the
+// top-level totals, `factsDigest`, `previous` and `previousReason` are the same on every page.
+export const getScanReportFacts = (scanId, { offset = 0, limit = 200 } = {}) => (SIM || !scanId
+  ? sim(null)
+  : fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/report-facts?offset=${encodeURIComponent(offset)}&limit=${encodeURIComponent(limit)}`,
+          { headers: headers(), cache: 'no-store' }).then(j))
+// EXACT-BYTES page render: the server rasterises only bytes whose sha256 equals `sha256`, and
+// answers 404 when it does not hold them. That is what makes a preview's provenance knowable —
+// /files/{file}/page/{page} prefers the original but may fall back to the remediated blob, so
+// nothing fetched from it can honestly be captioned "before" or "after".
+// Resolves `{ blob, sha256 }` — sha256 being the digest the SERVER says it rendered, read from the
+// `X-ACP-Artifact-Sha256` response header — or null (never rejects: a missing preview is said out
+// loud, not thrown). The header is what lets a caption naming a digest be checked against the
+// bytes actually shown rather than against the digest we happened to ask for.
+//
+// NOTE: on a cross-origin API host the header is only readable if the server sends
+// `Access-Control-Expose-Headers: X-ACP-Artifact-Sha256`. When it is not readable, `sha256` is
+// null and the preview is labelled as unconfirmed rather than silently trusted.
+export const getFileArtifactPage = (scanId, file, sha256, page = 1) => (SIM || !scanId || !file || !sha256
+  ? sim(null)
+  : fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/files/${encodeURIComponent(file)}/artifact/${encodeURIComponent(sha256)}/page/${encodeURIComponent(page)}`,
+          { headers: headers() })
+      .then(async (r) => (r.ok ? { blob: await r.blob(), sha256: r.headers?.get?.('X-ACP-Artifact-Sha256') || null } : null))
+      .catch(() => null))
+
 // Raw Response (blob body) for the accessible server renderer; null in SIM (no server).
 export const postReportRender = (scanId, body) => (SIM ? Promise.resolve(null)
   : fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/report-render`, { method: 'POST', headers: headers({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) }))

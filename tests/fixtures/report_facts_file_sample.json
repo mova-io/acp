@@ -1,0 +1,183 @@
+{
+  "factsVersion": 1,
+  "factsDigest": "4a655b459c0af4c87b7a315ff2a2506e20e0550fd8f3368d0ab110e1a2654c44",
+  "generatedAt": "2026-09-17T20:12:31.155232+00:00",
+  "kind": "file",
+  "identity": {
+    "scanId": "scan-2026-09-17-a",
+    "file": "Policies/2026/Employee handbook.docx",
+    "sourceChecksum": "b1946ac92492d2347c6235b4d2611184",
+    "sourceChecksumKind": "md5",
+    "sourceSha256": null,
+    "correctedSha256": "7d2b000000000000000000000000000000000000000000000000000000000000",
+    "currentArtifact": {
+      "kind": "corrected",
+      "sha256": "7d2b000000000000000000000000000000000000000000000000000000000000"
+    },
+    "remediatedAt": "2026-09-17T20:12:30.494222+00:00",
+    "platformVersion": null,
+    "targetLevel": "AA",
+    "targetLevelSource": "workspace_config",
+    "scopeDigest": "1735fda4cda5ec871de7ec8ff1bc8571ee802686a203a65bb427c3e453b17244",
+    "scanScope": null,
+    "rubricHash": "rubric-9f21"
+  },
+  "assessment": {
+    "state": "assessed",
+    "stateReason": "the document was assessed and every in-scope rule was evaluated",
+    "rawStatus": "uncertain",
+    "assessedAt": "2026-09-17T09:06:00+00:00",
+    "assessedAtSource": "scan",
+    "score": 72,
+    "engine": ".net/office",
+    "artifactAssessed": "unknown",
+    "findingsComplete": true,
+    "findingsTotal": 3
+  },
+  "findings": [
+    {
+      "id": "a2a19db0cfeef640028de0ab004e05d8",
+      "ledgerFindingId": null,
+      "instanceKey": "docx:image:1",
+      "ruleId": "DOCX-ALT-001",
+      "sc": "1.1.1",
+      "detail": "Image has no alternative text (photo of the main entrance)",
+      "severity": "SERIOUS",
+      "recommendedAction": null,
+      "recommendedActionSource": null,
+      "location": {
+        "label": "docx:image:1",
+        "page": 1,
+        "slide": null,
+        "sheet": null,
+        "cell": null,
+        "element": "docx:image:1"
+      },
+      "comparable": true,
+      "state": "open",
+      "stateReason": "recorded by the current assessment and not resolved by any per-finding record"
+    },
+    {
+      "id": "243e7a4ea4baa8097f3bbb86d939dd49",
+      "ledgerFindingId": null,
+      "instanceKey": "docx:image:2",
+      "ruleId": "DOCX-ALT-001",
+      "sc": "1.1.1",
+      "detail": "Image has no alternative text (org chart)",
+      "severity": "SERIOUS",
+      "recommendedAction": null,
+      "recommendedActionSource": null,
+      "location": {
+        "label": "docx:image:2",
+        "page": 4,
+        "slide": null,
+        "sheet": null,
+        "cell": null,
+        "element": "docx:image:2"
+      },
+      "comparable": true,
+      "state": "open",
+      "stateReason": "recorded by the current assessment and not resolved by any per-finding record"
+    },
+    {
+      "id": "a5b004499d067300af904816f7936f0b",
+      "ledgerFindingId": null,
+      "instanceKey": "aggregate-instance:scan-2026-09-17-a:000000000001",
+      "ruleId": "DOCX-TITLE-001",
+      "sc": "2.4.2",
+      "detail": "Document title is not set",
+      "severity": "SERIOUS",
+      "recommendedAction": null,
+      "recommendedActionSource": null,
+      "location": null,
+      "comparable": false,
+      "state": "open",
+      "stateReason": "recorded by the current assessment and not resolved by any per-finding record"
+    }
+  ],
+  "savedChanges": [
+    {
+      "id": "Policies/2026/Employee handbook.docx::1.1.1::0",
+      "ruleId": "1.1.1",
+      "sc": "1.1.1",
+      "seq": 0,
+      "locator": null,
+      "before": "",
+      "after": "The main entrance of the Riverside campus",
+      "note": "AI drafted; verified on re-scan",
+      "verification": "verified",
+      "verificationDetail": "A re-check of the saved copy confirmed this change cleared the finding it was made for.",
+      "artifactSha256": "7d2b000000000000000000000000000000000000000000000000000000000000",
+      "valueClipped": false,
+      "changeDigest": "58dbb8246347c307358abfd714b72fe344a3b50e6d6beede36d338d8e4a484cc",
+      "findingIds": null,
+      "source": "remediation_diff"
+    },
+    {
+      "id": "Policies/2026/Employee handbook.docx::2.4.2::ufcea574f2f0a218a",
+      "ruleId": "2.4.2",
+      "sc": "2.4.2",
+      "seq": null,
+      "locator": "docx:core:title",
+      "before": "",
+      "after": "Employee handbook 2026",
+      "note": "AI set the document title",
+      "verification": "not_verified",
+      "verificationDetail": "AI applied this change and saved it; no re-check has confirmed it. A human has to look at this one.",
+      "artifactSha256": "7d2b000000000000000000000000000000000000000000000000000000000000",
+      "valueClipped": false,
+      "changeDigest": "03f8aca65ed924d67906bd1d64af8f92d0db5cba42b1c0dbe062bf0609cdf5e3",
+      "findingIds": null,
+      "source": "unverified_apply"
+    }
+  ],
+  "savedChangesComplete": true,
+  "savedChangesTotal": 2,
+  "savedChangesLimit": 500,
+  "savedChangesUnverifiedSource": "ok",
+  "reviews": {
+    "Policies/2026/Employee handbook.docx::1.1.1::0": {
+      "artifact_sha256": "7d2b000000000000000000000000000000000000000000000000000000000000",
+      "at": "2026-09-17T11:30:00+00:00",
+      "change_digest": "58dbb8246347c307358abfd714b72fe344a3b50e6d6beede36d338d8e4a484cc",
+      "change_id": "Policies/2026/Employee handbook.docx::1.1.1::0",
+      "edited_value": "The north entrance of the Riverside campus",
+      "note": "Say which entrance.",
+      "reviewer": "owner@hosp.org",
+      "rule_id": "1.1.1",
+      "seq": 0,
+      "verdict": "edited",
+      "verification": "verified",
+      "current_change_digest": "58dbb8246347c307358abfd714b72fe344a3b50e6d6beede36d338d8e4a484cc",
+      "verdictLabel": "correction requested",
+      "stale": false,
+      "staleReason": "bound to the current copy and the current change"
+    }
+  },
+  "accounting": {
+    "findingsTotal": 3,
+    "findingsOpen": null,
+    "findingsResolvedVerified": null,
+    "resolutionLedger": "none",
+    "accountingReason": "saved changes exist for criteria that still have findings, but no per-finding ledger records which finding each change resolved",
+    "savedChangesVerified": 1,
+    "savedChangesUnverified": 1,
+    "humanReviews": {
+      "pending": 1,
+      "accepted": 0,
+      "correctionRequested": 1,
+      "rejected": 0,
+      "unable": 0,
+      "stale": 0
+    }
+  },
+  "previous": null,
+  "previousReason": "no earlier assessment of this same document under the same rubric and scope is recorded",
+  "limits": {
+    "valueMaxChars": 2000,
+    "noteMaxChars": 500,
+    "savedChangesLimit": 500,
+    "findingsLimit": 1000,
+    "valueClippedIsUnrecoverable": true
+  }
+}

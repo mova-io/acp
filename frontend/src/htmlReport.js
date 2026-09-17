@@ -17,7 +17,7 @@
 import { buildFileReportModel, INK, MUTED, GREEN, AMBER, RED, PLUM, BLUE, CW } from './reportModel.js'
 import {
   isSafeHref, isSafeImageSrc, clampText, stableHash, locationLabel, technicalText, humanText,
-  RESPONSE_OPTIONS, RESPONSE_NOTICE, LOCATION_NOT_RECORDED,
+  verificationText, clippedNote, RESPONSE_OPTIONS, RESPONSE_NOTICE, LOCATION_NOT_RECORDED,
 } from './reportEvidence.js'
 
 const esc = (s) => String(s ?? '')
@@ -171,7 +171,12 @@ function changeCard(b, hl, ctx) {
   const human = b.human || {}
   const humanLine = [humanText(human.status), human.reviewer ? `by ${human.reviewer}` : null, human.at ? `at ${human.at}` : null].filter(Boolean).join(' ')
   const staleLine = human.status === 'stale'
-    ? `<p class="c-warn">This decision was recorded against file version ${esc(val(human.boundSha256))}; the current version is ${esc(val(human.currentSha256))}. It must be made again.</p>` : ''
+    ? `<p class="c-warn">This decision was recorded against file version ${esc(val(human.boundSha256))}; the current version is ${esc(val(human.currentSha256))}. It must be made again.</p>`
+    : human.status === 'freshness_unknown'
+      ? `<p class="c-warn">This acceptance cannot be tied to a file version: it was bound to ${esc(val(human.boundSha256))} and the current version is ${esc(val(human.currentSha256))}. Unknown freshness is not a confirmation — recheck it.</p>`
+      : human.status === 'correction_requested'
+        ? `<p class="c-warn">The reviewer asked for a different value. It was recorded as a PROPOSAL and has <strong>not</strong> been applied to the document${human.editedValue ? `: “${esc(human.editedValue)}”` : ''}. This is outstanding work, not a confirmation.</p>`
+        : ''
   const img = b.image && isSafeImageSrc(b.image.src)
     ? `<figure class="preview"><img src="${esc(b.image.src.replace(/\s+/g, ''))}" alt="${esc(b.image.alt || 'Preview of the changed content')}"><figcaption>${esc(b.image.caption || '')}</figcaption></figure>`
     : `<p class="c-muted">Visual preview not available.</p>`
@@ -182,13 +187,13 @@ function changeCard(b, hl, ctx) {
 <div><dt>Record</dt><dd><code>${esc(b.id)}</code></dd></div>
 <div><dt>Location</dt><dd>${locationHtml(b.location)}</dd></div>
 <div><dt>Reason</dt><dd>${esc(b.reason || 'Reason not recorded')}</dd></div>
-<div><dt>Technical verification</dt><dd>${esc(technicalText(b.technical?.status))}${b.technical?.detail ? ` — ${esc(b.technical.detail)}` : ''}</dd></div>
+<div><dt>Technical verification</dt><dd>${esc(b.verification ? verificationText(b.verification) : technicalText(b.technical?.status))}${b.verificationDetail || b.technical?.detail ? ` — ${esc(b.verificationDetail || b.technical.detail)}` : ''}</dd></div>
 <div><dt>Human confirmation</dt><dd>${esc(humanLine)}${human.loaded === false ? ' (decisions not loaded)' : ''}${human.note ? ` — “${esc(human.note)}”` : ''}</dd></div>
 </dl>
 ${staleLine}
 ${band('Before', b.before, b.beforeTruncated, b.fullRef, fullAnchor)}
 ${band('After', b.after, b.afterTruncated, b.fullRef, fullAnchor)}
-${b.beforeStoredClipped || b.afterStoredClipped ? '<p class="clip">A value reached the storage limit when it was recorded and may be incomplete; the corrected copy is the source of truth.</p>' : ''}
+${b.valueClipped || b.beforeStoredClipped || b.afterStoredClipped ? `<p class="clip">${esc(clippedNote(b.valueMaxChars))}</p>` : ''}
 ${img}
 <div class="respond"><p class="lead">Response</p><ul class="options">${opts}</ul><p>Notes: ______________________________</p><p class="fine c-muted">${esc(b.responseNotice || RESPONSE_NOTICE)}</p></div>
 </article>`
@@ -211,6 +216,7 @@ function findingCard(b, hl) {
 <div><dt>Record</dt><dd><code>${esc(b.id)}</code></dd></div>
 </dl>
 <p>${esc(b.description)}</p>
+${b.recommendedAction ? `<p><strong>Recommended action (from the assessment):</strong> ${esc(b.recommendedAction)}</p>` : ''}
 <p><strong>Who is affected:</strong> ${esc(b.impact)}</p>
 ${steps ? `<p class="lead">Steps</p><ol class="steps">${steps}</ol>` : ''}
 <p><strong>Done when:</strong> ${esc(b.recheck)}</p>

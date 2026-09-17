@@ -55,7 +55,7 @@ describe('ChangeReviewPanel', () => {
     expect(card.textContent).toContain('A red barn')
     expect(card.textContent).toContain('Vision draft')
     expect(card.textContent).toContain('Location not recorded')
-    expect(card.textContent).toContain('Preview not available')
+    expect(card.textContent).toContain('Visual preview not available')
     expect(card.textContent).toMatch(/Verified — the re-scan/)
     expect(card.textContent).toContain('No decision recorded.')
     expect(card.textContent).not.toMatch(/Accepted/)
@@ -113,18 +113,23 @@ describe('ChangeReviewPanel', () => {
 
   it('flags a decision whose change content moved on, even on the same artifact', async () => {
     api.fetchChangeReviews = vi.fn(async () => ({
-      artifact: { currentSha256: SHA },
+      // A decision binds to the SAVED COPY's sha-256, so that is the identity the panel compares.
+      artifact: { currentSha256: SHA, correctedSha256: SHA },
       reviews: { [CID]: { verdict: 'accepted', reviewer: 'r', at: '2026-09-01T00:00:00Z', artifact_sha256: SHA, change_digest: 'c'.repeat(64) } },
     }))
     const c = await mount()
     expect(c.querySelector('.chgstale')).toBeTruthy()
   })
 
-  it('refuses to record when the document has no recorded identity', async () => {
-    api.fetchChangeReviews = vi.fn(async () => ({ artifact: { currentSha256: null }, reviews: {} }))
+  it("refuses to record when the SAVED COPY's identity is not recorded", async () => {
+    // Not currentSha256: that falls back to the ORIGINAL's checksum, and binding a decision about
+    // a saved change to the original's bytes records "this edit is correct" against a document
+    // that does not contain the edit. The route refuses it (409) and so does the panel.
+    api.fetchChangeReviews = vi.fn(async () => ({ artifact: { currentSha256: SHA, correctedSha256: null }, reviews: {} }))
     const c = await mount()
     expect(button(c, 'Accept')).toBeUndefined()
-    expect(c.textContent).toMatch(/Cannot record a decision: ACP has no recorded identity/)
+    expect(c.textContent).toMatch(/the saved copy’s identity is not recorded/i)
+    expect(c.textContent).toMatch(/before these changes can be signed off/)
   })
 
   it('refuses to record a change with no stable id', async () => {

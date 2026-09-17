@@ -68,6 +68,7 @@ BLOCK_KINDS = frozenset({
 })
 
 NOT_RECORDED = "Not recorded"
+STALE_FACTS_DETAIL = "report data is out of date; regenerate the report"
 LOCATION_NOT_RECORDED = "Location not recorded"
 PREVIEW_UNAVAILABLE = "Visual preview not available"
 REASON_NOT_RECORDED = "Reason not recorded"
@@ -170,12 +171,30 @@ def block_kind(block) -> str | None:
     return kind if isinstance(kind, str) else None
 
 
+_DIGEST = re.compile(r"[0-9a-fA-F]{64}")
+
+FACTS_DIGEST_REQUIRED = (
+    "factsDigest is required: fetch the server's report facts, build the model from them and "
+    "render in one pass")
+
+
 def validate_request(body) -> dict:
-    """Validate a POST /report-render body. Returns {kind, file, mode, model} with images
-    re-encoded. Raises ReportInputError (413/422)."""
+    """Validate a POST /report-render body. Returns {kind, file, mode, factsDigest, model} with
+    images re-encoded. Raises ReportInputError (413/422).
+
+    `factsDigest` is MANDATORY. The server stamps its own identity onto whatever model it is
+    handed, so without a binding token a client holding a model built before the file changed
+    would get last week's evidence printed under this week's checksums — which reads as current.
+    The digest is the client saying which facts it read; the route compares it (409 on a
+    mismatch) before anything is rendered.
+    """
     if not isinstance(body, dict):
         raise ReportInputError(422, "request body must be a JSON object")
     kind, mode, file = body.get("kind"), body.get("mode"), body.get("file")
+    digest = body.get("factsDigest")
+    if not isinstance(digest, str) or not _DIGEST.fullmatch(digest.strip()):
+        raise ReportInputError(422, FACTS_DIGEST_REQUIRED)
+    digest = digest.strip().lower()
     if kind not in KINDS:
         raise ReportInputError(422, "kind must be one of: file, scan, remediation")
     if mode not in MODES:
@@ -216,7 +235,7 @@ def validate_request(body) -> dict:
     cover = model.get("cover")
     if cover is not None and not isinstance(cover, dict):
         raise ReportInputError(422, "model.cover must be an object")
-    return {"kind": kind, "mode": mode, "file": file,
+    return {"kind": kind, "mode": mode, "file": file, "factsDigest": digest,
             "model": {**model, "blocks": clean_blocks}}
 
 
@@ -383,7 +402,10 @@ a { color: #4B3460; }
 .meta { list-style: none; padding: 0; margin: 2pt 0 0; font-size: 8.4pt; color: #5F5A66; }
 .meta li { margin: 0; }
 table { width: 100%%; border-collapse: collapse; table-layout: fixed; margin: 4pt 0 9pt; font-size: 8.4pt; }
-caption { text-align: left; font-weight: 700; color: #4B3460; padding-bottom: 3pt; }
+/* A caption that lands at the foot of a page with its table on the next one is not only ugly:
+   WeasyPrint's tagger then meets a table wrapper box holding no table and raises
+   "Table wrapper without a table", which fails the whole render. Keep them together. */
+caption { text-align: left; font-weight: 700; color: #4B3460; padding-bottom: 3pt; break-after: avoid; }
 thead { display: table-header-group; }
 tr { break-inside: avoid; }
 th, td { text-align: left; vertical-align: top; padding: 3.2pt 5pt; border-bottom: 0.6pt solid #E4E0E8; }
@@ -445,19 +467,161 @@ figcaption { font-size: 7.8pt; color: #5F5A66; margin-top: 2pt; }
 .appendix-start { break-before: page; }
 .gap { height: 6pt; }
 .about { margin-top: 14pt; }
+.unverified { border-left-color: #854F0B; }
+.flag { font-weight: 700; color: #854F0B; }
+.pointer { font-size: 8.2pt; color: #5F5A66; margin-top: 6pt; }
 """
+
+# Summary mode is ONE page: a decision, its evidence counts and what to do next. It is not a
+# smaller full report. Nothing here reduces the body font — an unreadable page is not a shorter
+# one — so the space comes from what is printed, not from how small it is printed: tighter
+# margins and leading, identity paired two fields to a row, and the sections that belong to the
+# reviewer packet left out (see _summary_blocks).
+_SUMMARY_CSS = """
+@page { margin: 15mm 14mm 15mm 14mm; }
+body { line-height: 1.34; }
+h1 { font-size: 16pt; }
+h2 { font-size: 11.5pt; margin: 9pt 0 3pt; }
+h3 { font-size: 10pt; margin: 7pt 0 3pt; }
+p { margin: 0 0 3.5pt; }
+.cover { padding-bottom: 5pt; margin-bottom: 5pt; }
+.cover-logo { width: 28mm; }
+table { margin: 3pt 0 5pt; }
+th, td { padding: 2.2pt 5pt; }
+caption { padding-bottom: 2pt; }
+.callout { padding: 5pt 8pt; margin: 3pt 0 5pt; }
+.stages { margin: 3pt 0 5pt; }
+.stages li { font-size: 7.8pt; }
+.decision td.num { font-size: 11pt; }
+ul, ol { margin-bottom: 4pt; }
+li { margin-bottom: 1pt; }
+/* `table-layout: fixed` means the columns come from the colgroup, never from the content, so a
+   label must be allowed to wrap: with nowrap it printed "Source checksum" on top of the hash. */
+.identity th, .identity td { overflow-wrap: anywhere; word-break: break-word; }
+.identity tr { break-inside: avoid; }
+.identity th, .identity td { padding-top: 1.8pt; padding-bottom: 1.8pt; }
+"""
+
+
+# ── Summary mode: one decision page ───────────────────────────────────────────────────────────
+
+# What a one-page decision summary carries. Everything else is evidence or method, and belongs to
+# the Reviewer packet / Full evidence report, which carry every record.
+SUMMARY_KINDS = frozenset({"heading", "docTitle", "callout", "decisionSummary", "stageStrip",
+                           "bullets", "comparison", "text", "link", "gap", "pageBreak"})
+# Evidence the summary leaves out is named, never silently dropped.
+SUMMARY_DROPPED_LABEL = {
+    "changeCard": "changes to confirm", "findingCard": "remaining-work items",
+    "beforeAfter": "before/after records", "appendixTable": "evidence appendix tables",
+    "table": "detail tables", "image": "document previews", "donut": "charts",
+    "barChart": "charts", "metricGrid": "metric tiles", "checklist": "checklists",
+}
+# Sections this renderer removes in summary mode even when the model still contains them, so a
+# client that has not been updated cannot turn the decision page back into a two-page document.
+_SUMMARY_DROP_SECTIONS = frozenset({
+    "what this report is and is not", "what this report is and isnt", "about this pdf",
+    "about this report", "methodology", "method", "how this report was produced",
+    "how to read this report", "definitions", "glossary", "disclaimer", "disclaimers",
+    "criteria detail", "criterion detail", "criteria in detail", "evidence appendix",
+    "changes to confirm", "remaining work", "remaining actions", "appendix",
+})
+SUMMARY_POINTER = ("The Reviewer packet and the Full evidence report carry the full record: "
+                   "every change to confirm, every remaining item, and the method.")
+
+
+def _norm_heading(text) -> str:
+    return re.sub(r"[^a-z0-9 ]+", "", str(_s(text) or "").lower()).strip()
+
+
+def summary_blocks(blocks: list, trim: int = 0) -> tuple[list, list[str]]:
+    """The blocks a one-page summary prints, and the names of the evidence it left out.
+
+    `trim` raises the pressure when the page still overflows: 1 drops the stage strip, 2 also
+    drops list detail. Nothing here shrinks type; the body font is the same in every mode.
+    """
+    kinds = set(SUMMARY_KINDS)
+    if trim >= 1:
+        kinds.discard("stageStrip")
+    if trim >= 2:
+        kinds.discard("bullets")
+    if trim >= 3:
+        kinds.discard("comparison")
+    kept: list = []
+    plain_text_out = trim >= 2
+    dropped: list[str] = []
+    skipping = False
+    for block in blocks:
+        kind = block_kind(block)
+        if kind in ("heading", "docTitle"):
+            level = block.get("level", 1) if kind == "heading" else 1
+            if not isinstance(level, int) or level < 1:
+                level = 1
+            if level <= 1:
+                skipping = _norm_heading(block.get("text")) in _SUMMARY_DROP_SECTIONS
+            elif skipping:
+                continue
+            if not skipping:
+                kept.append(block)
+            continue
+        if skipping:
+            continue
+        if _Renderer._is_identity_block(block):
+            kept.append(block)
+            continue
+        if kind not in kinds:
+            label = SUMMARY_DROPPED_LABEL.get(kind)
+            if label and label not in dropped:
+                dropped.append(label)
+            continue
+        # Last resort before a second page: secondary notes go, the emphasised line stays. The
+        # model marks the "next step" sentence bold, and that sentence is the point of the page.
+        if plain_text_out and kind == "text" and not (block.get("o") or {}).get("bold"):
+            continue
+        kept.append(block)
+    # Trailing prose is the model's own footer (generation stamp, printed-copy notice); the page
+    # footer already carries the stamp and the summary is not where the notice earns its space.
+    while kept and block_kind(kept[-1]) in ("text", "gap", "pageBreak", "link"):
+        kept.pop()
+    # A heading with nothing under it is noise. "Nothing under it" means the next block is a
+    # heading at the same or a higher level (a subheading still counts as content).
+    def _level(block) -> int | None:
+        kind = block_kind(block)
+        if kind == "docTitle":
+            return 1
+        if kind != "heading":
+            return None
+        level = block.get("level", 1)
+        return level if isinstance(level, int) and level >= 1 else 1
+
+    # Repeat to a fixpoint: dropping an empty subheading can leave ITS parent heading empty, and
+    # a single pass printed "What this report covers" over a blank space for exactly that reason.
+    while True:
+        out: list = []
+        for i, block in enumerate(kept):
+            mine = _level(block)
+            if mine is not None:
+                nxt = kept[i + 1] if i + 1 < len(kept) else None
+                theirs = _level(nxt) if nxt is not None else 0
+                if theirs is not None and theirs <= mine:
+                    continue
+            out.append(block)
+        if len(out) == len(kept):
+            return out, dropped
+        kept = out
 
 
 # ── Renderer ──────────────────────────────────────────────────────────────────────────────────
 
 class _Renderer:
-    def __init__(self, model: dict, identity: dict, mode: str, base_url: str | None):
+    def __init__(self, model: dict, identity: dict, mode: str, base_url: str | None, trim: int = 0):
         self.model = model
         self.identity = identity
         self.mode = mode
         self.base_url = base_url
+        self.trim = trim
         self.level = 1            # the current section's HTML heading level (h1 = cover)
         self.ids: set[str] = set()
+        self.dropped: list[str] = []
 
     # headings ---------------------------------------------------------------------------------
     def _heading_tag(self, level) -> int:
@@ -496,7 +660,11 @@ class _Renderer:
     def cover(self) -> str:
         cover = self.model.get("cover") if isinstance(self.model.get("cover"), dict) else {}
         title = _s(cover.get("title")) or _s(self.model.get("docTitle")) or "Accessibility report"
-        meta = "".join(f"<li>{_t(m)}</li>" for m in _list(cover.get("meta")) if _s(m))
+        # On a one-page summary the cover meta lines ("Summary · generated …", "WCAG 2.1 Level AA")
+        # are the identity table's Report, Generated and Target rows said a second time, two lines
+        # above them. Identity once — so the table keeps them and the cover does not.
+        meta = "" if self.mode == "summary" else "".join(
+            f"<li>{_t(m)}</li>" for m in _list(cover.get("meta")) if _s(m))
         return ('<header class="cover"><div class="cover-top"><div>'
                 f'<h1 id="report-title">{_t(title)}</h1>'
                 + (f'<p class="subtitle">{_t(cover.get("subtitle"))}</p>' if _s(cover.get("subtitle")) else "")
@@ -515,7 +683,11 @@ class _Renderer:
 
     def identity_table(self, caption: str = "Report identity") -> str:
         """Identity from the SERVER. A model's own identity table is replaced by this one, so a PDF
-        never shows a client-side value beside a contradicting server value."""
+        never shows a client-side value beside a contradicting server value.
+
+        Rendered ONCE per report: the cover prints it only when the model carries no identity
+        block of its own (a page-one "Report identity" table above a page-two "Document identity"
+        table is the same facts twice, and cost the summary its second page)."""
         ident = self.identity
         rows = [("Report", f"{_t(MODES.get(self.mode, self.mode))} · {_t(ident.get('kindLabel'))}"),
                 ("Scan", _nr(ident.get("scanId")))]
@@ -531,12 +703,22 @@ class _Renderer:
             ("Generated", _nr(ident.get("generatedAt"))),
             ("Platform version", _nr(ident.get("platformVersion"))),
         ]
-        return (f'<table class="identity"><caption>{escape(caption)}</caption><tbody>'
+        # ONE shape in every mode: two columns, one field per row, and NO colspan anywhere.
+        #
+        # A summary-only "two pairs to a row" variant saved four rows and cost conformance: a
+        # spanning cell is not written into WeasyPrint's structure tree, so veraPDF read the wide
+        # rows as short ones and failed PDF/UA-1 clause 7.2 (tests 42 and 43) on the summaries.
+        # The space is recovered by _SUMMARY_CSS (padding and leading) instead, which costs
+        # nothing a reader can see.
+        return (f'<table class="identity"><caption>{escape(caption)}</caption>'
+                '<colgroup><col style="width:30%"><col></colgroup><tbody>'
                 + "".join(f'<tr><th scope="row">{_t(k)}</th><td>{v}</td></tr>' for k, v in rows)
                 + "</tbody></table>")
 
     def blocks(self) -> str:
         blocks = _list(self.model.get("blocks"))
+        if self.mode == "summary":
+            blocks, self.dropped = summary_blocks(blocks, self.trim)
         # The appendix is the only thing that starts on a new page. Put the break on the heading
         # that introduces it, when there is one, so the heading is never stranded.
         break_at = None
@@ -554,7 +736,22 @@ class _Renderer:
             if i == break_at and html:
                 html = f'<div class="appendix-start">{html}</div>'
             out.append(html)
+        if self.mode == "summary":
+            out.append(f'<p class="pointer">{escape(self.summary_pointer())}</p>')
         return "\n".join(out)
+
+    def summary_pointer(self) -> str:
+        """One line naming what the decision page left out. Evidence the summary does not print is
+        SAID to be elsewhere, so a reader never mistakes a short report for a complete one."""
+        if not self.dropped:
+            return SUMMARY_POINTER
+        if len(self.dropped) == 1:
+            what = self.dropped[0]
+        else:
+            what = ", ".join(self.dropped[:-1]) + " and " + self.dropped[-1]
+        return (f"This decision page leaves out the {what}. "
+                "They are in the Reviewer packet and the Full evidence report, which carry every "
+                "record.")
 
     # existing block kinds ---------------------------------------------------------------------
     def b_heading(self, b):
@@ -673,7 +870,12 @@ class _Renderer:
             cells = "".join(f"<td>{_t(c)}</td>" for c in r)
             body.append(f"<tr>{cells}</tr>")
         if not body:
-            body.append(f'<tr><td colspan="{max(1, len(headers))}">No records.</td></tr>')
+            # NOT colspan. WeasyPrint's tagger does not write /ColSpan into the structure tree, so
+            # a spanning cell reads there as a row with fewer columns than its neighbours — which
+            # is PDF/UA-1 clause 7.2 test 42/43, and veraPDF failed every report that had an empty
+            # table in it. Padding cells cost nothing and keep the grid rectangular.
+            filler = "".join("<td></td>" for _ in range(max(0, len(headers) - 1)))
+            body.append(f"<tr><td>No records.</td>{filler}</tr>")
         caption = f"<caption>{_t(b.get('caption'))}</caption>" if _s(b.get("caption")) else ""
         ident = f' id="{table_id}"' if table_id else ""
         return (f'<table class="{extra_class}"{ident}>{caption}{cols}'
@@ -785,9 +987,20 @@ class _Renderer:
 
     _TECH = {"verified": "Verified by re-scan", "pending": "Re-validation pending",
              "not_run": "Not run", "unknown": NOT_RECORDED}
-    _HUMAN = {"pending": "Awaiting confirmation", "accepted": "Accepted", "edited": "Accepted with edits",
+    # `verification` is the saved change's own record: a remediation_diff exists (the edit cleared
+    # a re-scan) or it does not. An applied-but-unverified change is the one a human must look at,
+    # so it says so in those words rather than as a quieter "pending".
+    _VERIFICATION = {"verified": "Verified by re-scan", "not_verified": "AI applied · not verified"}
+    # "Accepted with edits" was here and it was a lie: the change_review PUT records a PROPOSED
+    # value, it never writes bytes. A reviewer asking for a correction has not confirmed anything,
+    # and freshness nobody could establish is not freshness that was established.
+    _HUMAN = {"pending": "Awaiting confirmation", "accepted": "Accepted",
+              "edited": "Correction requested — not applied",
+              "correction_requested": "Correction requested — not applied",
               "rejected": "Rejected", "unable": "Unable to verify",
+              "freshness_unknown": "Freshness unknown — recheck",
               "stale": "Stale: the file changed after this decision"}
+    _HUMAN_FLAG = frozenset({"edited", "correction_requested", "freshness_unknown", "stale"})
 
     # A card that is small enough to move whole to the next page does so; a long one flows, so
     # a long before/after value never pushes a mostly-empty page ahead of it.
@@ -819,21 +1032,32 @@ class _Renderer:
         tech_status = tech.get("status") if tech.get("status") in self._TECH else "unknown"
         h_status = human.get("status") if human.get("status") in self._HUMAN else "pending"
         who = " · ".join(x for x in (_s(human.get("reviewer")), _s(human.get("at"))) if x)
+        # `verification` (the facts stream's per-change record) decides the technical line when the
+        # model carries it; `technical.status` is the older, vaguer field.
+        verification = b.get("verification") if b.get("verification") in self._VERIFICATION else None
+        unverified = verification == "not_verified"
+        tech_text = self._VERIFICATION[verification] if verification else self._TECH[tech_status]
+        if unverified:
+            tech_text = f'<span class="flag">{tech_text}</span>'
+        human_text = self._HUMAN[h_status]
+        if h_status in self._HUMAN_FLAG:
+            human_text = f'<span class="flag">{human_text}</span>'
         facts = []
         if criterion and criterion not in title:
             facts.append(("Criterion", escape(criterion)))
         facts += [
             ("Location", self._location_html(b.get("location"))),
-            ("Technical check", self._TECH[tech_status]),
-            ("Human confirmation", self._HUMAN[h_status] + (f" ({escape(who)})" if who else "")
+            ("Technical check", tech_text),
+            ("Human confirmation", human_text + (f" ({escape(who)})" if who else "")
              + (" (decisions not loaded)" if human.get("loaded") is False else "")),
         ]
         where = _location_text(b.get("location"))
         # Several changes often share a criterion; the location is what tells their bookmarks apart.
         heading_where = f' <span class="where">· {escape(where)}</span>' if where != LOCATION_NOT_RECORDED else ""
         text = [self._facts(facts)]
-        if _s(tech.get("detail")):
-            text.append(f'<p class="muted">{_t(tech.get("detail"))}</p>')
+        detail = _s(b.get("verificationDetail")) or _s(tech.get("detail"))
+        if detail:
+            text.append(f'<p class="muted">{_t(detail)}</p>')
         full_ref = _s(b.get("fullRef"))
         before_html = escape(before) if before is not None else NOT_RECORDED
         after_html = escape(after) if after is not None else NOT_RECORDED
@@ -850,14 +1074,29 @@ class _Renderer:
                 f"Full evidence report, record {full_ref}" if full_ref else "Full evidence report")
             text.append(f'<p class="muted">The {" and ".join(shortened)} text is shortened in this packet. '
                         f"The full text is in the {escape(ref)}.</p>")
+        # A value the STORE clipped when it recorded the change is not in any report: pointing a
+        # reader at the Full evidence report for it would send them somewhere it has never been.
+        clipped = [name for name, flag in (("before", b.get("beforeStoredClipped")),
+                                           ("after", b.get("afterStoredClipped"))) if flag]
+        if b.get("valueClipped") and not clipped:
+            clipped = ["before and after"]
+        if clipped:
+            text.append(f'<p class="muted">The {" and ".join(clipped)} text was clipped by the store '
+                        "when the change was recorded; the untruncated value is not held anywhere. "
+                        "The corrected copy is the source of truth.</p>")
         text.append(f'<p><span class="label">Reason:</span> {escape(reason) if reason else REASON_NOT_RECORDED}</p>')
         if _s(human.get("note")):
             text.append(f'<p class="small">Reviewer note: {_t(human.get("note"))}</p>')
         if _s(human.get("editedValue")):
-            text.append(f'<p class="label">Edited value</p><div class="value">{_t(human.get("editedValue"))}</div>')
+            text.append('<p class="label">Correction the reviewer asked for — not applied</p>'
+                        f'<div class="value">{_t(human.get("editedValue"))}</div>')
         if h_status == "stale":
             text.append(f'<p class="small">Decision recorded against {_nr(human.get("boundSha256"))}; '
                         f'the current file is {_nr(human.get("currentSha256"))}.</p>')
+        elif h_status == "freshness_unknown":
+            text.append(f'<p class="small">Decision recorded against {_nr(human.get("boundSha256"))}; '
+                        "the file's current identity is not recorded, so whether this decision "
+                        "still describes the saved copy is unknown. Recheck before relying on it.</p>")
         if has_image:
             alt = _t(image.get("alt")) or "Preview of the changed content"
             caption = f"<figcaption>{_t(image.get('caption'))}</figcaption>" if _s(image.get("caption")) else ""
@@ -865,7 +1104,8 @@ class _Renderer:
             content = f'<div class="card-body">{figure}<div class="card-text">{"".join(text)}</div></div>'
         else:
             content = "".join(text) + f'<p class="no-preview">{PREVIEW_UNAVAILABLE}</p>'
-        return (f'<section class="card change{" compact" if compact else ""}" id="{anchor}">'
+        flag_class = " unverified" if (unverified or h_status in self._HUMAN_FLAG) else ""
+        return (f'<section class="card change{" compact" if compact else ""}{flag_class}" id="{anchor}">'
                 f'<h{tag}>{escape(title)}{heading_where}</h{tag}>'
                 + content
                 + self._response(b.get("responseOptions"), b.get("responseNotice"))
@@ -905,6 +1145,12 @@ class _Renderer:
             body.append('<p class="muted">Shortened in this packet. The full text is in the Full evidence report.</p>')
         if _s(b.get("impact")):
             body.append(f'<p><span class="label">Who is affected:</span> {_t(b.get("impact"))}</p>')
+        # The source's own recommended_action / remediation text, printed word for word. Generic
+        # "how to fix" steps are useful; they are not a substitute for what the analyser actually
+        # said about THIS finding, and replacing one with the other loses the specific guidance.
+        if _s(b.get("recommendedAction")):
+            body.append('<p><span class="label">Recommended action, as recorded:</span> '
+                        f'{_t(b.get("recommendedAction"))}</p>')
         if steps:
             body.append('<p class="label">How to fix</p><ol>' + "".join(f"<li>{_t(s)}</li>" for s in steps) + "</ol>")
         body.append(f'<p><span class="label">How to confirm:</span> {_t(b.get("recheck"), NOT_RECORDED)}</p>')
@@ -956,11 +1202,11 @@ def _head_strings(identity: dict, model: dict) -> tuple[str, str, str]:
 
 
 def render_html(model: dict, identity: dict | None = None, mode: str = "full",
-                base_url: str | None = None) -> str:
+                base_url: str | None = None, trim: int = 0) -> str:
     """The semantic HTML the PDF is made of. `model` must already have passed validate_request."""
     identity = dict(identity or {})
     lang = model.get("lang") if isinstance(model.get("lang"), str) and _LANG.fullmatch(model.get("lang")) else "en-US"
-    renderer = _Renderer(model, identity, mode, base_url)
+    renderer = _Renderer(model, identity, mode, base_url, trim)
     title = _s(model.get("docTitle")) or _s((model.get("cover") or {}).get("title")) or "Accessibility report"
     if identity.get("file") and identity["file"] not in title:
         title = f"{title} · {identity['file']}"
@@ -968,12 +1214,17 @@ def render_html(model: dict, identity: dict | None = None, mode: str = "full",
     css = _CSS % {"regular": FONT_REGULAR.as_uri(), "bold": FONT_BOLD.as_uri(),
                   "head_left": css_string(left), "head_right": css_string(right),
                   "foot_left": css_string(foot)}
+    if mode == "summary":
+        css += _SUMMARY_CSS
     cover = renderer.cover()
     body = renderer.blocks()
     renderer.level = 1
     about_tag = 2
-    about = (f'<section class="about"><h{about_tag}>About this PDF</h{about_tag}>'
-             f'<p class="small">{escape(STRUCTURE_STATEMENT)}</p></section>')
+    # What this PDF's structure is and is not claimed to be belongs with the evidence, not on a
+    # one-page decision summary — the same reasoning as _SUMMARY_DROP_SECTIONS.
+    about = "" if mode == "summary" else (
+        f'<section class="about"><h{about_tag}>About this PDF</h{about_tag}>'
+        f'<p class="small">{escape(STRUCTURE_STATEMENT)}</p></section>')
     return ("<!DOCTYPE html>"
             f'<html lang="{escape(lang)}"><head><meta charset="utf-8">'
             f"<title>{escape(title)}</title>"
@@ -990,12 +1241,30 @@ def _fetcher(url, *args, **kwargs):
     raise ValueError("the report renderer loads only embedded PNG images and bundled fonts")
 
 
+SUMMARY_TRIM_LEVELS = 3
+
+
 def render_pdf(model: dict, identity: dict | None = None, mode: str = "full",
                base_url: str | None = None) -> bytes:
-    """Render a validated model to a tagged PDF."""
+    """Render a validated model to a tagged PDF.
+
+    Summary mode is a ONE-PAGE decision, and that is checked rather than hoped for: the document
+    is laid out, its pages counted, and if it still runs over, the least load-bearing sections are
+    dropped and it is laid out again (see summary_blocks). The body font never changes — a second
+    page is a better outcome than a page nobody can read — so if every trim level still overflows,
+    the longer document is what ships.
+    """
     from weasyprint import HTML
-    html = render_html(model, identity, mode, base_url)
-    return HTML(string=html, url_fetcher=_fetcher).write_pdf(pdf_variant="pdf/ua-1")
+    if mode != "summary":
+        html = render_html(model, identity, mode, base_url)
+        return HTML(string=html, url_fetcher=_fetcher).write_pdf(pdf_variant="pdf/ua-1")
+    document = None
+    for trim in range(SUMMARY_TRIM_LEVELS):
+        html = render_html(model, identity, mode, base_url, trim)
+        document = HTML(string=html, url_fetcher=_fetcher).render()
+        if len(document.pages) <= 1:
+            break
+    return document.write_pdf(pdf_variant="pdf/ua-1")
 
 
 KIND_LABELS = {"file": "File report", "scan": "Scan report", "remediation": "Remediation report"}

@@ -1,29 +1,45 @@
 """Versioned reviewer decisions on individual saved changes.
 
-A reviewer can Accept / Edit / Reject / mark "Unable to verify" one before->after record
-(``remediation_diff``). A verdict is only meaningful for the exact artifact the reviewer looked
-at, so each decision is BOUND to two identities when it is saved:
+A reviewer can Accept / request a Correction / Reject / mark "Unable to verify" one saved
+before->after record. Both kinds of saved change are reviewable, and the second kind is the
+point: `remediation_diff` rows are the writes a re-check already CONFIRMED, while
+`unverified_changes.saved_changes` are writes the AI applied and nothing has re-checked. It is
+the unverified ones a human actually has to look at, so a review surface that only offered the
+verified ones was offering the work that was already done.
 
-* ``artifact_sha256`` — the file's current artifact identity: ``file_records.corrected_sha256``
-  when a corrected copy is recorded, else the source checksum. (The source checksum is whatever
-  the source system provides — Drive md5 / SharePoint quickXorHash — so it is reported as
-  ``sourceChecksum`` and only echoed as ``sourceSha256`` when it is actually a sha256.)
+A verdict is only meaningful for the exact artifact the reviewer looked at, so each decision is
+BOUND to two identities, and BOTH are now REQUIRED on every mutation:
+
+* ``expected_sha256`` — the artifact identity the client was showing. Absent, the server would
+  bind acceptance to whatever bytes exist at save time, which may be a copy nobody reviewed.
 * ``change_digest`` — sha256 of ``f"{rule_id}\\n{before}\\n{after}"`` for the change itself.
 
-When either no longer matches what the store holds now, the decision is reported ``stale`` —
-the document or the change moved on after the human looked, so the verdict needs a recheck.
-With no artifact identity recorded at all there is nothing to bind to: GET reports
-``stale: None`` and PUT refuses with 409 rather than binding a verdict to nothing.
+The identity a decision binds to is ``file_records.corrected_sha256`` when a corrected copy is
+recorded. It is NEVER the source checksum once a corrected copy exists (and the source checksum
+is usually not even a sha256 — Drive md5, SharePoint quickXorHash), because a verdict on an
+AI-written change is a verdict on the WRITTEN bytes. Where the saved copy's identity was never
+recorded there is nothing to bind to and the PUT refuses with 409 rather than binding a verdict
+to the hash of the document those bytes replaced.
+
+The write is a COMPARE-AND-SET inside one transaction (``Store.save_change_review``): the
+identity is re-read next to the write, so a concurrent artifact change loses the race with a 409
+instead of being recorded against bytes the reviewer never saw. The response then RE-READS and
+RE-EVALUATES freshness rather than asserting ``stale: false``.
+
+``stale: null`` means freshness UNKNOWN. It is not "fresh" and it is not a confirmation.
+
+Verdict ``edited`` means CORRECTION REQUESTED. This route records the proposed replacement text;
+it writes nothing into the document. It is reported that way everywhere and is never counted as
+a confirmation.
 
 Storage is the existing ``scan_decisions`` table (kind ``change_review:<changeId>``, no schema
 change). Those kinds are excluded from ``Store.get_decisions`` and from
 ``Store.remediation_decision_digest``: a reviewer verdict on a saved edit is not remediation
 intent and must not change remediation identity. Every save is also appended to the immutable
-``decision_log`` (action ``change_review.<verdict>``).
+``decision_log`` (action ``change_review.<verdict>``) inside the same transaction.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from datetime import datetime, timezone
@@ -31,6 +47,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Body, HTTPException, Request
 
 import core
+import report_facts
 
 router = APIRouter()
 
@@ -39,10 +56,14 @@ VERDICTS = ("accepted", "edited", "rejected", "unable")
 NOTE_MAX = 2000
 EDITED_VALUE_MAX = 4000
 CHANGE_ID_MAX = 512
-# changeId = `${file}::${rule_id}::${seq}`. The file part is checked against the path's filename,
-# so the id cannot address a different document; the charset only excludes control characters.
+# changeId = `${file}::${rule_id}::${seq}` (verified) or `${file}::${rule_id}::u<16 hex>`
+# (applied-but-unverified). The file part is checked against the path's filename, so the id
+# cannot address a different document; the charset only excludes control characters.
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+# Re-exported for the tests and callers that used to import it from here.
+change_digest = report_facts.change_digest
 
 
 def _owner(request: Request) -> str:
@@ -52,10 +73,6 @@ def _owner(request: Request) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def change_digest(rule_id: str, before: str, after: str) -> str:
-    return hashlib.sha256(f"{rule_id}\n{before or ''}\n{after or ''}".encode("utf-8")).hexdigest()
 
 
 def _file_record(sid: str, filename: str, owner: str) -> dict:
@@ -68,45 +85,42 @@ def _file_record(sid: str, filename: str, owner: str) -> dict:
 
 
 def _artifact(record: dict) -> dict:
-    corrected = record.get("corrected_sha256") or None
-    source = record.get("checksum") or None
-    current = corrected or source
+    """The identity block the client echoes back as `expected_sha256`."""
+    identity = report_facts.artifact_identity(record)
+    current = identity["currentArtifact"]
     return {
-        "sourceSha256": source if source and _SHA256.match(str(source).lower()) else None,
-        "sourceChecksum": source,
-        "correctedSha256": corrected,
-        "currentSha256": current,
-        "identityKind": ("corrected_sha256" if corrected else "source_checksum" if source else None),
-        "remediatedAt": record.get("remediated_at") or None,
+        "sourceSha256": identity["sourceSha256"],
+        "sourceChecksum": identity["sourceChecksum"],
+        "sourceChecksumKind": identity["sourceChecksumKind"],
+        "correctedSha256": identity["correctedSha256"],
+        "currentSha256": current["sha256"],
+        "currentArtifact": current,
+        "identityKind": ("corrected_sha256" if identity["correctedSha256"]
+                         else "source_checksum" if identity["sourceChecksum"] and
+                         current["kind"] == "source" else None),
+        "remediatedAt": identity["remediatedAt"],
     }
 
 
-def _parse_change_id(filename: str, change_id: str) -> tuple[str, int]:
+def _parse_change_id(filename: str, change_id: str) -> tuple[str, int | None]:
     if not change_id or len(change_id) > CHANGE_ID_MAX or _CONTROL.search(change_id):
         raise HTTPException(422, "invalid change id")
-    prefix = f"{filename}::"
-    if not change_id.startswith(prefix):
+    if not change_id.startswith(f"{filename}::"):
         raise HTTPException(422, "change id does not belong to this file")
-    rest = change_id[len(prefix):]
-    rule_id, sep, seq = rest.rpartition("::")
-    if not sep or not rule_id or not seq.isdigit():
-        raise HTTPException(422, "change id must be <file>::<rule_id>::<seq>")
-    return rule_id, int(seq)
+    parsed = report_facts.parse_change_id(filename, change_id)
+    if parsed is None:
+        raise HTTPException(422, "change id must be <file>::<rule_id>::<seq|u…>")
+    return parsed
 
 
-def _current_digests(sid: str, filename: str) -> dict[str, str]:
-    return {f"{filename}::{d.get('rule_id')}::{d.get('seq')}":
-            change_digest(str(d.get("rule_id") or ""), d.get("before") or "", d.get("after") or "")
-            for d in core.store.get_remediation_diffs(sid, filename)}
+def _saved_changes(sid: str, filename: str, record: dict) -> list[dict]:
+    changes, _complete, _total, _source = report_facts.build_saved_changes(
+        core.store, sid, filename, record)
+    return changes
 
 
-def _stale(decision: dict, artifact: dict, current_digest: str | None) -> bool | None:
-    current = artifact.get("currentSha256")
-    if not current:
-        return None  # nothing recorded to compare against — unknown, never "fresh"
-    if decision.get("artifact_sha256") != current:
-        return True
-    return current_digest is None or decision.get("change_digest") != current_digest
+def _digests(changes: list[dict]) -> dict[str, str]:
+    return {c["id"]: c["changeDigest"] for c in changes}
 
 
 @router.get("/scans/{sid}/files/{filename:path}/change-reviews")
@@ -114,20 +128,15 @@ def get_change_reviews(sid: str, filename: str, request: Request):
     owner = _owner(request)
     record = _file_record(sid, filename, owner)
     artifact = _artifact(record)
-    digests = _current_digests(sid, filename)
-    reviews: dict[str, dict] = {}
-    for kind, row in core.store.get_change_reviews(sid, filename, owner=owner).items():
-        try:
-            decision = json.loads(row.get("value") or "{}")
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(decision, dict):
-            continue
-        change_id = decision.get("change_id") or kind[len(KIND_PREFIX):]
-        reviews[change_id] = {**decision, "change_id": change_id,
-                              "current_change_digest": digests.get(change_id),
-                              "stale": _stale(decision, artifact, digests.get(change_id))}
-    return {"artifact": artifact, "reviews": reviews}
+    changes = _saved_changes(sid, filename, record)
+    reviews = report_facts.read_reviews(
+        core.store, sid, filename, owner=owner,
+        current_sha256=report_facts.decision_binding_sha256(record),
+        digests_by_id=_digests(changes))
+    return {"artifact": artifact, "reviews": reviews,
+            "savedChanges": [{"id": c["id"], "ruleId": c["ruleId"], "sc": c["sc"],
+                              "verification": c["verification"],
+                              "changeDigest": c["changeDigest"]} for c in changes]}
 
 
 @router.put("/scans/{sid}/files/{filename:path}/change-reviews/{change_id:path}")
@@ -154,43 +163,74 @@ def put_change_review(sid: str, filename: str, change_id: str, request: Request,
     edited_value = body.get("edited_value")
     if verdict == "edited":
         if not isinstance(edited_value, str) or not edited_value.strip():
-            raise HTTPException(422, "an edited value is required for an 'edited' decision")
+            raise HTTPException(422, "a proposed correction is required for an 'edited' decision")
         if len(edited_value) > EDITED_VALUE_MAX:
             raise HTTPException(413, f"edited value is longer than {EDITED_VALUE_MAX} characters")
     else:
         edited_value = None
-    client_digest = body.get("change_digest")
-    if client_digest is not None and not (isinstance(client_digest, str)
-                                          and _SHA256.match(client_digest)):
-        raise HTTPException(422, "change_digest must be a sha256 hex digest")
 
-    current = artifact["currentSha256"]
-    if not current:
-        raise HTTPException(409, "artifact identity not recorded")
+    # BOTH binding tokens are mandatory. Without them a client that has been showing a stale
+    # copy can have the server bind its verdict to the current bytes — which is acceptance of
+    # something nobody read.
+    client_digest = body.get("change_digest")
+    if not (isinstance(client_digest, str) and _SHA256.match(client_digest)):
+        raise HTTPException(422, "change_digest is required and must be a sha256 hex digest")
     expected = body.get("expected_sha256")
-    if expected is not None and expected != current:
+    if not isinstance(expected, str) or not expected.strip():
+        raise HTTPException(
+            422, "expected_sha256 is required — a decision must name the copy it was made about")
+
+    # The ONLY thing a verdict on a saved change may bind to. Not the source checksum — see
+    # report_facts.decision_binding_sha256 and the module docstring.
+    current = report_facts.decision_binding_sha256(record)
+    if not current:
+        raise HTTPException(409, "the saved copy's identity is not recorded, so a decision "
+                                 "cannot be bound to the bytes that were reviewed")
+    if expected != current:
         raise HTTPException(409, "the document changed since it was loaded — reload before deciding")
 
-    server_digest = _current_digests(sid, filename).get(change_id)
+    changes = _saved_changes(sid, filename, record)
+    server_digest = _digests(changes).get(change_id)
     if server_digest is None:
         raise HTTPException(404, "no saved change with this id")
-    if client_digest is not None and client_digest != server_digest:
+    if client_digest != server_digest:
         raise HTTPException(409, "the change differs from the one you reviewed — reload before deciding")
 
+    change = next(c for c in changes if c["id"] == change_id)
     decision = {
         "change_id": change_id, "rule_id": rule_id, "seq": seq,
         "verdict": verdict, "note": note or None, "edited_value": edited_value,
         "artifact_sha256": current, "change_digest": server_digest,
+        "verification": change["verification"],
         "reviewer": owner, "at": _now(),
     }
-    core.store.save_decision(sid, filename, KIND_PREFIX + change_id,
-                             json.dumps(decision, sort_keys=True), owner, decision["at"])
-    core.store.log_decision(owner, f"change_review.{verdict}", scan_id=sid, file=filename,
-                            rule_id=rule_id,
-                            detail=json.dumps({"change_id": change_id,
-                                               "artifact_sha256": current,
-                                               "change_digest": server_digest,
-                                               "note": note or None,
-                                               "edited_value": edited_value}, sort_keys=True))
-    return {"artifact": artifact, "review": {**decision, "current_change_digest": server_digest,
-                                             "stale": False}}
+    saved = core.store.save_change_review(
+        sid, filename, KIND_PREFIX + change_id, json.dumps(decision, sort_keys=True),
+        owner, decision["at"], expected_artifact=current,
+        log_action=f"change_review.{verdict}", log_rule_id=rule_id,
+        log_detail=json.dumps({"change_id": change_id, "verdict": verdict,
+                               "artifact_sha256": current, "change_digest": server_digest,
+                               "verification": change["verification"],
+                               "reviewer": owner, "at": decision["at"],
+                               "note": note or None, "edited_value": edited_value},
+                              sort_keys=True))
+    if not saved:
+        # Somebody rewrote the corrected copy between the check above and the write. The verdict
+        # was NOT recorded; saying so is the whole point of the compare-and-set.
+        raise HTTPException(409, "the document changed while the decision was being recorded — "
+                                 "reload and review the current copy")
+
+    # Re-read rather than assert. The stored row's freshness is a fact about the store as it is
+    # NOW, and "stale: false" was previously a constant.
+    record = _file_record(sid, filename, owner)
+    artifact = _artifact(record)
+    changes = _saved_changes(sid, filename, record)
+    reviews = report_facts.read_reviews(
+        core.store, sid, filename, owner=owner,
+        current_sha256=report_facts.decision_binding_sha256(record),
+        digests_by_id=_digests(changes))
+    review = reviews.get(change_id) or {
+        **decision, "current_change_digest": None, "stale": None,
+        "staleReason": "the decision could not be read back",
+        "verdictLabel": report_facts.VERDICT_LABELS.get(verdict, "unknown")}
+    return {"artifact": artifact, "review": review}

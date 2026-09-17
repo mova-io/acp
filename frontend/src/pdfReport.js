@@ -992,7 +992,7 @@ export async function exportFileCertification(d = {}) {
   const mode = d.mode || 'full'
   const model = buildFileReportModel({ ...d, mode })
   const { renderReportPdf } = await import('./reportRenderClient.js')
-  return renderReportPdf({ scanId: d.scanId, kind: 'file', file: d.file, mode, model })
+  return renderReportPdf({ scanId: d.scanId, kind: 'file', file: d.file, mode, model, factsDigest: d.factsDigest ?? model?.identity?.factsDigest ?? null })
 }
 
 export async function exportScanReport(d = {}) {
@@ -1000,7 +1000,7 @@ export async function exportScanReport(d = {}) {
   const { buildScanReportModel } = await import('./scanReport.js')
   const model = buildScanReportModel({ ...d, mode })
   const { renderReportPdf } = await import('./reportRenderClient.js')
-  return renderReportPdf({ scanId: d.scanId, kind: 'scan', file: null, mode, model })
+  return renderReportPdf({ scanId: d.scanId, kind: 'scan', file: null, mode, model, factsDigest: d.factsDigest ?? model?.identity?.factsDigest ?? null })
 }
 
 export async function exportRemediationReport(d = {}) {
@@ -1015,7 +1015,12 @@ export async function exportRemediationReport(d = {}) {
     currentShaByFile: d.currentShaByFile || null,
   })
   const { renderReportPdf } = await import('./reportRenderClient.js')
-  return renderReportPdf({ scanId: d.scanId || m.scanId, kind: 'remediation', file: null, mode, model })
+  // The remediation report binds to the SCAN facts digest (kinds 'scan' and 'remediation' share
+  // it), so the server can refuse to stamp a report whose evidence has moved on.
+  return renderReportPdf({
+    scanId: d.scanId || m.scanId, kind: 'remediation', file: null, mode, model,
+    factsDigest: d.factsDigest ?? model?.identity?.factsDigest ?? null,
+  })
 }
 
 // RETIRED, kept in the tree on purpose (repo rule: retire the mount, keep the code). Not wired to

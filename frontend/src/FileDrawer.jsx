@@ -22,10 +22,10 @@ import AccessibilityStatus from './AccessibilityStatus.jsx'
 import EvidenceHeader, { fmtEvidence } from './EvidenceHeader.jsx'
 import SecondOpinionChip from './SecondOpinionChip.jsx'
 import { confirmCriterion, getFileStatus, getExamined, disposeCriterion, listDispositions } from './api.js'
-import { listScanDecisions, getDecisions, getFilePage, getScan, getScanDiff } from './api.js'
+import { listScanDecisions, getDecisions, getFilePage, getFileArtifactPage, getFileReportFacts, getScan, getScanDiff } from './api.js'
 import ChangeReviewPanel from './ChangeReviewPanel.jsx'
 import ReportModeMenu from './ReportModeMenu.jsx'
-import { buildFileReportData } from './fileReportData.js'
+import { buildFileReportData, loadFileReportFacts, savedChangeToDiff, collectPreviews, savedChangesGap } from './fileReportData.js'
 import { errorReasonFor, noFindingsLine, looksLikeFetchFailure, friendlyFileError } from './fileErrorReason.js'
 import { retentionSignal } from './retentionSignal.js'
 import { showsAssessmentHero } from './riskOverUnassessed.js'
@@ -682,6 +682,8 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
   // a failed read is an error, never an empty list.
   const [savedDiffs, setSavedDiffs] = useState(null)
   const [savedDiffsErr, setSavedDiffsErr] = useState(null)
+  // Page previews for the review panel, each tagged with the version it provably is.
+  const [changePreviews, setChangePreviews] = useState(null)
   // The authoritative status model, reported up by the AccessibilityStatus hero below so both
   // panels answer "does this file have findings" from ONE derivation — see findingsClaim().
   const [statusModel, setStatusModel] = useState(null)
@@ -692,10 +694,36 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
     getFileRemediationState(scanId, file.file)
       .then((rows) => { if (!cancelled) setRemediatedRuleIds(new Set((rows || []).filter((r) => r.state === 'complete').map((r) => r.rule_id))) })
       .catch(() => { if (!cancelled) setRemediatedRuleIds(new Set()) })
-    setSavedDiffs(null); setSavedDiffsErr(null)
+    setSavedDiffs(null); setSavedDiffsErr(null); setChangePreviews(null)
+    // The SERVER's saved-change list, because it is the only one that includes changes the AI
+    // applied and nothing re-scanned. /remediation-diffs returns verified records only, so a panel
+    // fed from it showed a reviewer everything except the changes that actually needed reviewing.
     Promise.resolve()
-      .then(() => getFileRemediationDiffs(scanId, file.file, { strict: true }))
-      .then((rows) => { if (!cancelled) setSavedDiffs(Array.isArray(rows) ? rows : []) })
+      .then(() => loadFileReportFacts(scanId, file.file, { getFileReportFacts }))
+      .then(async ({ facts, factsError }) => {
+        if (cancelled) return
+        if (facts && Array.isArray(facts.savedChanges)) {
+          const rows = facts.savedChanges.map((c) => savedChangeToDiff(c, file.file))
+          setSavedDiffs(rows)
+          setSavedDiffsErr(facts.savedChangesComplete === false
+            ? savedChangesGap(facts, rows.length, Number.isFinite(facts.savedChangesTotal) ? facts.savedChangesTotal : null)
+            : null)
+          // Previews are fetched by EXACT BYTES where the digests are recorded, so each one can say
+          // which version it is. Nothing here is ever labelled "after the edit".
+          const pv = await collectPreviews({
+            scanId, file, diffs: rows, facts,
+            getFilePage, getFileArtifactPage,
+          })
+          if (!cancelled) setChangePreviews(pv.previews)
+          return
+        }
+        // Facts unavailable (demo mode, or the read failed): fall back to the verified-only list
+        // and say that the list may be missing unverified changes.
+        const rows = await getFileRemediationDiffs(scanId, file.file, { strict: true })
+        if (cancelled) return
+        setSavedDiffs(Array.isArray(rows) ? rows : [])
+        setSavedDiffsErr(factsError || null)
+      })
       .catch((e) => { if (!cancelled) { setSavedDiffs([]); setSavedDiffsErr(e?.message || 'request failed') } })
     return () => { cancelled = true }
   }, [scanId, file?.file, remNow?.done])
@@ -956,7 +984,7 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
           const buildCertData = (mode) => buildFileReportData({
             file, scanId, mode, targetLevel, dispositions, isDispositionable, normalizeDisposition,
             rows: computeCoverageRows(file, { catalogRules, targetLevel, remediatedRuleIds, effectiveRemediated, aiEnabled, cap }),
-            deps: { getConfig, getFileRemediationDiffs, getDecisions, getFilePage, getScan, getScanDiff },
+            deps: { getConfig, getFileRemediationDiffs, getFileReportFacts, getFileArtifactPage, getDecisions, getFilePage, getScan, getScanDiff },
           })
           return (
             <span style={(remNow?.done || effectiveRemediated) ? undefined : { marginLeft: 'auto' }}>
@@ -964,7 +992,12 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
                 { key: 'pdf', label: 'PDF', run: async (mode) => {
                   const [{ renderReportPdf }, { buildFileReportModel }] = await Promise.all([import('./reportRenderClient.js'), import('./reportModel.js')])
                   const d = await buildCertData(mode)
-                  return renderReportPdf({ scanId, kind: 'file', file: file.file, mode, model: buildFileReportModel(d) })
+                  // The digest the model was built from travels with the request, so the server
+                  // can answer 409 rather than re-stamping evidence that has since moved on.
+                  return renderReportPdf({
+                    scanId, kind: 'file', file: file.file, mode, model: buildFileReportModel(d),
+                    factsDigest: d.identity?.factsDigest ?? null,
+                  })
                 } },
                 { key: 'html', label: 'HTML', run: async (mode) => {
                   const { exportFileReportHtml } = await import('./htmlReport.js')
@@ -1164,7 +1197,8 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
 
 
       {scanId && (
-        <ChangeReviewPanel scanId={scanId} file={file.file} diffs={savedDiffs} diffsError={savedDiffsErr} readOnly={readOnly} />
+        <ChangeReviewPanel scanId={scanId} file={file.file} diffs={savedDiffs} diffsError={savedDiffsErr}
+                           previews={changePreviews} readOnly={readOnly} />
       )}
 
       {context === 'remediate' && /\.html?$/i.test(file.file || '') && scanId && (

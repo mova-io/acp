@@ -343,6 +343,11 @@ def wired(monkeypatch, tmp_path):
     monkeypatch.setattr(handlers, "_drive_client", lambda token: _Svc())
     monkeypatch.setattr(handlers, "_remediation_scope", lambda *a, **kw: None)
     monkeypatch.setattr(handlers.core, "store", type("S", (), {
+        # The handler now reads assessment scope and source provenance before drafting.
+        # No recorded checksum means unknown provenance, not a fabricated source match.
+        "get_source_checksum": staticmethod(lambda *a, **kw: None),
+        "get_scan_scope": staticmethod(lambda *a, **kw: None),
+        "scope_for_file": staticmethod(lambda sid, filename, scope: scope),
         "enqueue_proposals": staticmethod(
             lambda scan_id, file, sc, proposals, **kw: state["proposals"].append(
                 {"sc": sc, "file": file, "proposals": proposals, **kw}) or "p1"),

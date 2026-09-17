@@ -15,7 +15,9 @@
 
 import {
   scOfValue, fmtOfFile, isSafeHref, normaliseRowIssues, buildChangeCards, buildFindingCards,
-  buildComparison, boundList, locationLabel, technicalText, humanText, RESPONSE_NOTICE,
+  buildComparison, buildComparisonFromFacts, findingCardsFromFacts, factsFindings,
+  boundList, locationLabel, technicalText, humanText, verificationText, clippedNote,
+  isHumanOutstanding, RESPONSE_NOTICE,
 } from './reportEvidence.js'
 
 // Shared ink palette. Every colour used as TEXT here is dark enough to clear WCAG
@@ -34,6 +36,11 @@ const PRINCIPLE = { 1: 'Perceivable', 2: 'Operable', 3: 'Understandable', 4: 'Ro
 const PRIN_CLR = { 1: BLUE, 2: GREEN, 3: AMBER, 4: PLUM }
 
 const COV_OUT_TXT = { PASS: 'Pass', FAIL: 'Open finding', FIXED: 'Fixed · re-validate', HUMAN: 'Human review', UNCHECKED: 'Not auto-checked', WEB: 'Web-only (n/a)' }
+// A FINDING's own state (facts.findings[].state) — distinct from its criterion's outcome above.
+const FINDING_STATE_TXT = {
+  open: 'Open', unresolved: 'Unresolved', awaiting_review: 'Awaiting human review',
+  resolved_verified: 'Resolved — verified by re-scan', unknown: 'Not recorded',
+}
 
 // ── Certification-report evidence maps (curated content; no fabricated data) ──
 const CHANGE_LABEL = {
@@ -83,7 +90,8 @@ const CAT_ORDER = ['Images', 'Headings & Titles', 'Tables & Structure', 'Links',
 // cleared the post-fix re-scan (api/store.py list_remediation_diffs). A FIXED row with no such
 // record is outstanding work, never a pass.
 const verifiedCriteria = (diffs) => new Set((diffs || [])
-  .filter((x) => x && x.verified === true).map((x) => scOfValue(x.rule_id ?? x.ruleId)).filter(Boolean))
+  .filter((x) => x && (x.verified === true || x.verification === 'verified'))
+  .map((x) => scOfValue(x.sc) || scOfValue(x.rule_id ?? x.ruleId)).filter(Boolean))
 
 export function classifyRows(rows = [], diffs = []) {
   const vset = verifiedCriteria(diffs)
@@ -135,10 +143,26 @@ const statusOfStage = (value) => (value == null ? 'unknown' : value > 0 ? 'done'
 export function buildFileReportModel(d = {}) {
   const mode = MODES.includes(d.mode) ? d.mode : 'full'
   const atLeast = (m) => MODES.indexOf(mode) >= MODES.indexOf(m)
-  const level = d.targetLevel || 'AA'
-  const fileName = d.file || 'document'
+  // `d.facts` is the server's report-facts document. When it is present it is the AUTHORITY for
+  // every count below: the client re-shapes it and never re-derives a number the server declined to
+  // record. Without it the report falls back to the coverage rows, which can support criterion-level
+  // statements only — see findingsVerified/findingsRemaining, which stay null in that case.
+  const facts = d.facts && typeof d.facts === 'object' ? d.facts : null
+  const fid = facts?.identity || {}
+  const acc = facts?.accounting || null
+  const assessment = facts?.assessment || null
+  const level = d.targetLevel || fid.targetLevel || 'AA'
+  const fileName = d.file || fid.file || 'document'
   const fmt = fmtOfFile(fileName)
-  const allDiffs = (d.diffs || []).filter((x) => x && (x.before != null || x.after != null))
+  // The document is identified ONCE, in full, by the identity table (and the cover subtitle and
+  // running header the renderer builds from it). Prose refers to it by its file name: a 140-char
+  // SharePoint path repeated in every sentence costs a one-page summary two lines per mention and
+  // adds nothing — the identity table is the authority for which document this is.
+  const shortName = String(fileName).split('/').filter(Boolean).pop() || fileName
+  // Saved changes: BOTH the verified remediation_diff records and the applied-but-unverified ones.
+  // The unverified changes are exactly what a human has to look at, so they are never filtered out.
+  const factsChanges = facts && Array.isArray(facts.savedChanges) ? facts.savedChanges : null
+  const allDiffs = (factsChanges || d.diffs || []).filter((x) => x && (x.before != null || x.after != null))
   const rows = (d.rows || []).map((r) => ({ ...r, fileIssues: normaliseRowIssues(r, fileName, { locationHref: d.locationHref }) }))
   const c = classifyRows(rows, allDiffs)
   const inScopeN = c.inScope.length
@@ -151,52 +175,142 @@ export function buildFileReportModel(d = {}) {
   const uncheckedN = c.unchecked.length
   const oosN = c.outOfScope.length
   const disposed = rows.filter((r) => r.disposition && r.disposition.kind)
-  const ready = c.ready
+  // TECHNICAL completion only: every in-scope criterion passed, was attested, or had a saved edit
+  // that cleared re-validation. Human confirmation is a separate question, answered below.
+  const technicalReady = c.ready
   const generated = d.timestamp || d.date
   const generatedAt = d.identity?.generatedAt || d.generatedAt || new Date().toISOString()
   const artifact = d.artifact || {}
   const identity = {
-    scanId: d.identity?.scanId ?? d.scanId ?? null,
-    file: d.identity?.file ?? d.file ?? null,
-    sourceSha256: d.identity?.sourceSha256 ?? artifact.sourceSha256 ?? null,
-    correctedSha256: d.identity?.correctedSha256 ?? artifact.correctedSha256 ?? null,
+    scanId: d.identity?.scanId ?? fid.scanId ?? d.scanId ?? null,
+    file: d.identity?.file ?? fid.file ?? d.file ?? null,
+    sourceChecksum: d.identity?.sourceChecksum ?? fid.sourceChecksum ?? null,
+    sourceChecksumKind: d.identity?.sourceChecksumKind ?? fid.sourceChecksumKind ?? null,
+    sourceSha256: d.identity?.sourceSha256 ?? fid.sourceSha256 ?? artifact.sourceSha256 ?? null,
+    correctedSha256: d.identity?.correctedSha256 ?? fid.correctedSha256 ?? artifact.correctedSha256 ?? null,
+    currentArtifact: d.identity?.currentArtifact ?? fid.currentArtifact ?? null,
     artifactVersion: d.identity?.artifactVersion ?? null,
     generatedAt,
-    platformVersion: d.identity?.platformVersion ?? d.platformVersion ?? null,
+    platformVersion: d.identity?.platformVersion ?? fid.platformVersion ?? d.platformVersion ?? null,
     targetLevel: level,
+    // Required by the server render route: it recomputes the digest and answers 409 when the facts
+    // this model was built from are no longer current.
+    factsDigest: d.identity?.factsDigest ?? facts?.factsDigest ?? null,
   }
-  const currentSha = artifact.currentSha256 ?? identity.correctedSha256 ?? identity.sourceSha256 ?? null
+  // The bytes a reviewer decision is measured against. With facts this is the server's
+  // currentArtifact and nothing else — falling back to the SOURCE checksum for a file that has a
+  // corrected copy would silently bind (or un-stale) a decision against bytes nobody reviewed.
+  // A reviewer decision binds to the CORRECTED copy and to nothing else. When no corrected digest
+  // is recorded there is no artifact to measure a decision against, so every review reads
+  // "freshness unknown" — never accepted, and never matched against the SOURCE checksum, which
+  // identifies bytes the reviewer did not look at.
+  // `currentArtifact.kind` 'source' or 'unknown' both mean there is no corrected copy this decision
+  // could have been made against — the first because none exists, the second because the server
+  // cannot say which bytes are current. Either way the answer is "unknown", not the source hash.
+  const currentSha = facts
+    ? (identity.currentArtifact
+      ? (identity.currentArtifact.kind === 'corrected'
+        ? (identity.currentArtifact.sha256 ?? identity.correctedSha256 ?? null)
+        : null)
+      : (identity.correctedSha256 ?? null))
+    : (artifact.currentSha256 ?? identity.correctedSha256 ?? identity.sourceSha256 ?? null)
   const tone = (good) => (good ? { color: GREEN, bg: '#EEF5E8' } : { color: AMBER, bg: '#FBF1DF' })
 
   // Evidence counts. Null means the evidence was not supplied — rendered "Not recorded", never 0.
   // A diff list that could not be READ (d.diffsError) is not an empty list.
+  // The applied-but-unverified records are the ones a human still has to look at. When the server
+  // could not read them, their number is UNKNOWN — and an unknown number of pending reviews must
+  // never render as "none outstanding", which is exactly what an empty list would have said.
+  const unverifiedUnavailable = facts != null && facts.savedChangesUnverifiedSource === 'unavailable'
+  const unverifiedUnreadableNote = unverifiedUnavailable
+    ? 'The saved changes awaiting review could not be read, so this report cannot say how many are outstanding. Absence from the list below is not evidence that there are none.'
+    : null
   const diffsError = typeof d.diffsError === 'string' && d.diffsError ? d.diffsError : null
-  const diffsKnown = Array.isArray(d.diffs) && !diffsError
-  const diffsComplete = d.diffsComplete !== false && !diffsError
-  const diffsTotal = Number.isFinite(d.diffsTotal) ? d.diffsTotal : (diffsKnown && diffsComplete ? allDiffs.length : null)
-  // remediation_diff stores before/after clipped at this many characters (store.record_remediation_diffs).
-  const storeCap = Number.isFinite(d.diffValueCap) ? d.diffValueCap : null
-  const atCap = (v) => storeCap != null && v != null && String(v).length >= storeCap
+  const diffsKnown = (factsChanges != null || Array.isArray(d.diffs)) && !diffsError
+  const diffsComplete = (facts ? facts.savedChangesComplete !== false : d.diffsComplete !== false) && !diffsError
+  const diffsTotal = facts
+    ? (Number.isFinite(facts.savedChangesTotal) ? facts.savedChangesTotal : allDiffs.length)
+    : (Number.isFinite(d.diffsTotal) ? d.diffsTotal : (diffsKnown && diffsComplete ? allDiffs.length : null))
+  // The store CLIPS before/after when it records them and keeps no untruncated copy, so a clipped
+  // value can only be disclosed — never pointed at "the full evidence report", which does not have it.
+  const storeCap = facts
+    ? (Number.isFinite(facts.limits?.valueMaxChars) ? facts.limits.valueMaxChars : null)
+    : (Number.isFinite(d.diffValueCap) ? d.diffValueCap : null)
   const reviewsError = typeof d.reviewsError === 'string' && d.reviewsError ? d.reviewsError : null
   const previewReason = d.previewStatus && typeof d.previewStatus.reason === 'string' ? d.previewStatus.reason : null
   const editsSaved = diffsTotal != null && !(diffsTotal === 0 && (fixedPN + fixedVN) > 0) ? diffsTotal : null
-  const findingsRemaining = anyUncounted(c.fail) ? null : countIssues(c.fail)
-  const findingsVerified = anyUncounted(c.fixedVerified) ? null : countIssues(c.fixedVerified)
-  const reviewsLoaded = d.reviews != null && typeof d.reviews === 'object'
+  const reviewsSource = facts ? facts.reviews : d.reviews
+  const reviewsLoaded = reviewsSource != null && typeof reviewsSource === 'object'
   const cardClamp = mode !== 'summary'
   const changeCards = buildChangeCards({
-    file: fileName, diffs: allDiffs, reviews: reviewsLoaded ? d.reviews : null, previews: d.previews,
+    file: fileName, diffs: allDiffs, reviews: reviewsLoaded ? reviewsSource : null, previews: d.previews,
     currentSha256: currentSha, locationHref: d.locationHref, clamp: cardClamp,
+    valueMaxChars: storeCap, previewProvenance: d.previewProvenance ?? null,
     fullRefPrefix: mode === 'full' ? '' : 'Full evidence report · record ',
-  }).map((x) => ({ ...x, beforeStoredClipped: atCap(x.before), afterStoredClipped: atCap(x.after) }))
-  const storedClippedN = changeCards.filter((x) => x.beforeStoredClipped || x.afterStoredClipped).length
+  }).map((x) => ({ ...x, beforeStoredClipped: x.valueClipped, afterStoredClipped: x.valueClipped }))
+  const storedClippedN = changeCards.filter((x) => x.valueClipped).length
   const storedClipNote = storedClippedN
-    ? `${plural(storedClippedN, 'change has', 'changes have')} a value at the ${storeCap.toLocaleString('en-US')}-character storage limit; the stored text may be incomplete — the corrected copy is the source of truth.`
+    ? `${plural(storedClippedN, 'change has', 'changes have')} a value the store clipped when it recorded it. ${clippedNote(storeCap)}`
     : null
-  const findingCards = buildFindingCards({ file: fileName, rows, assignee: d.assignee, locationHref: d.locationHref })
-  const decided = changeCards.filter((x) => ['accepted', 'edited', 'rejected', 'unable'].includes(x.human.status)).length
-  const staleN = changeCards.filter((x) => x.human.status === 'stale').length
-  const awaitingN = changeCards.length - decided
+
+  // ── Changes, findings and criteria are THREE different counts ─────────────────────────────
+  // Nothing below lets one stand in for another. A criterion-wide `verified` flag says a criterion
+  // cleared its re-scan; it is not evidence about how many FINDINGS of that criterion were resolved.
+  const changesVerifiedN = acc && Number.isFinite(acc.savedChangesVerified)
+    ? acc.savedChangesVerified : changeCards.filter((x) => x.verification === 'verified').length
+  const changesUnverifiedN = acc && Number.isFinite(acc.savedChangesUnverified)
+    ? acc.savedChangesUnverified : changeCards.filter((x) => x.verification === 'not_verified').length
+  // Resolution may be credited per finding ONLY from a per-finding ledger. Without one the answer is
+  // "Not recorded" — which is the honest reading of one saved change against two findings.
+  // Criteria counted from the CHANGE records themselves, not from coverage rows. Deriving it from
+  // rows produced "Saved changes verified by re-scan: 30 · Criteria whose saved edit cleared
+  // re-validation: 0" — true of the rows (the criterion still FAILs on other findings) and
+  // nonsense beside the change count. These two numbers must describe the same records.
+  const verifiedChangeCriteriaN = new Set(changeCards
+    .filter((x) => x.verification === 'verified').map((x) => x.criterion).filter(Boolean)).size
+  const ledger = acc?.resolutionLedger ?? (facts ? 'none' : null)
+  const findingsVerified = ledger === 'per_finding'
+    ? (Number.isFinite(acc?.findingsResolvedVerified) ? acc.findingsResolvedVerified : null)
+    : null
+  const fixedFindingsN = countIssues(c.fixedVerified) + countIssues(c.fixedPending)
+  // Remaining findings come from the CURRENT assessment's finding list, never from catalog rows and
+  // never by subtracting a criterion's saved changes from its finding count.
+  const findingsRemaining = facts
+    ? (Number.isFinite(acc?.findingsOpen) ? acc.findingsOpen : null)
+    : (anyUncounted(c.fail) || fixedFindingsN > 0 ? null : countIssues(c.fail))
+  // "Are the findings accounted for finding by finding?" — the question the ready wording depends on.
+  // With facts, the coverage rows are irrelevant: what matters is whether the server holds a ledger,
+  // and whether there is anything to attribute (no saved changes, or no findings, and the question
+  // does not arise). Reading it off the rows said "attributed" for a document whose facts carried
+  // three findings and two unledgered saved changes, because the caller passed no rows at all.
+  const findingsAttributed = ledger === 'per_finding'
+    || (facts
+      ? (allDiffs.length === 0 || (acc?.findingsTotal ?? (facts.findings || []).length) === 0)
+      : fixedFindingsN === 0)
+
+  const factsFindingList = facts ? factsFindings(facts, { locationHref: d.locationHref }) : null
+  const findingCards = facts
+    ? findingCardsFromFacts(facts, { assignee: d.assignee, locationHref: d.locationHref })
+    : buildFindingCards({ file: fileName, rows, assignee: d.assignee, locationHref: d.locationHref })
+
+  // ── Human confirmation: separate from technical verification, and never assumed ───────────
+  const byHuman = (s) => changeCards.filter((x) => x.human.status === s).length
+  const humanOutstandingCards = changeCards.filter((x) => isHumanOutstanding(x.human.status))
+  const confirmedN = changeCards.filter((x) => x.human.confirmed).length
+  const decided = confirmedN + byHuman('correction_requested') + byHuman('rejected') + byHuman('unable')
+  const staleN = byHuman('stale')
+  const awaitingN = byHuman('pending')
+  // Decisions were never loaded: unknown, which is not the same as "nobody has anything to do".
+  const humanUnknown = !reviewsLoaded && changeCards.length > 0
+  const humanOutstandingN = humanOutstandingCards.length
+  const humanParts = [
+    awaitingN ? `${plural(awaitingN, 'saved change', 'saved changes')} awaiting confirmation` : null,
+    byHuman('correction_requested') ? `${byHuman('correction_requested')} with a correction requested (proposed only — not applied)` : null,
+    byHuman('rejected') ? `${byHuman('rejected')} rejected by a reviewer` : null,
+    byHuman('unable') ? `${byHuman('unable')} a reviewer could not verify` : null,
+    staleN ? `${staleN} whose decision is stale because the file changed afterwards` : null,
+    byHuman('freshness_unknown') ? `${byHuman('freshness_unknown')} accepted against a file version that cannot be confirmed` : null,
+  ].filter(Boolean)
   const hitlN = Array.isArray(d.hitl) ? d.hitl.length : null
 
   const blocks = []
@@ -205,61 +319,152 @@ export function buildFileReportModel(d = {}) {
 
   // ── Decision summary ────────────────────────────────────────────────────────────────────
   H('Decision summary')
+  // "Documents assessed" is a fact about the ASSESSMENT, not about the coverage catalog: catalog
+  // rows exist for documents a scan never opened, and `rows.length ? 1 : 0` reported those as
+  // assessed. 'not_assessed' / 'error' / 'partial' with no findings is never "no findings".
+  const assessState = assessment ? (assessment.state ? String(assessment.state) : 'unknown') : null
+  const stateWhy = assessment && assessment.stateReason ? ` (${assessment.stateReason})` : ''
+  let assessedValue = null
+  let assessedDetail = 'No assessment state was recorded for this document.'
+  if (assessState === 'assessed') {
+    assessedValue = 1
+    assessedDetail = `Assessed${assessment.assessedAt ? ` ${assessment.assessedAt}` : ''} · ${inScopeN ? `${inScopeN} in-scope criteria ` : ''}(Level ${level})`
+  } else if (assessState === 'partial') {
+    assessedValue = 1
+    assessedDetail = `PARTIAL — ${(facts.findings || []).length} of ${assessment.findingsTotal ?? 'an unknown number of'} findings listed${stateWhy}. An absent finding is not evidence there is none.`
+  } else if (assessState === 'not_assessed') {
+    assessedValue = 0
+    assessedDetail = `This document has NOT been assessed${stateWhy}. A coverage row is not an assessment, and an empty finding list here does not mean the document has no findings.`
+  } else if (assessState === 'error') {
+    assessedValue = 0
+    assessedDetail = `The assessment did not complete${stateWhy}. No finding list can be read from a failed assessment.`
+  } else if (assessState) {
+    assessedDetail = `Assessment state not recorded${stateWhy}.`
+  } else {
+    // Legacy input: only evidence of an actual assessment counts, never the length of the catalog.
+    const evidence = d.score != null || rows.some((r) => r.outcome && r.outcome !== 'UNCHECKED')
+    assessedValue = evidence ? 1 : null
+    assessedDetail = evidence
+      ? `${inScopeN} in-scope criteria at WCAG 2.1 Level ${level}`
+      : 'No assessment state was supplied with this report, and coverage rows alone do not show that this document was opened.'
+  }
+
   const outstanding = [
     failN ? `${plural(findingsRemaining ?? failN, 'open finding', 'open findings')}${findingsRemaining == null ? ' (criteria)' : ''}` : null,
     fixedPN ? `${crit(fixedPN)} with a saved edit awaiting re-validation` : null,
     humanN ? `${crit(humanN)} needing a human check` : null,
     uncheckedN ? `${crit(uncheckedN)} not checked` : null,
+    !findingsAttributed ? `${fixedFindingsN} finding${fixedFindingsN === 1 ? '' : 's'} recorded on criteria with a saved edit, which no per-finding record accounts for` : null,
   ].filter(Boolean)
+  // Ready = technically complete AND every saved change humanly confirmed AND the findings actually
+  // accounted for one by one. Any of the three missing and the report says what is outstanding.
+  const ready = technicalReady && changesUnverifiedN === 0 && !unverifiedUnavailable
+    && !humanUnknown && humanOutstandingN === 0 && findingsAttributed
+  // Saved changes are stated as their own fact. An AI edit that no re-scan has checked is
+  // outstanding work even when every coverage row reads clean, so it is never silently absorbed
+  // into the criteria sentence (and when there are no in-scope rows at all, it is all we have).
+  const changesSentence = unverifiedUnavailable
+    ? ` Saved changes: ${changesVerifiedN} verified by re-scan; the applied-but-unverified records COULD NOT BE READ, so the number awaiting review is unknown.`
+    : changeCards.length
+      ? ` Saved changes: ${changesVerifiedN} verified by re-scan, ${changesUnverifiedN} applied by AI but not verified by a re-scan.`
+      : ''
+  const humanSentence = unverifiedUnavailable
+    ? 'Human confirmation: UNKNOWN — the changes awaiting review could not be read, so this report cannot say what is confirmed.'
+    : !changeCards.length
+      ? 'Human confirmation: no saved changes require a reviewer decision.'
+    : humanUnknown
+      ? `Human confirmation: UNKNOWN — reviewer decisions were not loaded${reviewsError ? ` (${reviewsError})` : ''}, so none of the ${changeCards.length} saved changes can be reported as confirmed.`
+      : humanOutstandingN
+        ? `Human confirmation: outstanding — ${humanParts.join('; ')} (${confirmedN} of ${changeCards.length} confirmed).`
+        : `Human confirmation: all ${plural(changeCards.length, 'saved change is', 'saved changes are')} confirmed by a reviewer against the current file version.`
+  // With no coverage rows the report cannot speak about criteria — but the facts still know what
+  // the assessment found, and "no in-scope criteria were evaluated" is FALSE for a document the
+  // server reports as assessed with findings. Say what is actually recorded.
+  const technicalSentence = technicalReady
+    ? `Technical checks: nothing outstanding among the ${inScopeN} in-scope WCAG 2.1 Level ${level} criteria ACP checked — each passed, was resolved by a recorded human attestation, or had a saved edit that cleared re-validation.`
+    : inScopeN === 0
+      ? (facts && assessState === 'assessed'
+        ? `Technical checks: the per-criterion coverage table is not part of this report; the current assessment records ${findingsRemaining == null ? 'an unrecorded number of' : findingsRemaining} open finding${findingsRemaining === 1 ? '' : 's'} for "${shortName}".`
+        : `Technical checks: no in-scope criteria were evaluated for "${shortName}".`)
+      : `Technical checks: ${outstanding.join('; ')}.`
+  const nextStep = ready
+    ? 'Next step: nothing outstanding in this record — publish, or re-assess if the document has changed since.'
+    : `Next step: ${humanOutstandingN || humanUnknown ? 'record a reviewer decision for every saved change, then ' : ''}work through the remaining findings and re-validate. The Reviewer packet lists each one.`
   blocks.push({
     k: 'callout',
     text: ready
-      ? `No outstanding items for "${fileName}" among the ${inScopeN} in-scope WCAG 2.1 Level ${level} criteria ACP checked: each passed, was resolved by a recorded human attestation, or had a saved edit that cleared re-validation. This records what ACP checked, changed and verified; it is not a conformance determination.`
-      : inScopeN === 0
-        ? `No in-scope criteria were evaluated for "${fileName}", so this report cannot support a publication decision.`
-        : `Outstanding before publication of "${fileName}": ${outstanding.join('; ')}.`,
+      ? `No outstanding items for "${shortName}" among the ${inScopeN} in-scope WCAG 2.1 Level ${level} criteria ACP checked. ${technicalSentence}${changesSentence} ${humanSentence} ${nextStep}`
+      : inScopeN === 0 && !changeCards.length
+        ? `No in-scope criteria were evaluated for "${shortName}", so this report cannot support a publication decision. ${nextStep}`
+        : `Outstanding before publication of "${shortName}". ${technicalSentence}${changesSentence} ${humanSentence} ${nextStep}`,
     o: tone(ready),
   })
   blocks.push({
     k: 'decisionSummary',
-    caption: `Decision evidence for ${fileName}`,
+    caption: 'Decision evidence',
     items: [
-      { key: 'documentsAssessed', label: 'Documents assessed', value: rows.length ? 1 : 0, detail: `${inScopeN} in-scope criteria at WCAG 2.1 Level ${level}` },
-      { key: 'editsSaved', label: 'Edits saved', value: editsSaved,
-        detail: editsSaved == null
+      { key: 'documentsAssessed', label: 'Documents assessed', value: assessedValue, detail: assessedDetail },
+      { key: 'editsSaved', label: 'Edits saved', value: unverifiedUnavailable ? null : editsSaved,
+        detail: unverifiedUnavailable
+          ? `${changesVerifiedN} verified by re-scan. The applied-but-unverified records could not be read, so the total is not recorded.`
+          : editsSaved == null
           ? (diffsError ? `Saved-edit records could not be read: ${diffsError}`
             : (fixedPN + fixedVN) ? `Edits were recorded for ${crit(fixedPN + fixedVN)}, but no per-change record was available` : 'Saved-edit records were not loaded')
-          : diffsComplete ? 'Per-change records' : `Partial: ${allDiffs.length} of ${diffsTotal} records loaded` },
+          : `${changesVerifiedN} verified by re-scan; ${changesUnverifiedN} applied but NOT verified${changeCards.length - changesVerifiedN - changesUnverifiedN > 0 ? `; ${changeCards.length - changesVerifiedN - changesUnverifiedN} with no recorded verification status` : ''}${diffsComplete ? '' : ` · Partial: ${allDiffs.length} of ${diffsTotal} records loaded`}` },
       { key: 'findingsVerifiedResolved', label: 'Findings verified resolved', value: findingsVerified,
-        detail: fixedVN ? `Across ${crit(fixedVN)} whose saved edit cleared the re-scan` : 'No saved edit has a recorded re-scan result' },
+        // THREE counts, each named in its own unit and never spanned across another. Phrasing one
+        // as "N changes across M criteria" produced "one verified change across zero criteria" when
+        // a verified change belonged to a criterion the coverage rows did not carry as FIXED.
+        detail: ledger === 'per_finding'
+          ? `Counted finding by finding from the resolution ledger. Saved changes verified by re-scan: ${changesVerifiedN}.`
+          : `NOT RECORDED — ${acc?.accountingReason || 'no per-finding record links a saved change to the finding it resolved'}. `
+            + `Saved changes verified by re-scan: ${changesVerifiedN}. `
+            + `Criteria those changes belong to: ${verifiedChangeCriteriaN}. `
+            + 'Findings are a third count, with no evidence here.' },
       { key: 'findingsRemaining', label: 'Findings remaining', value: findingsRemaining,
-        detail: fixedPN ? `Excludes ${crit(fixedPN)} with a saved edit awaiting re-validation` : `Across ${crit(failN)}` },
-      { key: 'humanChecksPending', label: 'Human checks pending', value: humanN,
-        detail: `${crit(humanN)} a person must verify${attestedN ? `; ${attestedN} already attested` : ''}` },
+        detail: findingsRemaining == null
+          // The server's reason is stated once, on the row above; repeating it here cost the
+          // one-page summary three lines and said nothing new.
+          ? (facts
+            ? (assessState && assessState !== 'assessed'
+              ? `Not recorded — the assessment state is "${assessState}", so no open-finding count can be read from it. Zero is not the answer.`
+              : 'The current assessment did not report an open-finding count (see the row above).')
+            : `NOT RECORDED — ${fixedFindingsN} finding${fixedFindingsN === 1 ? '' : 's'} sit on criteria with a saved edit and no per-finding record says which of them the edit resolved.`)
+          : facts
+            ? `From the current assessment's finding list${assessment && assessment.findingsComplete === false ? ' (PARTIAL — the list is not complete)' : ''}`
+            : `On ${crit(failN)} with open findings` },
+      { key: 'humanChecksPending', label: 'Human checks pending', value: unverifiedUnavailable ? null : humanN + humanOutstandingN,
+        detail: unverifiedUnavailable
+          ? `Not recorded — the changes awaiting review could not be read. ${crit(humanN)} a person must verify from the coverage rows.`
+          : `${crit(humanN)} a person must verify${attestedN ? `; ${attestedN} already attested` : ''}${changeCards.length ? `; ${humanOutstandingN} of ${changeCards.length} saved changes await a reviewer decision${humanUnknown ? ' (decisions were not loaded, so none count as confirmed)' : ''}` : ''}` },
       { key: 'checksNotPerformed', label: 'Checks not performed', value: uncheckedN,
-        detail: 'Criteria with no automated check for this file type and no recorded human result — not counted as passing' },
+        detail: 'No automated check for this file type and no recorded human result — not counted as passing' },
     ],
   })
-  blocks.push({
+  if (atLeast('reviewer')) blocks.push({
     k: 'stageStrip',
     items: [
       { key: 'suggestions', label: 'Suggestions', value: hitlN, status: hitlN == null ? 'unknown' : hitlN > 0 ? 'done' : 'not_started',
         detail: hitlN == null ? 'AI and rule suggestions were not loaded into this report' : `${plural(hitlN, 'suggestion', 'suggestions')} recorded for review` },
       { key: 'savedEdits', label: 'Saved edits', value: editsSaved, status: statusOfStage(editsSaved),
         detail: editsSaved == null ? 'Not recorded' : `${plural(editsSaved, 'change', 'changes')} written to the corrected copy` },
-      { key: 'technicalChecks', label: 'Technical re-checks', value: fixedVN,
-        status: fixedPN ? 'pending' : fixedVN ? 'done' : 'not_started',
-        detail: `${crit(fixedVN)} verified by re-scan${fixedPN ? `; ${crit(fixedPN)} awaiting re-validation` : ''}` },
-      { key: 'humanConfirmation', label: 'Human confirmation', value: reviewsLoaded ? decided : null,
-        status: !changeCards.length ? 'not_started' : !reviewsLoaded ? 'unknown' : awaitingN ? 'pending' : 'done',
-        detail: !changeCards.length ? 'No saved changes to confirm'
+      { key: 'technicalChecks', label: 'Technical re-checks', value: changesVerifiedN,
+        status: unverifiedUnavailable ? 'unknown' : changesUnverifiedN || fixedPN ? 'pending' : changesVerifiedN || fixedVN ? 'done' : 'not_started',
+        detail: `${plural(changesVerifiedN, 'saved change', 'saved changes')} verified by re-scan; ${changesUnverifiedN} applied but not verified${fixedPN ? `; ${crit(fixedPN)} awaiting re-validation` : ''}` },
+      { key: 'humanConfirmation', label: 'Human confirmation', value: unverifiedUnavailable ? null : reviewsLoaded ? confirmedN : null,
+        status: unverifiedUnavailable ? 'unknown' : !changeCards.length ? 'not_started' : !reviewsLoaded ? 'unknown' : humanOutstandingN ? 'pending' : 'done',
+        detail: unverifiedUnavailable ? 'The changes awaiting review could not be read'
+          : !changeCards.length ? 'No saved changes to confirm'
           : !reviewsLoaded ? (reviewsError ? `Reviewer decisions could not be read: ${reviewsError}` : 'Reviewer decisions were not loaded into this report')
-          : `${decided} of ${changeCards.length} changes decided${staleN ? `; ${staleN} stale because the file changed` : ''}` },
+          : `${confirmedN} of ${changeCards.length} changes confirmed; ${decided} decided${humanOutstandingN ? ` · outstanding: ${humanParts.join('; ')}` : ''}` },
       { key: 'publication', label: 'Publication', value: null,
         status: d.publishedAt ? 'done' : d.publishedAt === null ? 'not_started' : 'unknown',
         detail: d.publishedAt ? `Published ${d.publishedAt}` : d.publishedAt === null ? 'Not published' : 'Publication status not recorded in this report' },
     ],
   })
+  // Summary is ONE page: the counts above, what is outstanding, the next action, and identity +
+  // scope/comparison below. The per-criterion breakdown belongs to the Reviewer packet.
+  if (atLeast('reviewer')) {
   H('Criteria outcomes', 2)
   blocks.push({
     k: 'bullets',
@@ -272,11 +477,14 @@ export function buildFileReportModel(d = {}) {
       attestedN ? `${crit(attestedN)} manually attested by a human (verified outside ACP) — see Dispositions` : null,
       oosN ? `${crit(oosN)} recorded out of scope for this engagement — see Dispositions` : null,
       uncheckedN ? `${crit(uncheckedN)} not auto-checked for this file type — reported, not assumed passing` : null,
+      changeCards.length ? `${changesVerifiedN} of ${changeCards.length} saved changes verified by re-scan; ${changesUnverifiedN} applied by AI but not verified` : null,
+      changeCards.length ? (humanUnknown ? 'Reviewer decisions were not loaded, so no saved change can be reported as confirmed' : `${confirmedN} of ${changeCards.length} saved changes confirmed by a reviewer`) : null,
       ready ? 'No outstanding items: the evidence supports a publication decision.' : 'Next step: work through Remaining work and Changes to confirm, then re-validate.',
     ].filter(Boolean),
     o: {},
   })
   T(`Assessment score: ${d.score != null ? `${d.score}/100` : NR} — a secondary indicator. The counts above are the decision evidence.`, { size: 9, color: MUTED })
+  }
 
   // ── Identity ────────────────────────────────────────────────────────────────────────────
   H('Document identity')
@@ -289,8 +497,11 @@ export function buildFileReportModel(d = {}) {
     rows: [
       ['Document', orNR(identity.file)],
       ['Assessment (scan) id', orNR(identity.scanId)],
-      ['Source SHA-256', orNR(identity.sourceSha256)],
+      ['Source checksum', `${orNR(identity.sourceSha256 ?? identity.sourceChecksum)}${identity.sourceChecksumKind ? ` (${identity.sourceChecksumKind})` : ''}`],
       ['Corrected copy SHA-256', orNR(identity.correctedSha256)],
+      ['Version reviewed', identity.currentArtifact
+        ? `${identity.currentArtifact.kind === 'corrected' ? 'Corrected copy' : identity.currentArtifact.kind === 'source' ? 'Original' : 'Unknown'} · ${orNR(identity.currentArtifact.sha256)}`
+        : NR],
       ['Artifact version', orNR(identity.artifactVersion)],
       ['Target', `WCAG 2.1 Level ${level}`],
       ['Report generated', orNR(identity.generatedAt)],
@@ -301,34 +512,55 @@ export function buildFileReportModel(d = {}) {
   })
 
   // ── Since the previous assessment ───────────────────────────────────────────────────────
+  // Only a REAL comparable snapshot — same document identity, same scope, findings itemised on both
+  // sides — produces a comparison. Aggregate counts are never subtracted to imply a change: "12 last
+  // time, 9 now" says nothing about WHICH findings, and a different scope explains it just as well.
   H('Since the previous assessment')
-  const currentFindings = c.fail.concat(c.fixedPending).some((r) => !(r.fileIssues || []).length && (r.count || 0) > 0)
-    ? null
-    : rows.filter((r) => r.outcome === 'FAIL' || (r.outcome === 'FIXED' && !c.isVerified(r)) || (r.fileIssues || []).some((i) => i.severity === 'REVIEW'))
-      .flatMap((r) => r.fileIssues || [])
-  // Current findings come from the SAME server record shape the previous snapshot was built
-  // from (d.currentFindings, stream C), so ids match; the rows are only the fallback.
-  const comparison = buildComparison(d.previous, {
-    file: identity.file,
-    scope: d.scope === undefined ? { targetLevel: level } : d.scope,
-    findings: Array.isArray(d.currentFindings) ? d.currentFindings : currentFindings,
-  })
-  if (!d.previous && typeof d.previousReason === 'string' && d.previousReason.trim()) comparison.reason = d.previousReason.trim()
+  const scopeParts = [
+    `WCAG 2.1 Level ${level}`,
+    `${inScopeN} in-scope criteria`,
+    oosN ? `${crit(oosN)} recorded out of scope` : null,
+    facts && fid.scopeDigest ? `scope digest ${String(fid.scopeDigest).slice(0, 12)}` : null,
+    facts && fid.scanScope ? `scan scope ${fid.scanScope}` : null,
+  ].filter(Boolean)
+  // One line. The comparison block immediately below already states why a snapshot is or is not
+  // comparable, so repeating the rule here costs a line the summary page does not have.
+  T(`Scope of this assessment: ${scopeParts.join(' · ')}.${atLeast('reviewer') ? ' A comparison is only reported against a snapshot of the same document with the same scope.' : ''}`, { size: 9, color: MUTED })
+  let comparison
+  if (facts) {
+    comparison = buildComparisonFromFacts(facts, { locationHref: d.locationHref })
+  } else {
+    const currentFindings = c.fail.concat(c.fixedPending).some((r) => !(r.fileIssues || []).length && (r.count || 0) > 0)
+      ? null
+      : rows.filter((r) => r.outcome === 'FAIL' || (r.outcome === 'FIXED' && !c.isVerified(r)) || (r.fileIssues || []).some((i) => i.severity === 'REVIEW'))
+        .flatMap((r) => r.fileIssues || [])
+    // Current findings come from the SAME server record shape the previous snapshot was built
+    // from (d.currentFindings, stream C), so ids match; the rows are only the fallback.
+    comparison = buildComparison(d.previous, {
+      file: identity.file,
+      scope: d.scope === undefined ? { targetLevel: level } : d.scope,
+      findings: Array.isArray(d.currentFindings) ? d.currentFindings : currentFindings,
+    })
+    if (!d.previous && typeof d.previousReason === 'string' && d.previousReason.trim()) comparison.reason = d.previousReason.trim()
+  }
   blocks.push(comparison)
 
   // ── Reviewer packet ─────────────────────────────────────────────────────────────────────
   if (atLeast('reviewer')) {
     H('Changes to confirm')
     if (changeCards.length) {
-      T(`${plural(changeCards.length, 'saved change', 'saved changes')} recorded for this file. Technical verification (the re-scan) and human confirmation are separate: a verified change can still be wrong in context.${diffsComplete ? '' : ` Partial: ${allDiffs.length} of ${diffsTotal ?? 'an unknown number of'} change records were available.`}`, { size: 9, color: MUTED })
+      T(`${plural(changeCards.length, 'saved change', 'saved changes')} recorded for this file: ${changesVerifiedN} verified by re-scan and ${changesUnverifiedN} applied by AI but NOT verified. Technical verification (the re-scan) and human confirmation are separate: a verified change can still be wrong in context, and an unverified one has had neither check.${diffsComplete ? '' : ` Partial: ${allDiffs.length} of ${diffsTotal ?? 'an unknown number of'} change records were available.`}`, { size: 9, color: MUTED })
       blocks.push({ k: 'callout', text: RESPONSE_NOTICE, o: { color: PLUM } })
       if (!reviewsLoaded) T(reviewsError ? `Reviewer decisions could not be read (${reviewsError}), so every change below shows as awaiting confirmation.` : 'Reviewer decisions were not loaded, so every change below shows as awaiting confirmation.', { color: AMBER })
+      if (unverifiedUnreadableNote) T(unverifiedUnreadableNote, { bold: true, color: AMBER })
       if (storedClipNote) T(storedClipNote, { color: AMBER })
       if (previewReason) T(previewReason, { size: 9, color: MUTED })
       const cap = mode === 'full' ? null : REVIEWER_CARD_CAP
       const b = boundList(changeCards, cap)
       b.shown.forEach((x) => blocks.push(x))
       if (b.omitted) T(`${b.omitted} more saved change${b.omitted === 1 ? '' : 's'} (of ${b.total}) are listed in the Full evidence report.`, { bold: true })
+    } else if (unverifiedUnreadableNote) {
+      T(unverifiedUnreadableNote, { bold: true, color: AMBER })
     } else if (diffsError) {
       T(`Saved changes could not be read: ${diffsError} Nothing is listed here for that reason — not because there are none.`, { color: AMBER })
     } else if (fixedPN + fixedVN > 0) {
@@ -358,15 +590,23 @@ export function buildFileReportModel(d = {}) {
     // Checklist by area — never "Pass" over an unchecked or unverified criterion.
     H('Checklist by area')
     const catAgg = {}
+    const catOf = (cat) => catAgg[cat] || (catAgg[cat] = { fail: 0, human: 0, pending: 0, unchecked: 0, unverified: 0, confirm: 0, ok: 0 })
     rows.forEach((r) => {
       if (r.disposition?.kind === 'out_of_scope') return
-      const cat = CAT_OF(r.id)
-      const a = catAgg[cat] || (catAgg[cat] = { fail: 0, human: 0, pending: 0, unchecked: 0, ok: 0 })
+      const a = catOf(CAT_OF(r.id))
       if (r.outcome === 'FAIL') a.fail++
       else if (r.outcome === 'HUMAN' && !r.disposition) a.human++
       else if (r.outcome === 'FIXED' && !c.isVerified(r)) a.pending++
       else if (r.outcome === 'UNCHECKED' && !r.disposition) a.unchecked++
       else a.ok++
+    })
+    // A criterion whose rows all read clean can still carry an unverified edit or an unconfirmed
+    // reviewer decision. "✓ No outstanding items" over an area that holds one of those is the same
+    // kind of overstatement as "Pass" over an unchecked criterion.
+    changeCards.forEach((x) => {
+      const a = catOf(CAT_OF(x.criterion || ''))
+      if (x.verification === 'not_verified') a.unverified++
+      if (isHumanOutstanding(x.human.status) || !reviewsLoaded) a.confirm++
     })
     blocks.push({
       k: 'table',
@@ -379,8 +619,12 @@ export function buildFileReportModel(d = {}) {
           a.human ? `◐ ${a.human} human review` : null,
           a.pending ? `… ${a.pending} awaiting re-validation` : null,
           a.unchecked ? `— ${a.unchecked} not checked` : null,
+          a.unverified ? `… ${a.unverified} AI edit(s) not verified` : null,
+          a.confirm ? `◐ ${a.confirm} change(s) awaiting a reviewer decision` : null,
         ].filter(Boolean)
-        return [cat, parts.length ? parts.join(' · ') : '✓ No outstanding items']
+        return [cat, parts.length ? parts.join(' · ')
+          : unverifiedUnavailable ? '— changes awaiting review could not be read'
+          : '✓ No outstanding items']
       }),
       widths: [CW - 220, 220],
     })
@@ -512,26 +756,46 @@ export function buildFileReportModel(d = {}) {
       caption: 'Saved change records',
       rows: changeCards.map((x) => [
         x.id, x.title, locationLabel(x.location), x.reason || 'Reason not recorded',
-        technicalText(x.technical.status),
+        x.verification ? verificationText(x.verification) : technicalText(x.technical.status),
         `${humanText(x.human.status)}${x.human.reviewer ? ` — ${x.human.reviewer}` : ''}${x.human.at ? ` at ${x.human.at}` : ''}`,
         appliedAt[x.criterion] || NR,
-        (x.beforeStoredClipped || x.afterStoredClipped) ? `At the ${storeCap}-character storage limit; may be incomplete` : 'Complete as stored',
+        x.valueClipped ? `Clipped by the store at ${storeCap ?? 'its'} characters when recorded; the untruncated text was not kept` : 'Complete as stored',
       ]),
     })
-    const findings = rows.flatMap((r) => (r.fileIssues || []).map((i) => ({ r, i })))
-    blocks.push({
-      k: 'appendixTable',
-      id: 'appendix-findings',
-      complete: !anyUncounted(rows) && rows.every((r) => !(r.count > 0) || (r.fileIssues || []).length > 0),
-      totalRecords: findings.length,
-      limitNote: 'criteria whose findings were counted but not itemised',
-      headers: ['Finding id', 'Criterion', 'Severity', 'Location', 'Detail', 'Criterion outcome'],
-      caption: 'All findings',
-      rows: findings.map(({ r, i }) => [
-        i.id, `${r.id} · ${r.plain || r.name}`, i.severity || NR, locationLabel(i.location), i.detail || NR,
-        r.outcome === 'FIXED' ? (c.isVerified(r) ? 'Fixed · verified' : 'Fixed · awaiting re-validation') : (COV_OUT_TXT[r.outcome] || r.outcome),
-      ]),
-    })
+    // With facts the findings appendix is the server's per-finding list, each row carrying that
+    // finding's OWN state — not its criterion's outcome, which is what let one verified change read
+    // as "every finding of 1.1.1 resolved".
+    if (factsFindingList) {
+      blocks.push({
+        k: 'appendixTable',
+        id: 'appendix-findings',
+        complete: assessment?.findingsComplete !== false,
+        totalRecords: Number.isFinite(assessment?.findingsTotal) ? assessment.findingsTotal : factsFindingList.length,
+        limitNote: assessment?.findingsComplete === false ? 'the findings the assessment recorded for this request' : null,
+        headers: ['Finding id', 'Criterion', 'Severity', 'Location', 'Detail', 'State of this finding', 'Why'],
+        caption: 'All findings',
+        rows: factsFindingList.map((i) => [
+          i.id, `${i.sc || i.ruleId || NR}`, i.severity || NR, locationLabel(i.location), i.detail || NR,
+          FINDING_STATE_TXT[i.state] || i.state || NR, i.stateReason || NR,
+        ]),
+      })
+    } else {
+      const findings = rows.flatMap((r) => (r.fileIssues || []).map((i) => ({ r, i })))
+      blocks.push({
+        k: 'appendixTable',
+        id: 'appendix-findings',
+        complete: !anyUncounted(rows) && rows.every((r) => !(r.count > 0) || (r.fileIssues || []).length > 0),
+        totalRecords: findings.length,
+        limitNote: 'criteria whose findings were counted but not itemised',
+        headers: ['Finding id', 'Criterion', 'Severity', 'Location', 'Detail', 'Criterion outcome'],
+        caption: 'All findings',
+        rows: findings.map(({ r, i }) => [
+          i.id, `${r.id} · ${r.plain || r.name}`, i.severity || NR, locationLabel(i.location), i.detail || NR,
+          // A CRITERION outcome, said as one. It is not a statement about this finding.
+          r.outcome === 'FIXED' ? (c.isVerified(r) ? 'Criterion fixed · verified (not a per-finding result)' : 'Criterion fixed · awaiting re-validation') : (COV_OUT_TXT[r.outcome] || r.outcome),
+        ]),
+      })
+    }
     const reviewRows = changeCards.filter((x) => x.human.status !== 'pending')
     blocks.push({
       k: 'appendixTable',
@@ -575,14 +839,19 @@ export function buildFileReportModel(d = {}) {
   }
 
   // ── What this report is ─────────────────────────────────────────────────────────────────
-  H('What this report is, and is not')
-  blocks.push({
-    k: 'callout',
-    text: `This report records what ACP checked, changed and verified for "${fileName}" against the WCAG 2.1 Level ${level} criteria in this engagement's scope. It is not a conformance determination, a certification or legal advice. It can support an ADA, Section 508 or EN 301 549 / European Accessibility Act review as evidence, alongside a qualified human evaluation.`,
-    o: tone(ready),
-  })
-  T(`Generated: ${generated || generatedAt}${d.platformVersion ? ` · Platform v${d.platformVersion}` : ''} · ${MODE_LABEL[mode]}`, { size: 9, color: MUTED, gapAfter: 4 })
-  T(RESPONSE_NOTICE, { size: 8, color: MUTED, lh: 12 })
+  // Methodology and disclaimer prose belong to the Reviewer packet and Full evidence. A one-page
+  // summary that spends a third of its page on them is not a summary — the identity table already
+  // states the target, and the Full evidence report carries the standing.
+  if (atLeast('reviewer')) {
+    H('What this report is, and is not')
+    blocks.push({
+      k: 'callout',
+      text: `This report records what ACP checked, changed and verified for "${fileName}" against the WCAG 2.1 Level ${level} criteria in this engagement's scope. It is not a conformance determination, a certification or legal advice. It can support an ADA, Section 508 or EN 301 549 / European Accessibility Act review as evidence, alongside a qualified human evaluation.`,
+      o: tone(ready),
+    })
+    T(`Generated: ${generated || generatedAt}${d.platformVersion ? ` · Platform v${d.platformVersion}` : ''} · ${MODE_LABEL[mode]}`, { size: 9, color: MUTED, gapAfter: 4 })
+    T(RESPONSE_NOTICE, { size: 8, color: MUTED, lh: 12 })
+  }
 
   const base = fileName.replace(/\.[^.]+$/, '')
   return {
@@ -596,6 +865,30 @@ export function buildFileReportModel(d = {}) {
     // Kept for callers of the old certification model. Now true ONLY under the evidence-truth rule.
     fullyConformant: ready,
     ready,
+    // The three things `ready` is made of, kept separate so a caller can never mistake one for
+    // another: the re-scan, the reviewer, and whether findings are accounted for one by one.
+    technicalReady,
+    humanConfirmation: {
+      loaded: reviewsLoaded,
+      changes: changeCards.length,
+      confirmed: confirmedN,
+      outstanding: humanOutstandingN,
+      correctionRequested: byHuman('correction_requested'),
+      rejected: byHuman('rejected'),
+      unable: byHuman('unable'),
+      stale: staleN,
+      freshnessUnknown: byHuman('freshness_unknown'),
+      pending: awaitingN,
+    },
+    savedChanges: { verified: changesVerifiedN, unverified: changesUnverifiedN, total: changeCards.length },
+    findingsAccounting: {
+      ledger: ledger ?? 'none',
+      resolvedVerified: findingsVerified,
+      remaining: findingsRemaining,
+      attributed: findingsAttributed,
+    },
+    assessmentState: assessState,
+    factsDigest: identity.factsDigest,
     footerVersion: d.platformVersion,
     footerGenerated: generated,
     cover: {
