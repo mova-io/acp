@@ -7,10 +7,10 @@ import { requiresPdfSourceEditing } from './pdfStructuralProposal.js'
 const RECOVERABLE_DRAFT = new Set(['Missing proposal', 'Version unavailable — review individually',
   'Stale — refresh and review', 'Invalid structural proposal — refresh suggestions'])
 const GROUPS = [
-  { key: 'recovery', label: 'Recovery checks', nextStep: 'Check AI activity or the saved failure reason, then refresh the suggestion or retry an eligible operation. Recovery is not guaranteed; no automatic retry is implied, and saved permissions and spending limits still apply.' },
-  { key: 'unsupported', label: 'Automatic repair unavailable', nextStep: 'Use the source document or a PDF accessibility editor to repair the structure, then reassess the corrected copy. The recorded suggestion is not an automatic PDF tagging operation.' },
-  { key: 'human', label: 'Human decisions or manual edits', nextStep: 'Open Needs your input to review an available suggestion or complete the requested document edit. Check the result against the source before approving.' },
-  { key: 'unknown', label: 'Status needs investigation', nextStep: 'Open Status checks and inspect the saved evidence or Live Operations. The current record does not establish an available recovery action or a human decision.' },
+  { key: 'recovery', label: 'Potential recovery', nextStep: 'Check AI activity for the blocker, then refresh or retry when eligible.' },
+  { key: 'unsupported', label: 'Automatic repair unavailable', nextStep: 'Repair the structure in the source document or a PDF accessibility editor, then reassess the corrected copy.' },
+  { key: 'human', label: 'Human decisions or manual edits', nextStep: 'Review the suggestion or edit the source document.' },
+  { key: 'unknown', label: 'Status needs investigation', nextStep: 'Inspect the saved evidence or Live Operations to identify the next step.' },
 ]
 
 // Partition pending review items, not scanner findings or documents. Reuse the

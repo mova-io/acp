@@ -33,11 +33,20 @@ it('renders specific next steps and explicit limits on recovery promises', () =>
   expect(html).toContain('Automatic repair unavailable · 1 review item')
   expect(html).toContain('Human decisions or manual edits · 2 review items')
   expect(html).toContain('Status needs investigation · 1 review item')
-  expect(html).toContain('no automatic retry is implied')
-  expect(html).toContain('saved permissions and spending limits still apply')
+  expect(html).toContain('Potential recovery')
+  expect(html).toContain('retry when eligible')
   expect(html).toContain('then reassess the corrected copy')
 })
 it('does not turn an empty or completed review list into a claim that findings are resolved', () => {
   expect(unresolvedWorkSummary([draft(1,{status:'verified'})]).total).toBe(0)
   expect(renderToStaticMarkup(<RemainingWorkStatus rows={[]} />)).toBe('')
+})
+
+it('uses next steps available with automatic approval either on or off', () => {
+  for (const automatic of [true, false]) {
+    const html=renderToStaticMarkup(<RemainingWorkStatus automatic={automatic} rows={mixed} />)
+    expect(html).toContain('Inspect the saved evidence or Live Operations')
+    expect(html).not.toContain('Open Status checks')
+    expect(html).not.toContain('Open Needs your input')
+  }
 })
