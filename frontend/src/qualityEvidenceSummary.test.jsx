@@ -46,3 +46,8 @@ it('reservation-only activity shows held cost without claiming a model ran',()=>
  expect(html).not.toContain('configured')
  expect(html).toContain('0 findings')
 })
+
+it.each([undefined, 'local'])('does not infer a cloud route from Quality-first alone (%s)',zone=>{
+ const result=qualityEvidenceSummary({view:{...view,saved_ai_policy:{level:1,quality_first:true,zone}}})
+ expect(result.mode).toBe('Quality-first requested · cloud route unconfirmed')
+})

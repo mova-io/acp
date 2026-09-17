@@ -5,7 +5,7 @@ const money = (units, currency) => count(units) && currency === 'USD'
 export function qualityEvidenceSummary({ view, metrics, verifiedFindings } = {}) {
   const policy = view?.available === true ? view.saved_ai_policy : null
   const mode = policy?.level === 0 ? 'Rules only'
-    : policy?.quality_first === true && policy?.level > 0 ? 'Quality-first cloud'
+    : policy?.quality_first === true && policy?.level > 0 ? (policy?.zone === 'any' ? 'Quality-first cloud' : 'Quality-first requested · cloud route unconfirmed')
     : policy?.zone === 'local' && policy?.level > 0 ? 'Local AI only'
     : policy?.zone === 'any' && policy?.level > 0 && policy?.quality_first === false ? 'Local and cloud AI permitted'
     : 'Saved mode unavailable'
