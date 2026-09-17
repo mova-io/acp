@@ -31,6 +31,10 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 
+// The product formats remediation timestamps in the viewer's local timezone. Pin the
+// fixture viewer to UTC so macOS and Linux build the same reference model.
+process.env.TZ = 'UTC'
+
 registerHooks({
   load(url, context, nextLoad) {
     const result = nextLoad(url, context)
