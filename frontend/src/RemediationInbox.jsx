@@ -603,7 +603,7 @@ function DetailPane({ f, decisions, readOnly = false, automaticMode = false, pre
           <p style={{ fontSize: 13.5, lineHeight: 1.5, margin: '10px 0 0' }}><b>Your task:</b> {taskLineOf(f, lane, automaticMode, decisions)}</p>
         )}
 
-        {inspectionOnly ? <section className="remediation-saved-changes" aria-label="Saved automatic changes"><h3>Saved automatic changes</h3><p>The automatic remediation change has been recorded. Browse the saved change evidence below; no approval or inspection is required.</p><p>Verification: {f.validated ? 'Recorded checks passed.' : 'This inspection record does not confirm verification. See the recorded run results.'}</p></section> : isManual ? (
+        {inspectionOnly ? <section className="remediation-saved-changes" aria-label="Saved automatic changes"><h3>Saved automatic changes</h3><p>The automatic remediation change has been recorded. Browse the saved change evidence below; no approval or inspection is required.</p><p>Verification: {f.validated ? 'Recorded checks passed.' : 'This inspection record does not confirm verification. See the recorded run results.'}</p><QualityReviewEvidence finding={f} /></section> : isManual ? (
           /* Manual / handoff: there is no applied change to judge — show HOW to make it instead. */
           <div style={{ marginTop: 18 }}>
             <ManualSteps f={f} />
