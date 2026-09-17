@@ -738,3 +738,34 @@ it('keeps explicit manual publication for copies outside the saved automatic pla
  await click(publish)
  expect(publishAllFiles.mock.calls.at(-1)[1]).toEqual(['manual.pdf'])
 })
+
+it('opens the existing Sources tab beside an authorization blocker without retrying publication', async () => {
+ const tab = document.createElement('button'); tab.id = 'workflow-tab-integrations'
+ const navigate = vi.fn(); tab.addEventListener('click', navigate); document.body.appendChild(tab)
+ try {
+  const c = await mount({ run: { ...run, source: 'sharepoint' }, files: [verified('ready.pdf')] })
+  publishAllFiles.mockRejectedValueOnce(Object.assign(new Error('Unauthorized'), { status: 401 }))
+  await click(button(c, 'Publish batch (1)'))
+  await click(button(c, 'Reconnect source in Sources'))
+  expect(navigate).toHaveBeenCalledOnce()
+  expect(publishAllFiles).toHaveBeenCalledTimes(1)
+ } finally { tab.remove() }
+})
+it('checks saved delivery after a destination failure without sending another publication', async () => {
+ const c = await mount({ run: { ...run, source: 'sharepoint' }, files: [verified('ready.pdf')] })
+ publishAllFiles.mockRejectedValueOnce(Object.assign(new Error('Missing'), { status: 404, detail: { code: 'release_destination_not_found' } }))
+ await click(button(c, 'Publish batch (1)'))
+ const before = getReleaseStatus.mock.calls.length
+ await click(button(c, 'Check delivery status'))
+ expect(getReleaseStatus.mock.calls.length).toBeGreaterThan(before)
+ expect(publishAllFiles).toHaveBeenCalledTimes(1)
+})
+it('retries eligible copies through the existing guarded handler after a temporary failure', async () => {
+ const c = await mount({ run: { ...run, source: 'sharepoint' }, files: [verified('ready.pdf')] })
+ publishAllFiles.mockRejectedValueOnce(new Error('503 temporary gateway failure'))
+ await click(button(c, 'Publish batch (1)'))
+ expect(publishAllFiles).toHaveBeenCalledTimes(1)
+ await click(button(c, 'Retry eligible copies'))
+ expect(publishAllFiles).toHaveBeenCalledTimes(2)
+ expect(publishAllFiles.mock.calls[1][1]).toEqual(['ready.pdf'])
+})

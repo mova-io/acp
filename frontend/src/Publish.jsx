@@ -30,6 +30,7 @@ import ReleaseTemplates from './ReleaseTemplates.jsx'
 import './release-plan-summary.css'
 import './release-clarity.css'
 import { hasCorrectedCopy, hasSavedCorrectedCopy, deliveryIsCurrent, releaseReadiness, canSelectRelease, releaseSourceState } from './releaseClarityModel.js'
+import ReleaseRecoveryActions from './ReleaseRecoveryActions.jsx'
 import { releaseErrorCopy } from './releaseErrorCopy.js'
 
 // Step 9 · Publish. Marks re-validated documents as published: the conformance status
@@ -633,7 +634,7 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
       if (!await recoverReleaseDestination(error, pending)) {
         const copy = releaseErrorCopy(error, sourceProduct)
         setReleaseError({ summary: 'The selected copies could not be released.', details: copy.message,
-          diagnosticCode: copy.diagnosticCode,
+          diagnosticCode: copy.diagnosticCode, retryLabel: 'Retry eligible copies',
           retry: copy.retryable ? () => publishAll(fileNames, preferredFolderName, exact) : null })
       }
     } finally {
@@ -843,6 +844,21 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
     ? automaticAuthorization : null
   const manualReady = automaticDelivery
     ? publishableReady.filter(file => !automaticDelivery.files?.includes(file.file)) : publishableReady
+  const recoveryActions = releaseError && <ReleaseRecoveryActions error={releaseError}
+    disabled={readOnly || publishing || destinationPending || automaticStatusPending}
+    destinationLocked={destinationLocked || Boolean(automaticDelivery)}
+    onReconnect={() => document.getElementById('workflow-tab-integrations')?.click()}
+    onCheckStatus={async () => {
+      const context = releaseContext.current
+      const status = await getReleaseStatus(run.id).catch(() => null)
+      if (status && ownsRelease(context)) { applyReleaseStatus(status); return true }
+      return false
+    }}
+    destinationPicker={['drive', 'sharepoint'].includes(releaseProvider) ? <ReleaseDestinationPicker
+      provider={releaseProvider} value={releaseDestination}
+      onChange={value => { setReleaseDestination(value); setReleasePreview(null); setReleaseError(null) }}
+      onError={error => setReleaseError({ summary: 'Destination unavailable', details: releaseErrorCopy(error, sourceProduct).message,
+        diagnosticCode: releaseErrorCopy(error, sourceProduct).diagnosticCode })} /> : null} />
   if (embedded) return <ReleaseDeliveryCard ready={manualReady} readyCount={publishableReady.length} automaticRelease={automaticDelivery} scopeCount={releaseFiles.length}
     publishedCount={publishedCount} deliveringCount={deliveringCount} failedCount={failedCount}
     publishing={publishing} loading={automaticStatusPending || destinationPending || (settingsPending && !destinationLocked)} readOnly={readOnly}
@@ -852,6 +868,7 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
     announcement={releaseAnnouncement} error={automaticDelivery && !manualReady.length && releaseError?.summary === 'Saved release destination restored' ? null : releaseError}
     folders={releaseFolders.length ? releaseFolders : releaseFolder?.url ? [releaseFolder] : []}>
     {driveReconnect}
+    {recoveryActions}
     {(releaseId || publishedList.length > 0) && <ReleaseReports scanId={run?.id} publishedCount={publishedCount} readOnly={readOnly} />}
   </ReleaseDeliveryCard>
 
@@ -1004,10 +1021,11 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
             <p>{releaseError.details}</p>
             <details><summary>View details</summary><p>Scan {run?.id || 'unknown'} · {sourceProduct}{releaseError.diagnosticCode ? ` · Error code: ${releaseError.diagnosticCode}` : ''}. Completed copies remain safe and original files are unchanged.</p></details>
           </div>
+          {recoveryActions}
           <div className="release-recovery__actions">
             {releaseError.retryFiles ? <button disabled={readOnly || publishing || destinationPending || !selectableReady.some(file => !done[file.file] && releaseError.retryFiles.includes(file.file))}
               onClick={() => { const names = releaseError.retryFiles; setReleaseError(null); publishAll(names, releaseFolder?.name || releaseFolderName, true) }}>Publish to saved destination</button>
-              : releaseError.retry ? <button disabled={publishing} onClick={() => { const retry = releaseError.retry; setReleaseError(null); retry() }}>{releaseError.retryLabel || 'Retry'}</button> : null}
+              : releaseError.retry ? <button disabled={readOnly || publishing} onClick={() => { const retry = releaseError.retry; setReleaseError(null); retry() }}>{releaseError.retryLabel || 'Retry'}</button> : null}
             <button className="ghost" onClick={() => document.getElementById('workflow-tab-liveops')?.click()}>Open Live Operations</button>
             <button className="ghost" onClick={() => setReleaseError(null)}>Dismiss</button>
           </div>
