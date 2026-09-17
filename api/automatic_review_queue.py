@@ -120,6 +120,12 @@ def annotate(store, rows, owner):
                     for job in writer_jobs[sid]:
                         payload = json.loads(job['payload']) if isinstance(job['payload'], str) else job['payload']
                         intent = payload.get('standing_approval') or {}
+                        if (payload.get('scan_id') == sid and payload.get('file') == item.get('file')
+                                and payload.get('item_id') == str(item['id'])):
+                            binding, refusal = store.approved_write_binding(item)
+                            if not refusal and payload.get('approved_binding') == binding:
+                                active.append(job['status'])
+                            continue
                         if (intent.get('owner') == owner and intent.get('run_id') == current['run_id'] and intent.get('source_revision') == current['source_revision'] and any(expected.get('id') == item['id'] for expected in intent.get('items', []))):
                             active.append(job['status'])
                     if item.get('validated'):
