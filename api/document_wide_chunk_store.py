@@ -39,11 +39,12 @@ class ChunkPlanStore:
         self.store, self.db = store, store._db
 
     def _authority(self, cur, owner, run_id, scan_id, snapshot, *, allowed_states):
+        lock = " FOR UPDATE OF e" if hasattr(self.db, "_url") else ""
         self.db.execute(cur, """SELECT e.owner_email,e.scan_id,e.input_snapshot_id,e.stage,
           e.is_current,e.cancel_requested_at,e.state,p.scan_id AS policy_scan
           FROM stage_executions e JOIN ai_spending_run_policies p
             ON p.owner_id=e.owner_email AND p.run_id=e.execution_id
-          WHERE e.execution_id=%s""", (run_id,))
+          WHERE e.execution_id=%s""" + lock, (run_id,))
         row = self.db.fetchone(cur)
         if (not row or
             (row['owner_email'], row['scan_id'], row['policy_scan'], row['input_snapshot_id'], row['stage']) != (owner, scan_id, scan_id, snapshot, 'remediate') or
@@ -51,7 +52,24 @@ class ChunkPlanStore:
             row['state'] not in allowed_states):
             raise ValueError('chunk plan owner/run/scan authority mismatch')
 
-    def create(self, plan: dict, chunks: list[dict]):
+    def _lock_inputs(self, cur, scan_id, file):
+        """Linearize admission with artifact and stage authority writers.
+
+        Artifact commits already lock file_records before consulting stage
+        authority, so admission uses the same file-then-stage order.
+        """
+        lock = " FOR UPDATE" if hasattr(self.db, "_url") else ""
+        self.db.execute(cur, "SELECT corrected_sha256 FROM file_records "
+                             "WHERE scan_id=%s AND file=%s" + lock,
+                        (scan_id, file))
+        record = self.db.fetchone(cur) or {}
+        self.db.execute(cur, "SELECT execution_id FROM stage_executions "
+                             "WHERE scan_id=%s ORDER BY execution_id" + lock,
+                        (scan_id,))
+        self.db.fetchall(cur)
+        return record
+
+    def _create(self, cur, plan: dict, chunks: list[dict]):
         required = ('owner_id','run_id','plan_id','scan_id','file','source_sha256',
                     'assessment_snapshot_id','remediation_source_revision','format',
                     'eligible_finding_ids','created_at')
@@ -61,35 +79,38 @@ class ChunkPlanStore:
         found = tuple(fid for chunk in chunks for fid in chunk.get('finding_ids', ()))
         if len(set(eligible)) != len(eligible) or set(found) != set(eligible) or len(found) != len(set(found)):
             raise ValueError('chunk plan must exactly partition eligible findings')
-        with self.store.transaction(), self.db.cursor() as cur:
-            self._authority(cur, plan['owner_id'], plan['run_id'], plan['scan_id'],
-                            plan['assessment_snapshot_id'],
-                            allowed_states=('accepted','queued','processing'))
-            if self.store.remediation_source_revision(plan['scan_id']) != plan['remediation_source_revision']:
-                raise ValueError('stale remediation source revision')
-            record = self.store.get_file_record(plan['scan_id'], plan['file']) or {}
-            if record.get('corrected_sha256') != plan['source_sha256']:
-                raise ValueError('stale corrected source')
-            values = tuple(plan[key] for key in required[:9]) + (_encoded(eligible), _encoded(plan), plan['created_at'])
-            self.db.execute(cur, """INSERT INTO document_wide_chunk_plans
+        record = self._lock_inputs(cur, plan['scan_id'], plan['file'])
+        self._authority(cur, plan['owner_id'], plan['run_id'], plan['scan_id'],
+                        plan['assessment_snapshot_id'],
+                        allowed_states=('accepted','queued','processing'))
+        if self.store.remediation_source_revision(plan['scan_id']) != plan['remediation_source_revision']:
+            raise ValueError('stale remediation source revision')
+        if record.get('corrected_sha256') != plan['source_sha256']:
+            raise ValueError('stale corrected source')
+        values = tuple(plan[key] for key in required[:9]) + (_encoded(eligible), _encoded(plan), plan['created_at'])
+        self.db.execute(cur, """INSERT INTO document_wide_chunk_plans
               (owner_id,run_id,plan_id,scan_id,file,source_sha256,assessment_snapshot_id,
                remediation_source_revision,format,eligible_finding_ids_json,plan_json,created_at)
               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""", values)
-            self.db.execute(cur, "SELECT * FROM document_wide_chunk_plans WHERE owner_id=%s AND run_id=%s AND plan_id=%s",
-                            (plan['owner_id'],plan['run_id'],plan['plan_id']))
-            saved = self.db.fetchone(cur)
-            if not saved or any(saved[key] != plan[key] for key in required[:9]) or saved['eligible_finding_ids_json'] != _encoded(eligible) or saved['plan_json'] != _encoded(plan):
-                raise ValueError('chunk plan identity is immutable')
-            for ordinal, chunk in enumerate(chunks):
-                values = (plan['owner_id'],plan['run_id'],plan['plan_id'],ordinal,chunk['chunk_id'],
-                          _encoded(chunk['boundary']),_encoded(tuple(chunk['finding_ids'])))
-                self.db.execute(cur, """INSERT INTO document_wide_chunks
+        self.db.execute(cur, "SELECT * FROM document_wide_chunk_plans WHERE owner_id=%s AND run_id=%s AND plan_id=%s",
+                        (plan['owner_id'],plan['run_id'],plan['plan_id']))
+        saved = self.db.fetchone(cur)
+        if not saved or saved['state'] != 'planned' or any(saved[key] != plan[key] for key in required[:9]) or saved['eligible_finding_ids_json'] != _encoded(eligible) or saved['plan_json'] != _encoded(plan):
+            raise ValueError('chunk plan identity is immutable')
+        for ordinal, chunk in enumerate(chunks):
+            values = (plan['owner_id'],plan['run_id'],plan['plan_id'],ordinal,chunk['chunk_id'],
+                      _encoded(chunk['boundary']),_encoded(tuple(chunk['finding_ids'])))
+            self.db.execute(cur, """INSERT INTO document_wide_chunks
                   (owner_id,run_id,plan_id,ordinal,chunk_id,boundary_json,finding_ids_json)
                   VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""", values)
-                self.db.execute(cur, """SELECT chunk_id,boundary_json,finding_ids_json FROM document_wide_chunks
+            self.db.execute(cur, """SELECT chunk_id,boundary_json,finding_ids_json FROM document_wide_chunks
                   WHERE owner_id=%s AND run_id=%s AND plan_id=%s AND ordinal=%s""", values[:4])
-                if self.db.fetchone(cur) != {'chunk_id': values[4], 'boundary_json': values[5], 'finding_ids_json': values[6]}:
-                    raise ValueError('chunk identity is immutable')
+            if self.db.fetchone(cur) != {'chunk_id': values[4], 'boundary_json': values[5], 'finding_ids_json': values[6]}:
+                raise ValueError('chunk identity is immutable')
+
+    def create(self, plan: dict, chunks: list[dict]):
+        with self.store.transaction(), self.db.cursor() as cur:
+            self._create(cur, plan, chunks)
 
     def complete_receipts(self, owner, run_id, plan_id, *, source_sha256,
                           assessment_snapshot_id, remediation_source_revision):

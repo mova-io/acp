@@ -25,6 +25,9 @@ def seed(store, monkeypatch):
           (execution_id,workflow_id,workflow_revision,scan_id,owner_email,stage,input_snapshot_id,
            request_fingerprint,state,created_at,updated_at) VALUES(%s,'workflow',1,%s,%s,'remediate',%s,'request','accepted','now','now')""",
           (RUN,SID,OWNER,SNAPSHOT))
+        store._db.execute(cur, "INSERT INTO file_records(scan_id,file,corrected_sha256) "
+                               "VALUES(%s,%s,%s) ON CONFLICT(scan_id,file) DO UPDATE SET "
+                               "corrected_sha256=excluded.corrected_sha256", (SID,FILE,SHA))
     monkeypatch.setattr(store, 'remediation_source_revision', lambda _sid: SOURCE)
     monkeypatch.setattr(store, 'get_file_record', lambda _sid, _file: {'corrected_sha256': SHA})
 
