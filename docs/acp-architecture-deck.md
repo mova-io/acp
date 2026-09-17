@@ -490,13 +490,15 @@ no claim ACP cannot evidence.
 
 ## Build & deploy — two automated chains
 
-The deploy is **no longer manual** (the old #1 weakness). CalVer `YYYY.M.D.N` — the count of the
+The deploy is **a pipeline** rather than a laptop (the old #1 weakness); who *starts* it is a
+separate setting, and it is currently a person. CalVer `YYYY.M.D.N` — the count of the
 day's Pacific-midnight revisions + 1 — is baked in as a build arg and surfaced at `/healthz`;
 `/readyz` reports worker-tier heartbeat age and PDF-engine availability separately.
 
-**Chain A — production (auto-triggered, human-approved).** `.github/workflows/deploy.yml` fires on
-`workflow_run` of CI completing on `main`, gated by the **`production` GitHub Environment
-(required-reviewer approval)**. It runs `deploy/public/redeploy.sh`, which independently **refuses a
+**Chain A — production (manually triggered, human-approved).** `.github/workflows/deploy.yml` is
+dispatched by a person at Actions → deploy → Run workflow, gated by the **`production` GitHub
+Environment (required-reviewer approval)**. Its `workflow_run`-on-green-`main` trigger is still
+declared but skipped unless the repo variable `PRODUCTION_AUTO_DEPLOY_ENABLED` is `1`; it is unset. It runs `deploy/public/redeploy.sh`, which independently **refuses a
 sha whose CI isn't green**, builds in ACR from an isolated clone, and updates acp-app + acp-worker
 to the **same image** (or the fixes ship nowhere useful).
 

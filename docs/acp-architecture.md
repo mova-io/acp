@@ -556,9 +556,13 @@ flowchart LR
     roll --> verify["confirm /healthz version_stamped<br/>+ /readyz ready"]
 ```
 
-- **Trigger** — `deploy.yml` fires on `workflow_run` of CI **completed** for `main` (a merge), not on
-  push (push raced CI). Plus `workflow_dispatch` (pin a sha, blue‑green). Concurrency group
-  `deploy-production`, `cancel-in-progress: false`.
+- **Trigger** — **`workflow_dispatch`, and by default only that** (pin a sha, blue‑green). The
+  `workflow_run`-on-CI-**completed**-for-`main` trigger is still declared but its job is skipped
+  unless the repo variable `PRODUCTION_AUTO_DEPLOY_ENABLED` is `1`; it is unset, so a merge does
+  not deploy. (`workflow_run` rather than push because push raced CI.) The workflow itself must
+  stay **enabled** — a disabled workflow cannot be dispatched either, which is why the automatic
+  path is switched off at the job. Concurrency group `deploy-production`,
+  `cancel-in-progress: false`.
 - **Gate** — the `production` GitHub environment has **required reviewers** (approval), and
   `redeploy.sh` independently **refuses to ship a sha whose CI isn't green**.
 - **Image** — one multi‑stage build: the `web` stage builds the SPA with `VITE_SIM=false` → `/app/static`
