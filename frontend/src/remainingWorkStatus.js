@@ -1,4 +1,5 @@
 import { reviewWorkBreakdown } from './reviewWorkBreakdown.js'
+import { unresolvedWorkSummary } from './unresolvedWorkSummary.js'
 import { pendingReviewRows } from './remediationCountSummary.js'
 
 // Recent event evidence is narration, never a substitute for the reconciled counters.
@@ -100,5 +101,5 @@ export function remainingWorkStatus({ events = [], rows = [], decisions = {}, sn
       || notice.label === 'AI usage confirmation pending'
       || notice.label === 'AI generation needs checking'
         ? 'detail' : 'action' }))
-  return { notices: consolidated, checkpoint, recovery, stalled, counts, humanCounts, statusCounts, humanTotal: humanRows.length, statusTotal: statusRows.length }
+  return { summary: unresolvedWorkSummary(rows, decisions), notices: consolidated, checkpoint, recovery, stalled, counts, humanCounts, statusCounts, humanTotal: humanRows.length, statusTotal: statusRows.length }
 }
