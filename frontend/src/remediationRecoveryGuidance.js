@@ -7,8 +7,8 @@ import { approvalSuperseded, approvedWriteUnconfirmed } from './remediationInbox
 export function remediationRecoveryGuidance(row, decisions = {}) {
   if (!row || row.validated || row.automaticQueued) return null
   // An approval is on record and no longer binds. Stated FIRST, and with no retry offer: the
-  // branch below would otherwise tell this reviewer their approval stands and will never be asked
-  // for again, which is exactly the promise a superseded approval cannot keep. The backend's retry
+  // branch below offers a version-checked retry, which a superseded approval cannot authorize.
+  // The backend's retry
   // gate refuses this row too ("The document has changed since this was approved"), so a button
   // here would only produce that refusal.
   if (approvalSuperseded(row, decisions)) return {
@@ -23,14 +23,15 @@ export function remediationRecoveryGuidance(row, decisions = {}) {
     staleApproval: true,
   }
   // Approved, and the approved value was never written. The reviewer's approval is recorded and
-  // will not be requested again, so this pane must not offer an approval — it offers a retry of
+  // must be checked against the current version, so this pane offers a retry of
   // the WRITE, and states the writer's own recorded reason rather than inventing one.
   if (approvedWriteUnconfirmed(row, decisions)) return {
     title: 'Approved — the change has not been written yet',
     reason: row.automaticDisposition?.reason
       || 'ACP has your approval on record, but no confirmed write of the approved value exists for this finding.',
-    next: 'Your approval stays recorded — ACP will not ask for it again, and approving this suggestion '
-      + 'a second time would change nothing. Retry writing the approved value, or open the remediation '
+    next: 'Your approval stays recorded. Retry checks that the document and suggestion still match '
+      + 'the approved versions. Matching records need no second approval; changed or missing version '
+      + 'records require review. Retry writing the approved value, or open the remediation '
       + 'plan to read the writer’s recorded outcome for this item. Until a write is confirmed this '
       + 'finding stays unresolved and is still reported as remaining.',
     plan: true,
