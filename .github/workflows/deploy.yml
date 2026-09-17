@@ -14,7 +14,18 @@
 name: deploy
 
 on:
-  # AUTO, BUT AFTER CI — NOT ON PUSH. The first cut of this triggered on `push: [main]`, which
+  # MANUAL BY DEFAULT. `workflow_dispatch` is always allowed and is how production ships. The
+  # `workflow_run` trigger below still exists, but its job is SKIPPED unless the repository
+  # variable PRODUCTION_AUTO_DEPLOY_ENABLED is '1' — see the job's `if`. It is unset, so no merge
+  # to `main` deploys on its own.
+  #
+  # The gate is a variable rather than Settings -> Actions -> deploy -> Disable workflow because
+  # A DISABLED WORKFLOW CANNOT BE DISPATCHED EITHER: switching the automatic trigger off that way
+  # also removes the manual button, and re-enabling it to ship one thing re-arms the automatic
+  # trigger in the same click. Leave the workflow ENABLED and the variable UNSET.
+  #
+  # AND WHEN IT IS OPTED IN, IT IS STILL AFTER CI — NOT ON PUSH. The first cut of this triggered
+  # on `push: [main]`, which
   # raced the commit's own CI: a merge fires deploy.yml and ci.yml at the same instant, and
   # redeploy.sh's gate REFUSES to ship a commit whose CI has not passed. So every push-triggered
   # deploy died at "no CI run found for <sha>" before touching anything (PR #221 shipped exactly
@@ -71,9 +82,17 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    # Gate whether this deploy FIRES. A manual dispatch is always allowed (the operator chose it);
-    # an automatic run requires the CI workflow that triggered it to have concluded 'success', so a
-    # red merge does not even queue a deploy (workflow_run fires on 'completed' regardless).
+    # Gate whether this deploy FIRES. A manual dispatch is always allowed (the operator chose it).
+    # An AUTOMATIC run needs two things: the CI workflow that triggered it must have concluded
+    # 'success' (workflow_run fires on 'completed' regardless, so a red merge must not queue a
+    # deploy), AND PRODUCTION_AUTO_DEPLOY_ENABLED must be '1'. Unset — the default — is not '1',
+    # so the automatic path is inert and this workflow is manual-only.
+    #
+    # '1' rather than a true/false spelling on purpose. GitHub's `==` compares strings
+    # CASE-INSENSITIVELY, so a 'true' gate would also accept 'TRUE' and 'True'; a digit has no
+    # case to argue about and no near-miss that silently arms production. Arm it at Settings ->
+    # Secrets and variables -> Actions -> Variables; delete the variable to disarm. Repository-
+    # scoped, because an environment-scoped variable is not resolvable in a job `if`.
     #
     # This no longer decides what SHIPS. The steps below deploy main's live tip at approval time,
     # not this triggering commit, so the guarantee that the shipped commit is green comes from
@@ -81,7 +100,8 @@ jobs:
     # red triggering run is pure noise: it would only reach the script's gate and be refused.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
+      (github.event.workflow_run.conclusion == 'success' &&
+       vars.PRODUCTION_AUTO_DEPLOY_ENABLED == '1')
     # A GitHub Environment with required reviewers is the approval gate. Configure it at
     # Settings -> Environments -> production. Without reviewers this deploys unattended once CI is
     # green, which is a deliberate choice, not the trigger's doing.

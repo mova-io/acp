@@ -10,11 +10,11 @@ Two chains start from one event — a PR merged to `acp/main` — and then never
 **Chain A** keeps the public WCAG matrix in step with the code. It is automatic and finishes in
 minutes.
 
-**Chain B** puts the code in production. It is `deploy.yml`, and since #221/#222 it runs
-**automatically**: a merge to `main` runs CI, and when that CI completes green a `workflow_run`
-trigger fires the deploy for the exact commit CI just greenlit. A person no longer *triggers* it —
-but the `production` GitHub Environment still gates it, so a reviewer approves before it reaches
-the container.
+**Chain B** puts the code in production. It is `deploy.yml`, and it is **manual by default**:
+a person starts it at Actions → deploy → Run workflow, and the `production` GitHub Environment
+still gates it, so a reviewer approves before it reaches the container. The automatic
+`workflow_run`-on-green-`main` trigger #221/#222 added is still there, but its job is skipped
+unless the repository variable `PRODUCTION_AUTO_DEPLOY_ENABLED` is `1`, and it is unset.
 
 That asymmetry used to be the single most important thing on this page: **the matrix could be
 perfectly accurate about code that was not deployed.** For most of 2026-07-29 it was, and
@@ -36,9 +36,9 @@ exactly that on the very merge that enabled it; #222 moved the trigger to the CI
               ┌──────────────────────┴──────────────────────┐
               │                                             │
    ═══════ CHAIN A: matrix sync ═══════        ═══════ CHAIN B: app deploy ═══════
-              │  (automatic)                                │  (deploy.yml — auto on CI success)
+              │  (automatic)                                │  (deploy.yml — MANUAL by default)
               ▼                                             ▼
-   matrix-progress-log.yml                        1. pin  PIN=workflow_run.head_sha
+   matrix-progress-log.yml                        1. pin  PIN=dispatch input, else main's tip
    scans the pushed commits:                         └─ gate: CI on PIN must be green
      (a) Matrix-Note: trailers → count            2. clone to /tmp/acp-deploy, checkout PIN
      (b) capability sources touched?                 └─ the shared checkout is written by many
@@ -127,15 +127,30 @@ vendored the engine, which is what unblocked this. And `redeploy.sh` had to reso
 PATH — `actions/setup-dotnet` never creates `~/.dotnet/dotnet`, so the old hard-coded default
 would have failed on the one host CD runs on.
 
-It is **automatic** now. The trigger is `workflow_run` on the CI workflow completing on `main`,
-plus `workflow_dispatch` for a manual pin or a blue-green run; the job's `if` runs only when the
-triggering CI concluded `success`, so a red `main` is skipped rather than deployed. Both the
-checkout `ref` and `ACP_PIN` use `github.event.workflow_run.head_sha` — the exact commit CI
-greenlit, not a moving "current `main`". Deploying every merge was the goal; the honest starting
-point was a person pressing the button on a pipeline nobody had watched run, which is why it began
-as dispatch-only and flipped to automatic once it had shipped uneventfully. The `production`
-GitHub Environment is what keeps that safe — required reviewers live there, not in the trigger, so
-"automatic" means auto-*triggered* and still human-*approved*, not unattended to production.
+It is **manual by default.** `workflow_dispatch` is always allowed and is how production ships —
+Actions → deploy → Run workflow, optionally with a pin, blue-green, or the emergency checkboxes.
+`workflow_run` on CI completing on `main` is still declared, but its job is **skipped** unless the
+repository variable `PRODUCTION_AUTO_DEPLOY_ENABLED` is `1`. Unset, the default, means no merge
+deploys on its own.
+
+The gate is a variable rather than Settings → Actions → deploy → Disable workflow because **a
+disabled workflow cannot be dispatched either**: switching the automatic trigger off there also
+removes the manual button, and re-enabling it to ship one thing re-arms the automatic trigger in
+the same click. So the workflow stays **enabled** and the variable stays **unset**.
+`'1'` rather than a `true`/`false` spelling because GitHub's `==` compares strings
+case-insensitively — a digit has no near-miss that silently arms production.
+`tests/test_deploy_manual_only_default.py` evaluates the job's `if` against each event × variable
+combination rather than grepping it.
+
+When the automatic path *is* armed the `if` additionally requires the triggering CI to have
+concluded `success`, so a red or cancelled `main` is skipped: opting in re-arms the trigger, it
+does not lower the bar that trigger clears.
+
+What SHIPS is a separate question from what fires. Since #238 the checkout `ref` and `ACP_PIN` are
+a dispatch's resolved pin, or `main` — main's live tip **at checkout time, after any approval
+wait** — not a sha frozen when the run was created. `redeploy.sh`'s own CI gate then refuses
+whatever that resolves to unless CI is green on it. The `production` GitHub Environment is what
+keeps this safe: required reviewers live there, not in the trigger.
 
 **One-time setup, all of it outside this repo:**
 
@@ -145,6 +160,12 @@ GitHub Environment is what keeps that safe — required reviewers live there, no
 | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | repo → Settings → Secrets |
 | `ACP_FQDN` (the app hostname, no scheme) | repo → Settings → Variables |
 | `production` environment + required reviewers | repo → Settings → Environments |
+| the workflow left **enabled** (a disabled one cannot be dispatched) | repo → Actions → deploy |
+
+`PRODUCTION_AUTO_DEPLOY_ENABLED` (repo → Settings → Variables) is optional and deliberately
+absent. Set it to `1` to let a green merge deploy again; delete it to return to manual-only. It is
+a repository variable rather than an environment one because an environment-scoped variable is not
+resolvable in a job `if`.
 
 The service principal needs Contributor on the `mdk-accessibility` resource group and AcrPush on
 the registry — no more. OIDC federation is used deliberately over a stored client secret: a
@@ -155,8 +176,8 @@ only step that cannot be verified from here.
 
 ### Chain B — staging (unattended)
 
-`deploy.yml` is auto-*triggered* but human-*approved*: production only moves when someone clears
-the `production` gate, so its CalVer legitimately sits behind `main` while an approval waits.
+`deploy.yml` is manually *triggered* and human-*approved*: production only moves when someone
+dispatches it and clears the `production` gate, so its CalVer legitimately sits behind `main` while an approval waits.
 `.github/workflows/deploy-staging.yml` is the complement — it ships the **same green commit** to a
 staging container app with **no reviewer gate**, so `main`'s tip is live *somewhere* within
 minutes of every merge. It reuses `redeploy.sh` unchanged; the only differences from prod are the
