@@ -77,3 +77,10 @@ describe('WorkspaceProgress (component)', () => {
     expect(container.textContent).toContain('0 of 4 actions complete')
   })
 })
+
+it('shows pending action counts instead of an effort-based countdown when nothing is processing', async () => {
+  const { root, container } = createTestRoot()
+  await act(async () => root.render(createElement(WorkspaceProgress, {queue:[{id:1,file:'a.docx'},{id:2,file:'a.docx'}]})))
+  expect(container.textContent).toContain('2 actions awaiting an outcome')
+  expect(container.textContent).not.toMatch(/About .* remaining/)
+})

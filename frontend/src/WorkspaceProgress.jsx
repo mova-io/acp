@@ -1,7 +1,7 @@
 import { docProgress, workflowStatusOf } from './remediationInboxModel.js'
 
 // The persistent progress bar above the three-pane remediation workspace. It answers "how close is
-// THIS document to done?" at a glance — resolved/total actions, a percent, and an effort-based ETA —
+// THIS document to done?" at a glance — resolved/total actions, a percent, and remaining action counts —
 // so a reviewer working a long file always sees the finish line without counting rows in the queue.
 //
 // Per-document by design (it reports the SELECTED finding's file); before anything is selected it
@@ -34,7 +34,7 @@ export default function WorkspaceProgress({ queue = [], decisions = {}, selected
           {completed} of {p.total} action{p.total === 1 ? '' : 's'} complete
         </span>
         <span style={{ marginLeft: 'auto', fontSize: 12.5, fontWeight: 600, color: done ? '#1f9d6b' : 'var(--ink)' }}>
-          {done ? 'Complete ✓' : processing ? `${processing} applying / awaiting verification` : p.remainingLabel}
+          {done ? 'Complete ✓' : processing ? `${processing} applying / awaiting verification` : `${p.total - completed} actions awaiting an outcome`}
         </span>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>
