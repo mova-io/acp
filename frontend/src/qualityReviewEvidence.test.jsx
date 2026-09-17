@@ -111,3 +111,21 @@ it('mounts recorded saved comparisons in the real inbox without demanding approv
  expect(container.textContent).toContain('Column header associated')
  expect(container.textContent).toContain('inspection is required')
 })
+it('uses actual applied record evidence rather than relabelling a proposal as saved', async () => {
+ const { container } = await render(QualityReviewEvidence, { finding:{ applied:true, after:'Unapplied proposed caption',
+  proposals:[{proposed_value:'Unapplied proposed caption'}], _raw:{applied:true, approved_value:'Saved edited caption'} } })
+ const saved = container.querySelector('[aria-label="Recorded before and after"]')
+ expect(saved.textContent).toContain('Saved edited caption')
+ expect(saved.textContent).not.toContain('Unapplied proposed caption')
+ expect(container.textContent).toContain('Saved change · verification not confirmed')
+})
+it('never treats a verified flag without application as a saved change', async () => {
+ const { container } = await render(QualityReviewEvidence, { finding:{verified:true, proposals:[{proposed_value:'Draft'}]} })
+ expect(container.textContent).toContain('Proposed change · not a saved result')
+ expect(container.querySelector('[aria-label="Recorded before and after"]')).toBeNull()
+})
+it('does not claim an auto inspection proposal is its saved excerpt', async () => {
+ const { container } = await render(QualityReviewEvidence, { finding:{autoApplied:true, after:'Proposal only',
+  _raw:{inspection_only:true}, proposals:[{proposed_value:'Proposal only'}]} })
+ expect(container.querySelector('[aria-label="Recorded before and after"]').textContent).toContain('Saved change excerpt unavailable')
+})
