@@ -39,11 +39,11 @@ it.each(['automatic','unknown'])('never shows Complete when %s batch delivery ca
   expect(container.querySelector('.workflow-stage-stack__summary').textContent).not.toContain('Complete')
   expect(container.textContent).not.toContain('undefined')
 })
-it('retains completion of the approved request when manual scope is positively established', () => {
+it('names finished processing of the approved request when manual scope is positively established', () => {
   container=document.createElement('div');document.body.appendChild(container);root=createRoot(container)
   act(() => root.render(<WorkflowStageStack lineage={{scan_id:'scan',workflow_revision:1,
     stages:[snapshot({available:false,scope:'manual'})]}}/>))
-  expect(container.querySelector('.workflow-stage-stack__summary').textContent).toContain('Complete')
+  expect(container.querySelector('.workflow-stage-stack__summary').textContent).toContain('Publication processing finished')
   expect(container.querySelector('.workflow-stage-stack__summary').textContent).toContain('1 of 1 requested documents')
 })
 
