@@ -43,23 +43,62 @@ def _legacy_asset_identity(release, row, asset):
 
 
 def _published_copy_changed(store, sid, owner, release):
-    """Live repair records cannot describe different, already-published bytes."""
-    published = {d['file']: str(d.get('artifact_digest') or '').removeprefix('sha256:')
-                 for d in release['documents'] if d.get('status') == 'published' and
-                 re.fullmatch(r'(?:sha256:)?[0-9a-f]{64}', str(d.get('artifact_digest') or ''))}
-    if not published:
-        return False
-    records = store.get_file_records(sid, owner=owner, files=list(published))
-    return any((records.get(file) or {}).get('corrected_sha256') and
-               records[file]['corrected_sha256'] != digest for file, digest in published.items())
+    """Live repair records cannot describe different, already-published bytes.
+
+    "Published" means the copy the provider HOLDS: a failed or interrupted retry keeps the
+    previously published copy there, so its retained digest counts too.
+    """
+    return bool(_copy_currency(store, sid, owner, release)[0])
 
 
 REPORT_COPY_CHANGED = 'The saved copy changed after publication. Keep the recorded reports, or publish the updated copy before refreshing them.'
+REPORT_RELEASE_CHANGED = 'Release changed while preparing reports; retry with the current release'
+
+
+def report_superseded(exc: Exception) -> bool:
+    """The two refusals that mean "these reports would describe a different copy" — not faults.
+
+    A publish job that already delivered its copy must not fail on them: the copy landed, and
+    the out-of-date state is surfaced by the currency projection instead.
+    """
+    return isinstance(exc, ValueError) and str(exc) in {REPORT_COPY_CHANGED, REPORT_RELEASE_CHANGED}
+
+
+def _copy_currency(store, sid, owner, release, assets=()):
+    """Compare what the frozen reports describe with the current corrected copy, per file.
+
+    Evaluated on every read, independently of the fingerprint: a correction saved after
+    publication leaves the release documents — and so the fingerprint — unchanged, which is
+    how reports describing V1 went on reading as current once V2 was saved.
+    """
+    from release_publication import held_copy
+    held = {}
+    for document in release['documents']:
+        evidence, digest = held_copy(document)
+        if evidence:
+            held[document['file']] = digest
+    if not held:
+        return [], []
+    records = store.get_file_records(sid, owner=owner, files=sorted(held))
+    reported = {asset['file']: asset['artifact_digest'] for asset in assets
+                if asset.get('file') and re.fullmatch(r'sha256:[0-9a-f]{64}', str(asset.get('artifact_digest') or ''))}
+    changed, legacy = [], []
+    for file in sorted(held):
+        current = (records.get(file) or {}).get('corrected_sha256')
+        if not current:
+            continue
+        if held[file] is None:
+            legacy.append(file)
+        elif held[file] != current:
+            changed.append(dict(file=file, reported_artifact_digest=reported.get(file) or 'sha256:' + held[file],
+                                current_artifact_digest='sha256:' + current))
+    return changed, legacy
 
 
 def _public(row, store=None):
     if not row:
-        return dict(status='not_started', bundle_id=None, reports=[], error=None)
+        return dict(status='not_started', bundle_id=None, reports=[], error=None,
+                    currency=None, currency_reason=None, out_of_date_files=[])
     reports = []
     legacy_release = store.release_status(row['release_id'], row['owner_email']) if store and any(not asset.get('report_kind') for asset in row['assets']) else None
     for index, asset in enumerate(row['assets']):
@@ -72,9 +111,19 @@ def _public(row, store=None):
     release = store.release_status(row['release_id'], row['owner_email']) if store else None
     outdated = bool(row['status'] == 'completed' and release and
                     _fingerprint(row['release_id'], release)[:24] != row['id'])
-    changed = outdated and _published_copy_changed(store, row['scan_id'], row['owner_email'], release)
-    return dict(status=row['status'], bundle_id=row['id'], scan_id=row['scan_id'], release_id=row['release_id'], reports=reports, error=row.get('error'), can_regenerate=outdated and not changed,
-                regeneration_blocked=REPORT_COPY_CHANGED if changed else None)
+    copy_changed, legacy = (_copy_currency(store, row['scan_id'], row['owner_email'], release, row['assets'])
+                            if release else ([], []))
+    # Regeneration is refused whenever live repair records would describe different bytes —
+    # now whether or not the fingerprint moved. Retrying delivery of a frozen bundle that has
+    # not completed is not regeneration, and stays as it was.
+    blocked = row['status'] == 'completed' and bool(copy_changed)
+    currency, reason = (('unknown', None) if not release else
+                        ('out_of_date', 'copy_changed_after_publication') if copy_changed else
+                        ('out_of_date', 'release_changed') if outdated else
+                        ('unknown', 'legacy_identity') if legacy else ('current', None))
+    return dict(status=row['status'], bundle_id=row['id'], scan_id=row['scan_id'], release_id=row['release_id'], reports=reports, error=row.get('error'), can_regenerate=outdated and not blocked,
+                regeneration_blocked=REPORT_COPY_CHANGED if blocked else None,
+                currency=currency, currency_reason=reason, out_of_date_files=copy_changed)
 
 
 def _enqueue(store, row):

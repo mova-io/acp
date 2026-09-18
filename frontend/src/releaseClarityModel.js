@@ -4,7 +4,20 @@ export const hasCorrectedCopy = (file) => (file.compliant === true || file.compl
 
 export const hasSavedCorrectedCopy = (file) => Boolean(file.remediated_at && file.corrected_sha256)
 
+// Exact artifact identity, shortened for reading: "sha256:02701e61…". Never invents a digest.
+export const shortDigest = (digest) => {
+  if (!digest) return 'version unavailable'
+  const match = /^(?:sha256:)?([0-9a-f]{8})[0-9a-f]*$/i.exec(String(digest))
+  return match ? `sha256:${match[1].toLowerCase()}…` : String(digest)
+}
+export const digestHex = (digest) => String(digest || '').replace(/^sha256:/i, '')
+
+// Server-authored publication verdicts (GET /scans/{sid}/release documents[i].publication_state).
+// Anything other than 'current' means the receipt must not be read as the current copy.
+const NON_CURRENT_PUBLICATION = new Set(['out_of_date', 'identity_unknown', 'publishing', 'failed', 'not_published'])
+
 export function deliveryIsCurrent(file, result, done = {}) {
+  if (result?.publication_state && NON_CURRENT_PUBLICATION.has(result.publication_state)) return false
   if (result && result.status !== 'published') return false
   if (result?.artifact_digest && file.corrected_sha256) return result.artifact_digest === `sha256:${file.corrected_sha256}`
   const publishedAt = result?.published_at || file.published_at
@@ -17,6 +30,11 @@ export function deliveryIsCurrent(file, result, done = {}) {
 
 export function releaseReadiness(file, { done = {}, results = {}, sourceState = () => undefined, pending = {}, processing = {}, blockers = {}, allowRemainingIssues = false } = {}) {
   const result = results[file.file]
+  if (result?.publication_state === 'out_of_date') return { status: 'out_of_date', label: 'Published copy out of date',
+    reason: `A correction was saved after publication. Delivered version ${shortDigest(result.published_artifact_digest)}; current corrected copy ${shortDigest(result.current_artifact_digest)}. The delivered copy and its reports describe the earlier version.` }
+  if (result?.publication_state === 'identity_unknown') return { status: 'unconfirmed', label: 'Published version unconfirmed',
+    reason: 'ACP can’t confirm which version was published: this receipt has no version fingerprint, so it is not shown as current. Reconcile that delivery before publishing again.' }
+  if (result?.publication_state === 'publishing') return { status: 'delivering', label: 'Publishing updated copy', reason: 'The updated copy is being published. Reports refresh after it finishes.' }
   if (deliveryIsCurrent(file, result, done)) return { status: 'released', label: 'Delivered', reason: 'Delivery recorded. Originals unchanged.' }
   if (result?.status === 'failed' && result.failure_category === 'no_corrected_copy' && result.recovery_explanation) return { status: 'attention', label: 'No saved copy', reason: result.recovery_explanation }
   if (result?.status === 'interrupted') return { status: 'attention', label: 'Delivery not confirmed', reason: result.explanation || 'No active publishing job remains. Check the destination and receipt before retrying.' }

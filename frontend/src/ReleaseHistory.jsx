@@ -17,6 +17,13 @@ const outcome = (release) => [
   release.remaining ? `${release.remaining} remaining` : null,
 ].filter(Boolean).join(' · ')
 
+// Prefer the server's publication verdict over the raw execution status when it is present: a
+// release whose copy was corrected after publication is not "completed" from the reader's view.
+const PUBLICATION_STATUS = { current: 'Published (current copy)', out_of_date: 'Published copy out of date',
+  identity_unknown: 'Published version unconfirmed', publishing: 'Publishing', attention: 'Needs attention', not_published: 'Not published' }
+const DOCUMENT_PUBLICATION = { out_of_date: 'Published copy out of date', identity_unknown: 'Published version unconfirmed', publishing: 'Publishing updated copy' }
+const releaseStatusLabel = (release) => PUBLICATION_STATUS[release.publication?.state] || release.status || 'unknown'
+
 export default function ReleaseHistory({ refreshKey, loadHistory = listReleaseHistory,
   loadManifest = getReleaseManifest }) {
   const [state, setState] = useState({ loading: true, releases: [], error: '' })
@@ -69,7 +76,7 @@ export default function ReleaseHistory({ refreshKey, loadHistory = listReleaseHi
             <dl className="release-history__facts">
               <dt>Execution</dt><dd><code>{release.release_id}</code></dd>
               <dt>Source</dt><dd>{release.source || 'Connected source'}</dd>
-              <dt>Status</dt><dd>{release.status || 'unknown'}</dd>
+              <dt>Status</dt><dd>{releaseStatusLabel(release)}</dd>
               <dt>Updated</dt><dd>{when(release.updated_at)}</dd>
               <dt>Destination</dt><dd>{(release.destinations || []).length ? (release.destinations || []).map((item, index) => (
                 <span key={`${item.location}-${index}`}>{index > 0 && ' · '}{item.folder_url
@@ -83,7 +90,7 @@ export default function ReleaseHistory({ refreshKey, loadHistory = listReleaseHi
                 <div key={`${document.file}-${index}`} className={document.status === 'failed' ? 'release-history__document release-history__document--failed' : 'release-history__document'}>
                   <b>{document.file}</b>
                   <span>{document.status === 'failed' ? `Failed · ${document.explanation || document.failure_category || 'Retry this copy'}`
-                    : `${document.created ? 'Created' : 'Reused'} · ${document.verification || 'verification unavailable'}${document.checksum ? ` · SHA-256 ${document.checksum}` : ''}`}</span>
+                    : `${DOCUMENT_PUBLICATION[document.publication_state] ? `${DOCUMENT_PUBLICATION[document.publication_state]} · ` : ''}${document.created ? 'Created' : 'Reused'} · ${document.verification || 'verification unavailable'}${document.checksum ? ` · SHA-256 ${document.checksum}` : ''}`}</span>
                   {document.destination_path && <code>{document.destination_path}</code>}
                   {document.released_url && <a href={document.released_url} target="_blank" rel="noopener noreferrer">Open released copy ↗</a>}
                 </div>

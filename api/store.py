@@ -10413,8 +10413,55 @@ class Store:
             return self._db.fetchone(cur)
 
     def record_release_document(self, release_id: str, owner: str, result: dict) -> None:
-        """Upsert a safe per-document outcome without accepting a foreign release id."""
+        """Upsert a safe per-document outcome without accepting a foreign release id.
+
+        Also SETTLES release_executions.status in the same transaction. It used to be written
+        'running' at insert and never again, so a release whose every document had published —
+        with its stage execution succeeded and its reports delivered — still read 'running' in
+        the durable column. The rule is project_delivery's: 'completed' once every counted
+        document is published, 'attention' when any failed, otherwise 'running'.
+
+        Lock the execution row FIRST (the same `SET id=id` idiom release_report_delivery uses),
+        so concurrent receipts serialize and the count below always sees every committed
+        receipt; locking it after the document row would invert the order other writers take.
+        Existing rows are only corrected by this normal write path — there is deliberately no
+        backfill of legacy rows.
+
+        A FAILURE NEVER ERASES A DELIVERED COPY'S RECEIPT. Once a row has published an exact
+        artifact (published_at + a `sha256:` tag), that copy stays at the provider whatever a
+        later attempt does — a republish of a newer correction that fails, or a stale job
+        retried after the copy changed. Writing status='failed' over it recorded a successful
+        delivery as failed, and three failure categories also stamp the ATTEMPTED digest, which
+        made the row claim bytes the provider never received. So the row keeps its published
+        identity (status, digest, location, verification) and records only the latest attempt's
+        failure_category/explanation; the currency projection (release_publication) then reports
+        it out_of_date against the current copy, with the retry still offered.
+        """
         with self._db.cursor() as cur:
+            self._db.execute(cur,
+                "UPDATE release_executions SET id=id WHERE id=%s AND owner_email=%s",
+                (release_id, owner))
+            if result.get("status") == "failed":
+                self._db.execute(cur,
+                    "SELECT d.* FROM release_documents d JOIN release_executions e "
+                    "ON e.id=d.release_id WHERE d.release_id=%s AND d.file=%s AND e.owner_email=%s",
+                    (release_id, result["file"], owner))
+                held = self._db.fetchone(cur)
+                if (held and held.get("published_at")
+                        and re.fullmatch(r"sha256:[0-9a-f]{64}", str(held.get("artifact_digest") or ""))):
+                    result = {"file": result["file"], "status": "published",
+                              "source_document_id": held.get("source_document_id"),
+                              "original_relative_path": held.get("source_relative_path"),
+                              "released_relative_path": held.get("destination_relative_path"),
+                              "released_document_id": held.get("released_document_id"),
+                              "published_url": held.get("released_document_url"),
+                              "corrected_checksum": held.get("corrected_checksum"),
+                              "verification": held.get("verification"),
+                              "created": held.get("created_result"),
+                              "published_at": held["published_at"],
+                              "artifact_digest": held["artifact_digest"],
+                              "failure_category": result.get("failure_category"),
+                              "explanation": result.get("explanation")}
             self._db.execute(cur,
                 "INSERT INTO release_documents(release_id,file,source_document_id,"
                 "source_relative_path,destination_relative_path,released_document_id,"
@@ -10423,12 +10470,14 @@ class Store:
                 "SELECT %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s WHERE EXISTS "
                 "(SELECT 1 FROM release_executions WHERE id=%s AND owner_email=%s) "
                 "ON CONFLICT(release_id,file) DO UPDATE SET "
-                "destination_relative_path=EXCLUDED.destination_relative_path,"
+                # A queued/failed attempt carries no location or verification of its own; the
+                # previously delivered copy's must survive it (like the URL and digest below).
+                "destination_relative_path=COALESCE(EXCLUDED.destination_relative_path,release_documents.destination_relative_path),"
                 "released_document_id=COALESCE(EXCLUDED.released_document_id,release_documents.released_document_id),"
                 "released_document_url=COALESCE(EXCLUDED.released_document_url,release_documents.released_document_url),"
                 "corrected_checksum=COALESCE(EXCLUDED.corrected_checksum,release_documents.corrected_checksum),"
                 "artifact_digest=COALESCE(EXCLUDED.artifact_digest,release_documents.artifact_digest),"
-                "verification=EXCLUDED.verification,status=EXCLUDED.status,"
+                "verification=COALESCE(EXCLUDED.verification,release_documents.verification),status=EXCLUDED.status,"
                 "failure_category=EXCLUDED.failure_category,explanation=EXCLUDED.explanation,"
                 "created_result=EXCLUDED.created_result,"
                 "published_at=COALESCE(EXCLUDED.published_at,release_documents.published_at)",
@@ -10440,6 +10489,24 @@ class Store:
                  result.get("failure_category"), result.get("explanation"),
                  int(bool(result.get("created"))), result.get("published_at"), result.get("artifact_digest"),
                  release_id, owner))
+            self._db.execute(cur,
+                "SELECT e.status,e.documents_total,"
+                "SUM(CASE WHEN d.status='published' THEN 1 ELSE 0 END) AS published,"
+                "SUM(CASE WHEN d.status='failed' THEN 1 ELSE 0 END) AS failed "
+                "FROM release_executions e LEFT JOIN release_documents d ON d.release_id=e.id "
+                "WHERE e.id=%s AND e.owner_email=%s GROUP BY e.status,e.documents_total",
+                (release_id, owner))
+            row = self._db.fetchone(cur)
+            if row:
+                total = int(row["documents_total"] or 0)
+                published, failed = int(row["published"] or 0), int(row["failed"] or 0)
+                settled = ("completed" if total and published == total
+                           else "attention" if failed else "running")
+                if settled != row["status"]:
+                    self._db.execute(cur,
+                        "UPDATE release_executions SET status=%s,updated_at=%s "
+                        "WHERE id=%s AND owner_email=%s",
+                        (settled, self._now(), release_id, owner))
 
     def release_status(self, release_id: str, owner: str) -> dict | None:
         """Owner-scoped release, roots and document outcomes for retries and UI reloads."""

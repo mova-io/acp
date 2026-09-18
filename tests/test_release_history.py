@@ -5,6 +5,10 @@ from routes import scans
 
 
 class _Store:
+    def get_file_records(self, scan_id, files=None, owner=None):
+        # History projects publication currency against the owner's current corrected copies.
+        return {}
+
     def list_release_history(self, owner, limit=50):
         if owner != "owner@example.com":
             return []
@@ -41,6 +45,9 @@ def test_history_exposes_execution_destination_result_and_manifest(monkeypatch):
     assert release["documents"][0]["checksum"] == "a" * 64
     assert release["documents"][0]["verification"] == "sha256"
     assert release["manifest_url"] == "/api/scans/scan-1/release/manifest"
+    # A receipt with no exact artifact digest never reads as current.
+    assert release["publication_state"] == "identity_unknown"
+    assert release["documents"][0]["publication_state"] == "identity_unknown"
 
 
 def test_history_does_not_expose_another_owner(monkeypatch):

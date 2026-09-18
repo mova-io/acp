@@ -2,7 +2,9 @@ import { useId, useState } from 'react'
 import './release-completion-documents.css'
 import { savedCopyVerificationStatus } from './savedCopyVerificationStatus.js'
 
-const PUBLICATION_LABELS = { ready: 'Ready to publish', released: 'Published', delivering: 'Delivering', applying: 'Applying fixes', failed: 'Failed' }
+const PUBLICATION_LABELS = { ready: 'Ready to publish', released: 'Published', delivering: 'Delivering', applying: 'Applying fixes', failed: 'Failed', out_of_date: 'Published copy out of date', unconfirmed: 'Published version unconfirmed' }
+// A copy delivered before a later correction: the link opens what was delivered, named as earlier.
+const EARLIER_COPY = new Set(['out_of_date', 'unconfirmed'])
 
 export default function ReleaseCompletionDocuments({ files = [], states = [], progressDocuments, results = {}, urls = {}, filter = 'all', onFilter, readOnly, publishing, onRetry, reportsByFile = {}, reportActions, receipt, coveredFiles = [], scopeId, revision }) {
   const id = useId()
@@ -21,7 +23,7 @@ export default function ReleaseCompletionDocuments({ files = [], states = [], pr
     && (verification === 'all' || verificationState.key === verification))
   const statuses = [...new Set(rows.map(({ state }) => state.status))]
   const rowHasAction = ({ file, state, result }) => Boolean(
-    (state.status === 'released' && (urls[file.file] || result?.published_url))
+    ((state.status === 'released' || EARLIER_COPY.has(state.status)) && (urls[file.file] || result?.published_url))
     || (!coveredFiles.includes(file.file) && result?.status === 'failed' && ['ready', 'failed'].includes(state.status))
     || reportsByFile[file.file])
   const showActions = visible.some(rowHasAction)
@@ -45,6 +47,7 @@ export default function ReleaseCompletionDocuments({ files = [], states = [], pr
         <td>{verificationState.label}<small style={{ display: 'block', marginTop: 6 }}>{verificationState.reason}</small></td>
         <td><strong>{state.label}</strong><p>{state.reason}</p>{result?.published_at && <small>Receipt recorded: {new Date(result.published_at).toLocaleString()}</small>}</td>
         {showActions && <td className="release-documents-action">{state.status === 'released' && (urls[file.file] || result?.published_url) ? <a href={urls[file.file] || result.published_url} target="_blank" rel="noopener noreferrer">Open published copy</a>
+          : EARLIER_COPY.has(state.status) && (urls[file.file] || result?.published_url) ? <a href={urls[file.file] || result.published_url} target="_blank" rel="noopener noreferrer">Open earlier published copy</a>
           : !coveredFiles.includes(file.file) && result?.status === 'failed' && ['ready', 'failed'].includes(state.status) ? <button disabled={readOnly || publishing} onClick={() => onRetry([file.file])}>Retry delivery</button> : null}{reportsByFile[file.file]}</td>
         }
       </tr>)}</tbody>

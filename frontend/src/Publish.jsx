@@ -13,6 +13,7 @@ import ProgressQueueDrawer from './ProgressQueueDrawer.jsx'
 import { releaseProgressState } from './remediationLiveDocumentState.js'
 import ReleaseCopyDestination from './ReleaseCopyDestination.jsx'
 import ReleaseReports from './ReleaseReports.jsx'
+import ReleaseCorrectionNotice from './ReleaseCorrectionNotice.jsx'
 import ReleaseDeliveryCard from './ReleaseDeliveryCard.jsx'
 import { documentSelection, documentScopeSentence, documentsInSelection } from './remediableScope.js'
 import { openReport, publishFile, publishAllFiles, getReleaseStatus, getAutomaticRelease, resumeAutomaticRelease, getReleaseManifest, previewReleaseDestination, previewReleasePackage, listHitlQueue, getSettings, getSourceStatus, rescoreFile, downloadReleasePackage, prepareReleasePackage, downloadPreparedReleasePackage, getQueueJob, putMyReleaseTemplates } from './api.js'
@@ -64,6 +65,11 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
   const [releaseId, setReleaseId] = useState(null)
   const [releaseFolders, setReleaseFolders] = useState([])
   const [releaseResults, setReleaseResults] = useState({})
+  // Server-authored publication currency (GET release `publication`): a correction saved after
+  // publication makes the delivered copy and reports out of date by exact artifact identity.
+  const [publication, setPublication] = useState(null)
+  const [republishing, setRepublishing] = useState(false)
+  const [reportsRefresh, setReportsRefresh] = useState(0)
   const done = Object.fromEntries(releaseFiles.filter((file) => deliveryIsCurrent(file, releaseResults[file.file], sessionDone)).map((file) => [file.file, true]))
   const [releaseAnnouncement, setReleaseAnnouncement] = useState('')
   const [releaseError, setReleaseError] = useState(null)
@@ -122,6 +128,7 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
     frozenDestination.current = undefined
     setReleaseDestination(null); setDestinationLocked(false); setDestinationPending(true)
     setAllowRemainingIssues(false); setDone({}); setReleaseResults({}); setPubUrls({}); setReleaseId(null)
+    setPublication(null); setRepublishing(false)
     setReleaseFolder(null); setReleaseFolders([]); setReleasePreview(null); setPackagePreview(null)
     setSelectedFiles(new Set()); selectionInitialized.current = false
     setConfirm(null); setSel(null); setBuilderStep(1); setReleaseAnnouncement(''); setReleaseError(null)
@@ -448,10 +455,12 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
       releaseHadPendingRef.current = false
       notifyReleaseComplete(successful.length, failed)
     }
+    const notCurrent = successful.filter((row) => row.publication_state && row.publication_state !== 'current').length
+    const current = successful.length - notCurrent
     setReleaseAnnouncement(inFlight
       ? `${inFlight} corrected ${inFlight === 1 ? 'copy is' : 'copies are'} being released.`
       : !rows.length ? 'Delivery has not been confirmed. Refresh release status before retrying.'
-      : `${successful.length} corrected ${successful.length === 1 ? 'copy' : 'copies'} released${failed ? `; ${failed} need attention` : ''}.`)
+      : `${current} corrected ${current === 1 ? 'copy' : 'copies'} released${notCurrent ? `; ${notCurrent} published ${notCurrent === 1 ? 'copy is' : 'copies are'} out of date or unconfirmed` : ''}${failed ? `; ${failed} need attention` : ''}.`)
     return successful
   }
   const applyReleaseStatus = (status) => {
@@ -462,6 +471,7 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
       setDestinationLocked(true)
       if (status.release_folder_name) setReleaseFolderName(status.release_folder_name)
     }
+    if (status && 'publication' in status) setPublication(status.publication || null)
     return rememberRelease({
     ...status, release_folders: status.roots,
     published: (status.documents || []).map((row) => ({
@@ -475,6 +485,8 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
       created: !!row.created_result,
       failure_category: row.failure_category, explanation: row.explanation,
       recovery_explanation: row.recovery_explanation,
+      publication_state: row.publication_state, published_artifact_digest: row.published_artifact_digest,
+      current_artifact_digest: row.current_artifact_digest,
     })),
   })
   }
@@ -521,6 +533,7 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
         applyReleaseStatus(status)
         setReleaseError(null)
         const pending = (status.documents || []).some((row) => row.status === 'queued' || row.status === 'running')
+          || (status.documents || []).some((row) => row.publication_state === 'publishing') || status.publication?.state === 'publishing'
         if (pending) timer = window.setTimeout(refresh, 2000)
       } catch (error) {
         if (!live) return
@@ -536,6 +549,55 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
     // Release state is durable; reload and resume polling when the selected scan changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [run?.id, releaseOwner])
+  // After an explicit republish, follow the durable release until every republished file has
+  // settled: failed/interrupted, current, or published with a digest other than the old one.
+  const refreshReleaseStatus = async () => {
+    const context = releaseContext.current
+    try {
+      const status = await getReleaseStatus(run.id)
+      if (ownsRelease(context)) { applyReleaseStatus(status); setReleaseError(null) }
+    } catch (error) {
+      if (ownsRelease(context)) setReleaseError({ summary: 'Release progress could not be refreshed.',
+        details: error?.message || 'ACP could not reach the release status service.', retry: refreshReleaseStatus })
+    }
+    if (ownsRelease(context)) setReportsRefresh((value) => value + 1)
+  }
+  const afterRepublish = async (result, items) => {
+    const context = releaseContext.current
+    const previous = Object.fromEntries(items.map((item) => [item.file, item.published_artifact_digest || null]))
+    const settled = (row) => row && !['queued', 'running'].includes(row.status) && row.publication_state !== 'publishing'
+      && (['failed', 'interrupted'].includes(row.status) || row.publication_state !== 'out_of_date'
+        || (row.published_artifact_digest || null) !== previous[row.file])
+    setRepublishing(true)
+    setReportsRefresh((value) => value + 1)
+    try {
+      for (let attempt = 0; attempt < 180; attempt += 1) {
+        if (!ownsRelease(context)) return
+        let status
+        try { status = await getReleaseStatus(run.id) } catch (error) {
+          if (ownsRelease(context)) setReleaseError({ summary: 'The updated copy is publishing, but its progress could not be refreshed.',
+            details: error?.message || 'Publishing continues in the background.', retryLabel: 'Refresh delivery status', retry: refreshReleaseStatus })
+          return
+        }
+        if (!ownsRelease(context)) return
+        applyReleaseStatus(status)
+        setReleaseError(null)
+        const rows = status?.documents || []
+        if (items.every((item) => settled(rows.find((row) => row.file === item.file)))) {
+          rows.filter((row) => previous[row.file] !== undefined && row.status === 'published' && row.publication_state === 'current')
+            .forEach((row) => onPublish?.(row.file))
+          return
+        }
+        await new Promise((resolve) => {
+          const timer = window.setTimeout(() => { context.cancelWait = null; resolve() }, 2000)
+          context.cancelWait = () => { window.clearTimeout(timer); context.cancelWait = null; resolve() }
+        })
+      }
+      if (ownsRelease(context)) setReleaseAnnouncement('The updated copy is still publishing safely in the background. You may leave this page and return later.')
+    } finally {
+      if (ownsRelease(context)) { setRepublishing(false); setReportsRefresh((value) => value + 1) }
+    }
+  }
   const partialReleaseOptions = (fileNames) => allowRemainingIssues ? {
     allowRemainingIssues: true,
     expectedArtifacts: Object.fromEntries(ready.filter(file => fileNames.includes(file.file)).map(file => [file.file, file.corrected_sha256])),
@@ -722,6 +784,12 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
   const publishedList = publishedEntries.map((e) => e.file)
   const sourcePath = (f) => f.source_relative_path || f.parent_folder || f.file
   const failedCount = releaseFiles.filter((file) => releaseResults[file.file]?.status === 'failed').length
+  const outOfDateCount = releaseFiles.filter((file) => releaseResults[file.file]?.publication_state === 'out_of_date').length
+  const unconfirmedCount = releaseFiles.filter((file) => releaseResults[file.file]?.publication_state === 'identity_unknown').length
+  const publicationKey = JSON.stringify([publication?.state || null, (publication?.out_of_date || []).map((item) => [item.file, item.published_artifact_digest, item.current_artifact_digest])])
+  const reportsRefreshKey = `${reportsRefresh}:${publicationKey}`
+  const correctionNotice = <ReleaseCorrectionNotice scanId={run?.id} publication={publication} readOnly={readOnly}
+    busy={republishing || publishing} onRepublished={afterRepublish} onRefresh={refreshReleaseStatus} />
   const failedReady = ready.filter((f) => !done[f.file] && releaseResults[f.file]?.status === 'failed' && canSelectRelease(stateOf(f)))
   const downloadReleaseManifest = async () => {
     setManifestError('')
@@ -831,6 +899,12 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
     ? automaticAuthorization.batch_progress.file_membership : {}
   const deliveryRows = releaseFiles.map((file,index) => {
     const category = automaticCoveredFiles.includes(file.file) ? savedMembership[file.file] || 'unclassified' : null
+    // Batch membership says "published" for the request; only the receipt's publication state
+    // (or its digest, for older servers) says whether that copy is still the current one.
+    const result = releaseResults[file.file]
+    const receiptNotCurrent = result?.publication_state ? result.publication_state !== 'current'
+      : result?.status === 'published' && !deliveryIsCurrent(file, result)
+    if (category === 'published' && receiptNotCurrent) return states[index]
     return category ? ({
       published:{status:'released',label:'Published',reason:'Current corrected copy confirmed at the saved destination.'},
       waiting:{status:'waiting',label:'Waiting for delivery',reason:'ACP is waiting for processing and release checks.'},
@@ -869,7 +943,8 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
     folders={releaseFolders.length ? releaseFolders : releaseFolder?.url ? [releaseFolder] : []}>
     {driveReconnect}
     {recoveryActions}
-    {(releaseId || publishedList.length > 0) && <ReleaseReports scanId={run?.id} publishedCount={publishedCount} readOnly={readOnly} />}
+    {correctionNotice}
+    {(releaseId || publishedList.length > 0 || outOfDateCount > 0) && <ReleaseReports scanId={run?.id} publishedCount={publishedCount} readOnly={readOnly} refreshKey={reportsRefreshKey} />}
   </ReleaseDeliveryCard>
 
   return (
@@ -935,13 +1010,15 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
           {failedCount > 0 && <div className="stage-live-accounting__exception"><dt>Failed</dt><dd>{failedCount.toLocaleString()}</dd></div>}
         </dl>
         </div>
-        <ReleaseReports compact scanId={run?.id} releaseId={releaseId} files={releaseFiles} results={releaseResults} publishedCount={publishedCount} readOnly={readOnly}>
+        {correctionNotice}
+        <ReleaseReports compact scanId={run?.id} releaseId={releaseId} files={releaseFiles} results={releaseResults} publishedCount={publishedCount} readOnly={readOnly} refreshKey={reportsRefreshKey}>
         {({ reportSummary, reportsByFile }) => <ReleaseCompletionDocuments coveredFiles={automaticCoveredFiles} scopeId={savedDomain?.scope_id} revision={savedDomain?.revision} files={releaseFiles} states={deliveryRows} progressDocuments={progressDocuments} results={releaseResults} urls={pubUrls}
           filter={outcomeFilter} onFilter={setOutcomeFilter} readOnly={readOnly} publishing={publishing}
           onRetry={names => publishAll(names, releaseFolder?.name || releaseFolderName, true)} reportActions={reportSummary} reportsByFile={reportsByFile}
-          receipt={(releaseId || publishedList.length > 0) && <details className="release-receipt" aria-label="Delivery receipt"><summary>Delivery receipts and destination links</summary><section>
-          <h3>{failedCount ? 'Partial delivery receipt' : deliveringCount ? 'Delivery in progress' : 'Delivery receipt'}</h3>
-          <p><b>{publishedCount} delivered</b> · {failedCount} failed · {deliveringCount} in progress · {releaseFiles.length - publishedCount} in-scope files not delivered.</p>
+          receipt={(releaseId || publishedList.length > 0 || outOfDateCount > 0) && <details className="release-receipt" aria-label="Delivery receipt"><summary>Delivery receipts and destination links</summary><section>
+          <h3>{failedCount ? 'Partial delivery receipt' : deliveringCount ? 'Delivery in progress' : outOfDateCount || unconfirmedCount ? 'Delivery receipt — includes copies that are not current' : 'Delivery receipt'}</h3>
+          <p><b>{publishedCount} delivered</b> · {failedCount} failed · {deliveringCount} in progress · {releaseFiles.length - publishedCount - outOfDateCount - unconfirmedCount} in-scope files not delivered.</p>
+          {(outOfDateCount > 0 || unconfirmedCount > 0) && <p><b>{outOfDateCount} published {outOfDateCount === 1 ? 'copy is' : 'copies are'} out of date</b>{unconfirmedCount ? ` · ${unconfirmedCount} published ${unconfirmedCount === 1 ? 'version' : 'versions'} can’t be confirmed` : ''}. This receipt records an earlier version than the current corrected copy.</p>}
           <p className="muted">Recorded delivery within this document scope; changing the checkboxes does not change this receipt. Originals unchanged.</p>
           {releaseId && <small>Release {releaseId}</small>}
           {releaseFolders.filter((folder) => folder.url).map((folder) => <p key={folder.id}><a href={folder.url} target="_blank" rel="noopener noreferrer">Open {folder.name || 'delivery folder'} ↗</a></p>)}
