@@ -4043,8 +4043,13 @@ def _publish_release_files(sid: str, request: Request, body: dict,
             # 'publishing' with no job behind it, and an authorization for work never started — a
             # concurrent request makes that reachable no matter what the caller checked beforehand.
             # It also means a worker can never see a job whose queued receipt is not yet written.
+            #
+            # MANUAL REQUESTS ONLY. An automatic request's enqueue locks its authorization row, and
+            # the automatic tick (automatic_release.advance) locks that row BEFORE writing release
+            # receipts; holding the release row first here would invert that order into a Postgres
+            # deadlock. Automatic admission keeps its previous, unwrapped behaviour.
             import contextlib
-            admission = getattr(core.store, "transaction", None)
+            admission = None if automatic_release_id else getattr(core.store, "transaction", None)
             with admission() if callable(admission) else contextlib.nullcontext():
                 log_remaining_issue_decisions([p["file"] for p in payloads])
                 for queued in results:

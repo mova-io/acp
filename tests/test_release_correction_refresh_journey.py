@@ -895,3 +895,53 @@ def test_confirmation_for_one_document_never_authorizes_another(journey, monkeyp
     assert ANNEX in (refused.value.detail.get('files') or []), refused.value.detail
     assert queued_payloads(store) == queued_before
     assert decisions(store, 'release.remaining_issues_authorized', ANNEX) == annex_authorizations
+
+
+def test_request_that_loses_the_release_fence_leaves_no_trace(journey, monkeypatch):
+    """Parent repro /tmp/test_acp_parent_republish_fence_race.py. Two requests race for the release
+    stage: the annex republish passes every up-front check (nothing is publishing yet), and while it
+    is inside publish_files (hooked at ensure_release_execution) a FILE republish is admitted and
+    takes the release stage. The annex request then loses the single-flight fence at enqueue.
+
+    It used to have already written the annex row 'queued' and logged its remaining-issues
+    authorization, so the annex read 'publishing' with no job behind it. The queued receipts,
+    authorizations and the enqueue are now one transaction: the loser leaves nothing, and the
+    winner's admission is untouched."""
+    j = journey
+    store = j.store
+    save_annex = add_annex(j, monkeypatch, compliant=False)
+    j.save_version(V2)
+    save_annex(ANNEX_V2)
+    annex_row_before = next(d for d in store.release_for_scan(SID, OWNER)['documents'] if d['file'] == ANNEX)
+    annex_log_before = [r for r in store.list_decisions(SID) if r['file'] == ANNEX]
+    real = store.ensure_release_execution
+    fired = []
+
+    def other_request_wins(*args, **kwargs):
+        result = real(*args, **kwargs)
+        if not fired:
+            fired.append(None)   # before the inner call, which passes through this hook itself
+            fired[0] = republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True,
+                                  'remaining_issue_files': [FILE]})
+        return result
+    monkeypatch.setattr(store, 'ensure_release_execution', other_request_wins)
+    with pytest.raises(HTTPException) as lost:
+        republish({'expected_artifacts': {ANNEX: sha(ANNEX_V2)}, 'allow_remaining_issues': True,
+                   'remaining_issue_files': [ANNEX]})
+    assert lost.value.status_code == 409, lost.value.detail
+    assert fired and fired[0].get('republished') == [FILE], fired
+
+    # The loser left nothing: the annex receipt is exactly as it was, no job, no authorization.
+    annex_row = next(d for d in store.release_for_scan(SID, OWNER)['documents'] if d['file'] == ANNEX)
+    assert annex_row == annex_row_before, (annex_row_before, annex_row)
+    assert annex_row['status'] == 'published' and annex_row['artifact_digest'] == tag(ANNEX_V1)
+    annex_doc = next(d for d in get_release()['documents'] if d['file'] == ANNEX)
+    assert annex_doc['publication_state'] == 'out_of_date', annex_doc
+    queued = queued_payloads(store)
+    assert not [p for p in queued if p['file'] == ANNEX], queued
+    assert [r for r in store.list_decisions(SID) if r['file'] == ANNEX] == annex_log_before
+
+    # The winner's admission is intact: its queued receipt and its V2 job.
+    assert [(p['file'], p['artifact_digest']) for p in queued] == [(FILE, tag(V2))], queued
+    assert document(get_release())['status'] == 'queued'
+    assert len(decisions(store, 'release.republish_authorized', FILE)) == 1
