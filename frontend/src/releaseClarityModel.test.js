@@ -5,7 +5,10 @@ const corrected = { file: 'a.pdf', compliant: 1, remediated_at: '2026-09-01' }
 describe('Release corrected-copy contract', () => {
   it('matches the existing backend eligibility boundary without inferring from score', () => {
     const routes = readFileSync('../api/routes/scans.py', 'utf8')
-    expect(routes).toContain('release_ready(row, allow_remaining_issues)')
+    // Per-file remaining-issue authorization (republish's remaining_issue_files) wraps the same
+    // boundary: the request-wide flag still admits every file, a listed file admits only itself.
+    expect(routes).toContain('release_ready(row, allowed(row.get("file")))')
+    expect(routes).toContain('return allow_remaining_issues or name in authorized_files')
     expect(hasCorrectedCopy(corrected)).toBe(true)
     for (const file of [{ score: 100 }, { compliant: true }, { compliant: null, remediated_at: '2026-09-01' }, { compliant: 'false', remediated_at: '2026-09-01' }]) {
       expect(hasCorrectedCopy(file)).toBe(false)

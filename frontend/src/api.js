@@ -1767,20 +1767,29 @@ export const REPUBLISH_ERROR_MESSAGES = {
   republish_blocked: 'The updated copy cannot be published yet. Approved changes may still be applying, or another publication is in progress.',
   release_not_found: 'No saved release was found for this scan. Refresh release status.',
 }
-export const republishRelease = (scanId, { expected_artifacts, allow_remaining_issues = false } = {}) => (SIM
+// remaining_issue_files names exactly the files whose confirmation box was ticked; the server
+// refuses any file needing confirmation that is not listed (409, detail.files).
+export const republishRelease = (scanId, { expected_artifacts, allow_remaining_issues = false, remaining_issue_files } = {}) => (SIM
   ? Promise.reject(new Error('Publishing an updated copy is unavailable in demo mode.'))
   : fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/release/republish`, {
       method: 'POST',
       headers: headers({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ expected_artifacts, allow_remaining_issues: allow_remaining_issues === true }),
+      body: JSON.stringify({ expected_artifacts, allow_remaining_issues: allow_remaining_issues === true,
+        ...(Array.isArray(remaining_issue_files) ? { remaining_issue_files } : {}) }),
     }).then(j).catch((error) => {
-      const code = (error?.detail && typeof error.detail === 'object' ? error.detail.code : null) || error?.code
+      const detail = error?.detail && typeof error.detail === 'object' ? error.detail : null
+      const code = detail?.code || error?.code
       if (code) error.code = code
-      const serverMessage = error?.detail && typeof error.detail === 'object' ? error.detail.message : null
-      if (REPUBLISH_ERROR_MESSAGES[code]) error.message = REPUBLISH_ERROR_MESSAGES[code]
+      if (Array.isArray(detail?.files)) error.files = detail.files
+      const serverMessage = detail?.message || null
+      if (code === 'remaining_issues_confirmation_required' && error.files?.length) {
+        error.message = `${error.files.join(', ')} still ${error.files.length === 1 ? 'has' : 'have'} remaining issues. Refresh release status, confirm publishing ${error.files.length === 1 ? 'that version' : 'those versions'} with remaining issues recorded, then try again.`
+      } else if (code === 'republish_blocked' && serverMessage) error.message = serverMessage
+      else if (REPUBLISH_ERROR_MESSAGES[code]) error.message = REPUBLISH_ERROR_MESSAGES[code]
       else if (serverMessage) error.message = serverMessage
       else if (/^\[object Object\]$/.test(error?.message || '')) error.message = 'The updated copy could not be published.'
-      if (code === 'artifact_changed') error.refreshRequired = true
+      // Both mean the page's view of the current copy is stale: re-read before asking again.
+      if (code === 'artifact_changed' || code === 'remaining_issues_confirmation_required') error.refreshRequired = true
       throw error
     }))
 export const getReleaseStatus = (scanId) => (SIM

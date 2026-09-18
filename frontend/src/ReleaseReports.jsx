@@ -47,7 +47,7 @@ export default function ReleaseReports({ scanId, publishedCount = 0, readOnly = 
   // Report currency (GET release/reports `currency`): a completed bundle can still describe an
   // earlier version of a copy that was corrected after publication. Never call that current.
   const staleFiles = (state?.out_of_date_files || []).filter(item => item?.file)
-  const currency = state?.currency && state.currency !== 'current' && !['queued', 'publishing', 'failed'].includes(state?.status) ? state.currency : null
+  const currency = state?.currency && state.currency !== 'current' && !['queued', 'publishing'].includes(state?.status) ? state.currency : null
   const staleByFile = Object.fromEntries(staleFiles.map(item => [item.file, item]))
   const currencyText = currency === 'out_of_date'
     ? (state.currency_reason === 'release_changed' ? 'Reports are out of date: the release changed after they were generated.'
@@ -64,7 +64,7 @@ export default function ReleaseReports({ scanId, publishedCount = 0, readOnly = 
     {!compact && <strong>Scan summary and per-file checklists</strong>}
     {children && state?.release_id && state.release_id !== releaseId && <p className="muted">Reports describe release {state.release_id}; document actions below describe the current release.</p>}
     {!compact && <p>Verified fixes, applied but unverified changes, remaining issues, and incomplete checks are recorded separately. Remaining work is a follow-up checklist; publication does not certify accessibility.</p>}
-    <p role="status">{!state ? (error ? '' : 'Checking reports…') : currency ? currencyText : state.status === 'completed' ? (state.reports?.length && state.reports.every(report => /^https?:\/\//i.test(report.url || '')) ? 'Reports saved alongside the published files.' : 'Reports are ready to download.') : state.status === 'failed' ? 'Files may be published, but report delivery needs attention.' : ['queued', 'publishing'].includes(state.status) ? 'Preparing and saving reports alongside the published files…' : 'Reports are generated after files are published with reporting enabled.'}</p>
+    <p role="status">{!state ? (error ? '' : 'Checking reports…') : currency ? `${currencyText}${state.status === 'failed' ? ' The latest report delivery also needs attention.' : ''}` : state.status === 'completed' ? (state.reports?.length && state.reports.every(report => /^https?:\/\//i.test(report.url || '')) ? 'Reports saved alongside the published files.' : 'Reports are ready to download.') : state.status === 'failed' ? 'Files may be published, but report delivery needs attention.' : ['queued', 'publishing'].includes(state.status) ? 'Preparing and saving reports alongside the published files…' : 'Reports are generated after files are published with reporting enabled.'}</p>
     {currency === 'out_of_date' && staleFiles.length > 0 && <ul aria-label="Out-of-date reports">{staleFiles.map(item => <li key={item.file}>{item.file}: reports describe <code>{shortDigest(item.reported_artifact_digest)}</code>; current corrected copy <code>{shortDigest(item.current_artifact_digest)}</code></li>)}</ul>}
     {!!headerReports.length && <ul>{headerReports.map(reportLink)}</ul>}
     {state?.status === 'not_started' && <button type="button" className="linklike" onClick={() => setRefresh(n => n + 1)}>Refresh reports</button>}

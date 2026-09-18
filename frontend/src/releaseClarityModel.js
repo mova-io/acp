@@ -33,7 +33,7 @@ export function releaseReadiness(file, { done = {}, results = {}, sourceState = 
   if (result?.publication_state === 'out_of_date') return { status: 'out_of_date', label: 'Published copy out of date',
     reason: `A correction was saved after publication. Delivered version ${shortDigest(result.published_artifact_digest)}; current corrected copy ${shortDigest(result.current_artifact_digest)}. The delivered copy and its reports describe the earlier version.` }
   if (result?.publication_state === 'identity_unknown') return { status: 'unconfirmed', label: 'Published version unconfirmed',
-    reason: 'ACP can’t confirm which version was published: this receipt has no version fingerprint, so it is not shown as current. Reconcile that delivery before publishing again.' }
+    reason: 'ACP can’t confirm which version was published or whether it is the current copy: a version fingerprint is missing, so it is not shown as current. Reconcile that delivery before publishing again.' }
   if (result?.publication_state === 'publishing') return { status: 'delivering', label: 'Publishing updated copy', reason: 'The updated copy is being published. Reports refresh after it finishes.' }
   if (deliveryIsCurrent(file, result, done)) return { status: 'released', label: 'Delivered', reason: 'Delivery recorded. Originals unchanged.' }
   if (result?.status === 'failed' && result.failure_category === 'no_corrected_copy' && result.recovery_explanation) return { status: 'attention', label: 'No saved copy', reason: result.recovery_explanation }

@@ -549,8 +549,7 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
     // Release state is durable; reload and resume polling when the selected scan changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [run?.id, releaseOwner])
-  // After an explicit republish, follow the durable release until every republished file has
-  // settled: failed/interrupted, current, or published with a digest other than the old one.
+  // After an explicit republish, follow the durable release until publication is no longer in flight.
   const refreshReleaseStatus = async () => {
     const context = releaseContext.current
     try {
@@ -562,31 +561,40 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
     }
     if (ownsRelease(context)) setReportsRefresh((value) => value + 1)
   }
+  // Settled means publication is no longer in flight, whatever the outcome. A failed republish
+  // leaves the delivered receipt untouched (published, out_of_date, same digest) and reports the
+  // refusal as publication.out_of_date[i].last_attempt_failure, so digest movement is NOT the test.
+  // Returns 'current' | 'failed' (settled but still out of date) | 'settled' | 'pending' | 'unknown'.
   const afterRepublish = async (result, items) => {
     const context = releaseContext.current
-    const previous = Object.fromEntries(items.map((item) => [item.file, item.published_artifact_digest || null]))
-    const settled = (row) => row && !['queued', 'running'].includes(row.status) && row.publication_state !== 'publishing'
-      && (['failed', 'interrupted'].includes(row.status) || row.publication_state !== 'out_of_date'
-        || (row.published_artifact_digest || null) !== previous[row.file])
+    const files = items.map((item) => item.file)
+    const settled = (status) => status?.publication?.state !== 'publishing' && files.every((file) => {
+      const row = (status?.documents || []).find((item) => item.file === file)
+      return row && !['queued', 'running'].includes(row.status) && row.publication_state !== 'publishing'
+    })
+    const outcome = (status) => {
+      const rows = files.map((file) => (status?.documents || []).find((item) => item.file === file))
+      if (rows.every((row) => row?.status === 'published' && row.publication_state === 'current')) return 'current'
+      return rows.some((row) => row?.publication_state === 'out_of_date' || ['failed', 'interrupted'].includes(row?.status)) ? 'failed' : 'settled'
+    }
     setRepublishing(true)
     setReportsRefresh((value) => value + 1)
     try {
       for (let attempt = 0; attempt < 180; attempt += 1) {
-        if (!ownsRelease(context)) return
+        if (!ownsRelease(context)) return 'unknown'
         let status
         try { status = await getReleaseStatus(run.id) } catch (error) {
-          if (ownsRelease(context)) setReleaseError({ summary: 'The updated copy is publishing, but its progress could not be refreshed.',
-            details: error?.message || 'Publishing continues in the background.', retryLabel: 'Refresh delivery status', retry: refreshReleaseStatus })
-          return
+          if (ownsRelease(context)) setReleaseError({ summary: 'The updated copy was requested, but its progress could not be refreshed.',
+            details: error?.message || 'Refresh release status to see whether it was published.', retryLabel: 'Refresh delivery status', retry: refreshReleaseStatus })
+          return 'unknown'
         }
-        if (!ownsRelease(context)) return
+        if (!ownsRelease(context)) return 'unknown'
         applyReleaseStatus(status)
         setReleaseError(null)
-        const rows = status?.documents || []
-        if (items.every((item) => settled(rows.find((row) => row.file === item.file)))) {
-          rows.filter((row) => previous[row.file] !== undefined && row.status === 'published' && row.publication_state === 'current')
+        if (settled(status)) {
+          ;(status.documents || []).filter((row) => files.includes(row.file) && row.status === 'published' && row.publication_state === 'current')
             .forEach((row) => onPublish?.(row.file))
-          return
+          return outcome(status)
         }
         await new Promise((resolve) => {
           const timer = window.setTimeout(() => { context.cancelWait = null; resolve() }, 2000)
@@ -594,6 +602,7 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
         })
       }
       if (ownsRelease(context)) setReleaseAnnouncement('The updated copy is still publishing safely in the background. You may leave this page and return later.')
+      return 'pending'
     } finally {
       if (ownsRelease(context)) { setRepublishing(false); setReportsRefresh((value) => value + 1) }
     }

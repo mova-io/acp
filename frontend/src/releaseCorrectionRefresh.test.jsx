@@ -80,7 +80,7 @@ describe('ReleaseCorrectionNotice', () => {
     await click(box)
     expect(action.disabled).toBe(false)
     await click(action)
-    expect(republish).toHaveBeenCalledExactlyOnceWith('scan1', { expected_artifacts: { 'report.docx': V2 }, allow_remaining_issues: true })
+    expect(republish).toHaveBeenCalledExactlyOnceWith('scan1', { expected_artifacts: { 'report.docx': V2 }, allow_remaining_issues: true, remaining_issue_files: ['report.docx'] })
     expect(onRepublished).toHaveBeenCalledTimes(1)
     expect(c.querySelector('[role="status"]').textContent).toContain('Updated copy publishing started')
   })
@@ -90,7 +90,7 @@ describe('ReleaseCorrectionNotice', () => {
     const c = await render(ReleaseCorrectionNotice, { scanId: 'scan1', republish, publication: publication() })
     expect(c.querySelector('input[type="checkbox"]')).toBeNull()
     await click(button(c, 'Publish updated copy and refresh reports'))
-    expect(republish).toHaveBeenCalledExactlyOnceWith('scan1', { expected_artifacts: { 'report.docx': V2 }, allow_remaining_issues: false })
+    expect(republish).toHaveBeenCalledExactlyOnceWith('scan1', { expected_artifacts: { 'report.docx': V2 }, allow_remaining_issues: false, remaining_issue_files: [] })
   })
 
   it('disables the action and shows progress while publishing', async () => {
@@ -110,6 +110,49 @@ describe('ReleaseCorrectionNotice', () => {
     expect(c.querySelector('[role="status"]').textContent).toBe('The published copy is already the current corrected copy.')
   })
 
+  it('names only the ticked files and sends allow_remaining_issues only when that list is non-empty', async () => {
+    const republish = vi.fn().mockResolvedValue({ result: 'republished' })
+    const c = await render(ReleaseCorrectionNotice, { scanId: 'scan1', republish, publication: publication({ out_of_date: [
+      staleItem({ file: 'a.docx', requires_remaining_issue_confirmation: true }),
+      staleItem({ file: 'b.docx', requires_remaining_issue_confirmation: false })] }) })
+    const boxes = c.querySelectorAll('input[type="checkbox"]')
+    expect(boxes).toHaveLength(1)
+    expect(boxes[0].closest('label').textContent).toContain('a.docx version')
+    await click(boxes[0])
+    await click(button(c, 'Publish updated copy and refresh reports'))
+    expect(republish).toHaveBeenCalledExactlyOnceWith('scan1', { expected_artifacts: { 'a.docx': V2, 'b.docx': V2 },
+      allow_remaining_issues: true, remaining_issue_files: ['a.docx'] })
+  })
+
+  it('surfaces which file still needs a remaining-issues confirmation after a 409', async () => {
+    const failure = Object.assign(new Error('b.docx still has remaining issues. Refresh release status, confirm publishing that version with remaining issues recorded, then try again.'),
+      { status: 409, code: 'remaining_issues_confirmation_required', files: ['b.docx'], refreshRequired: true })
+    const onRefresh = vi.fn()
+    const c = await render(ReleaseCorrectionNotice, { scanId: 'scan1', onRefresh, republish: vi.fn().mockRejectedValue(failure),
+      publication: publication({ out_of_date: [staleItem({ file: 'b.docx' })] }) })
+    await click(button(c, 'Publish updated copy and refresh reports'))
+    expect(c.querySelector('[role="alert"]').textContent).toContain('b.docx still has remaining issues')
+    await click(button(c, 'Refresh release status'))
+    expect(onRefresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('explains the last failed attempt once, in one alert, and keeps the retry available', async () => {
+    const republish = vi.fn().mockResolvedValue({ result: 'republished' })
+    const failure = { failure_category: 'destination_unavailable', explanation: 'The SharePoint folder could not be reached', attempted_artifact_digest: `sha256:${V2}`, at: '2026-09-17T12:00:00Z' }
+    const c = await render(ReleaseCorrectionNotice, { scanId: 'scan1', republish, publication: publication({ out_of_date: [staleItem({ last_attempt_failure: failure })] }) })
+    const alerts = [...c.querySelectorAll('[role="alert"]')]
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0].textContent).toContain('The last attempt to publish version sha256:8c84bfca…')
+    expect(alerts[0].textContent).toContain('did not complete: The SharePoint folder could not be reached')
+    expect(c.querySelector('[role="status"]').textContent).toBe('')
+    const action = button(c, 'Publish updated copy and refresh reports')
+    expect(action.disabled).toBe(false)
+    await click(action)
+    expect(republish).toHaveBeenCalledTimes(1)
+    const busy = await render(ReleaseCorrectionNotice, { scanId: 'scan1', busy: true, publication: publication({ out_of_date: [staleItem({ last_attempt_failure: failure })] }) })
+    expect(busy.querySelector('[role="alert"]')).toBeNull()
+  })
+
   it('shows the blocked reason and keeps the action disabled when republish is not allowed', async () => {
     const c = await render(ReleaseCorrectionNotice, { scanId: 'scan1',
       publication: publication({ can_republish: false, republish_blocked_reason: 'Approved changes are still applying.' }) })
@@ -120,7 +163,7 @@ describe('ReleaseCorrectionNotice', () => {
   it('reads a legacy receipt without a digest as unconfirmed, never current, and offers no action', async () => {
     const c = await render(ReleaseCorrectionNotice, { scanId: 'scan1',
       publication: { state: 'identity_unknown', out_of_date: [], identity_unknown: ['legacy.pdf'], can_republish: false, republish_blocked_reason: null } })
-    expect(c.textContent).toContain('can’t confirm which version was published for legacy.pdf')
+    expect(c.textContent).toContain('can’t confirm which version was published for legacy.pdf, or whether it is the current corrected copy')
     expect(c.textContent).toContain('reconcile that delivery')
     expect(c.textContent).not.toMatch(/\bcurrent copy\b|is current/i)
     expect(c.querySelectorAll('button')).toHaveLength(0)
@@ -128,6 +171,7 @@ describe('ReleaseCorrectionNotice', () => {
     const result = { status: 'published', publication_state: 'identity_unknown', published_at: '2026-02-01T00:00:00Z' }
     expect(deliveryIsCurrent(file, result, { 'legacy.pdf': true })).toBe(false)
     expect(releaseReadiness(file, { results: { 'legacy.pdf': result } })).toMatchObject({ status: 'unconfirmed', label: 'Published version unconfirmed' })
+    expect(releaseReadiness(file, { results: { 'legacy.pdf': result } }).reason).toMatch(/whether it is the current copy.*Reconcile that delivery/)
   })
 
   it('explains a 409 artifact_changed as a newer version and prompts a refresh', async () => {
@@ -151,20 +195,28 @@ describe('republishRelease API', () => {
       .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ queued: true }) })
       .mockResolvedValueOnce({ ok: false, status: 409, statusText: 'Conflict', url: 'http://x/scans/s/release/republish', headers: new Headers(),
         json: async () => ({ detail: { code: 'artifact_changed', message: 'artifact changed' } }) })
+      .mockResolvedValueOnce({ ok: false, status: 409, statusText: 'Conflict', url: 'http://x/scans/s/release/republish', headers: new Headers(),
+        json: async () => ({ detail: { code: 'remaining_issues_confirmation_required', files: ['b.docx'], message: 'server text' } }) })
     vi.stubGlobal('fetch', fetch)
     const actual = await vi.importActual('./api.js')
     actual.setDriveToken('drive-token'); actual.setSPToken('sp-token')
-    await actual.republishRelease('scan/1', { expected_artifacts: { 'report.docx': V2 }, allow_remaining_issues: false })
+    await actual.republishRelease('scan/1', { expected_artifacts: { 'report.docx': V2 }, allow_remaining_issues: true, remaining_issue_files: ['report.docx'] })
     const [url, init] = fetch.mock.calls[0]
     expect(new URL(url).pathname).toBe('/scans/scan%2F1/release/republish')
     expect(init.method).toBe('POST')
     expect(init.headers).toMatchObject({ 'X-Drive-Token': 'drive-token', 'X-SP-Token': 'sp-token', 'Content-Type': 'application/json' })
-    expect(JSON.parse(init.body)).toEqual({ expected_artifacts: { 'report.docx': V2 }, allow_remaining_issues: false })
+    expect(JSON.parse(init.body)).toEqual({ expected_artifacts: { 'report.docx': V2 }, allow_remaining_issues: true, remaining_issue_files: ['report.docx'] })
     const error = await actual.republishRelease('s', { expected_artifacts: {}, allow_remaining_issues: false }).catch((e) => e)
     expect(error.status).toBe(409)
     expect(error.code).toBe('artifact_changed')
     expect(error.refreshRequired).toBe(true)
     expect(error.message).toMatch(/newer corrected copy was saved/i)
+    const confirm = await actual.republishRelease('s', { expected_artifacts: {}, allow_remaining_issues: false, remaining_issue_files: [] }).catch((e) => e)
+    expect(JSON.parse(fetch.mock.calls[2][1].body)).toEqual({ expected_artifacts: {}, allow_remaining_issues: false, remaining_issue_files: [] })
+    expect(confirm.code).toBe('remaining_issues_confirmation_required')
+    expect(confirm.files).toEqual(['b.docx'])
+    expect(confirm.refreshRequired).toBe(true)
+    expect(confirm.message).toMatch(/^b\.docx still has remaining issues/)
     actual.setDriveToken(null); actual.setSPToken(null)
   })
 })
@@ -183,6 +235,18 @@ describe('ReleaseReports currency', () => {
     expect(c.textContent).toContain('sha256:8c84bfca…')
     expect(c.textContent).toContain('Reports for this release are immutable.')
   })
+  it('shows currency when the latest bundle failed, but not while a new bundle is being prepared', async () => {
+    const stale = { scan_id: 'scan1', currency: 'out_of_date', currency_reason: 'copy_changed_after_publication',
+      out_of_date_files: [{ file: 'report.docx', reported_artifact_digest: `sha256:${V1}`, current_artifact_digest: `sha256:${V2}` }], reports: [] }
+    const failed = await render(ReleaseReports, { scanId: 'scan1', read: vi.fn().mockResolvedValue({ ...stale, status: 'failed' }) })
+    expect(failed.querySelector('[role="status"]').textContent).toContain('Reports are out of date')
+    expect(failed.querySelector('[role="status"]').textContent).toContain('report delivery also needs attention')
+    const unknown = await render(ReleaseReports, { scanId: 'scan1', read: vi.fn().mockResolvedValue({ ...stale, status: 'failed', currency: 'unknown', out_of_date_files: [] }) })
+    expect(unknown.querySelector('[role="status"]').textContent).toContain('can’t confirm which document version')
+    const queued = await render(ReleaseReports, { scanId: 'scan1', read: vi.fn().mockResolvedValue({ ...stale, status: 'queued' }) })
+    expect(queued.querySelector('[role="status"]').textContent).toBe('Preparing and saving reports alongside the published files…')
+  })
+
   it('keeps the existing wording when the reports are current', async () => {
     const read = vi.fn().mockResolvedValue({ status: 'completed', currency: 'current', out_of_date_files: [],
       reports: [{ name: 'a.pdf', url: 'https://example.com/a.pdf', report_kind: 'scan_summary' }] })
@@ -239,13 +303,36 @@ describe('Publish (Release tab) after a post-publication correction', () => {
     expect(action.disabled).toBe(true)
     await click(c.querySelector('.release-correction-notice input[type="checkbox"]'))
     await click(action)
-    expect(republishRelease).toHaveBeenCalledExactlyOnceWith('scan1', { expected_artifacts: { 'report.docx': V2 }, allow_remaining_issues: true })
+    expect(republishRelease).toHaveBeenCalledExactlyOnceWith('scan1', { expected_artifacts: { 'report.docx': V2 }, allow_remaining_issues: true, remaining_issue_files: ['report.docx'] })
     expect(getReleaseStatus.mock.calls.length).toBeGreaterThan(statusCalls)
     expect(getReleaseReports.mock.calls.length).toBeGreaterThan(reportCalls)
     expect(onPublish).toHaveBeenCalledExactlyOnceWith('report.docx')
     expect(c.querySelector('.release-correction-notice')).toBeNull()
     expect(publicationCells(c)).toEqual(['Delivered'])
     expect(c.textContent).toContain('Reports saved alongside the published files.')
+  })
+
+  it('settles a failed republish as out of date: no endless "publishing", the failure shown, the retry available', async () => {
+    const failure = { failure_category: 'artifact_changed', explanation: 'The authorized corrected artifact changed; confirm again', attempted_artifact_digest: `sha256:${V2}`, at: '2026-09-17T12:00:00Z' }
+    const pub = publication()
+    const failedStatus = { release_id: 'rel1', roots: [], documents: [row()], publication: { ...pub, out_of_date: [staleItem({ last_attempt_failure: failure })] } }
+    getAutomaticRelease.mockResolvedValue({ authorization: null })
+    getReleaseReports.mockResolvedValue(staleReports)
+    getReleaseStatus.mockResolvedValueOnce({ release_id: 'rel1', roots: [], documents: [row()], publication: pub }).mockResolvedValue(failedStatus)
+    republishRelease.mockResolvedValue({ result: 'republished', results: [{ file: 'report.docx', status: 'failed', failure_category: 'artifact_changed' }] })
+    const onPublish = vi.fn()
+    const c = await render(Publish, { run: { id: 'scan1', source: 'drive' }, me: { email: 'a@example.com' }, files: [file], onPublish })
+    const before = getReleaseStatus.mock.calls.length
+    await click(button(c, 'Publish updated copy and refresh reports'))
+    // Settled on the first poll: the delivered V1 receipt is unchanged, and that is the answer.
+    expect(getReleaseStatus.mock.calls.length).toBe(before + 1)
+    expect(button(c, 'Publishing updated copy…')).toBeUndefined()
+    expect(button(c, 'Publish updated copy and refresh reports').disabled).toBe(false)
+    expect(c.textContent).not.toMatch(/still publishing/i)
+    expect(c.textContent).not.toContain('Updated copy publishing started')
+    expect(c.querySelector('.release-correction-notice [role="alert"]').textContent).toContain('did not complete: The authorized corrected artifact changed; confirm again')
+    expect(publicationCells(c)).toEqual(['Published copy out of date'])
+    expect(onPublish).not.toHaveBeenCalled()
   })
 
   it('does not let automatic batch membership say "published" over an out-of-date receipt', async () => {
