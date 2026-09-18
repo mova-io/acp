@@ -247,6 +247,8 @@ _map_many([("GET", "/ai/suggest"), ("GET", "/ai/explain"), ("GET", "/ai/validate
 # ── Release ───────────────────────────────────────────────────────────────────
 # Publishing is a GRANT (PRD §5), never implied by seeing the Release tab.
 _map_many([("POST", "/scans/{sid}/publish"),
+           # Republishing an out-of-date copy IS publishing: it delegates to /publish.
+           ("POST", "/scans/{sid}/release/republish"),
            ("POST", "/scans/{sid}/release/automatic"),
            ("POST", "/scans/{sid}/release/reports/retry"),
            ("POST", "/scans/{sid}/release/automatic/{authorization_id}/stop"),
