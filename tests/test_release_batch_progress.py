@@ -197,3 +197,24 @@ def test_missing_legacy_destination_identity_is_explicitly_unavailable(isolated_
     assert release_batch_progress.read_authorization(store, authorization) == {
         'available': False, 'scope': 'automatic', 'reason': 'destination_identity_unavailable'}
     assert automatic_release.receipt(store, authorization, 'file-0.pdf', 'a' * 64) is None
+
+
+def test_correction_after_publication_counts_only_once_its_current_copy_is_delivered(isolated_store):
+    """The plan froze and delivered V1. An approved correction then saved V2: the delivered copy is
+    out of date and must not count. After the owner's explicit republish delivers V2's exact
+    receipt, the CURRENT copy of that authorized document is at the destination and counts —
+    the tile must not stay at 'not delivered' for a document that is now current."""
+    store = isolated_store
+    execution, _, release, files = setup(store, scope=12)
+    delivered = lambda: progress_evidence.read(store, execution, owner='owner')['release_batch_progress']
+    assert delivered()['delivered'] == 9
+    with store._db.cursor() as cur:
+        store._db.execute(cur, 'UPDATE file_records SET corrected_sha256=%s WHERE scan_id=%s AND file=%s',
+                          ('b' * 64, 'scan', files[0]))
+    batch = delivered()
+    assert batch['delivered'] == 8 and batch['file_membership'][files[0]] != 'published'
+    store.record_release_document(release['id'], 'owner',
+        {'file': files[0], 'status': 'published', 'artifact_digest': 'sha256:' + 'b' * 64,
+         'published_at': '2026-09-18T14:00:00+00:00'})
+    batch = delivered()
+    assert batch['delivered'] == 9 and batch['file_membership'][files[0]] == 'published'

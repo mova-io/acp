@@ -3909,15 +3909,26 @@ def _publish_release_files(sid: str, request: Request, body: dict,
             drive_svc = handlers._drive_client(drive_token)
         except Exception:
             drive_svc = None
+    remaining_issue_decisions = {}
     if allow_remaining_issues or authorized_files:
         import json
         for filename in files:
             if not allowed(filename):
                 continue
             current = core.store.get_file_record(sid, filename) or {}
-            core.store.log_decision(owner, "release.remaining_issues_authorized", scan_id=sid, file=filename,
-                detail=json.dumps({**release_review_evidence(current, owner=owner, allow_remaining_issues=True, store=core.store, scan_id=sid),
-                    "artifact_digest": artifact_tag(expected_artifacts[filename]), "release_id": release_id}))
+            remaining_issue_decisions[filename] = json.dumps({
+                **release_review_evidence(current, owner=owner, allow_remaining_issues=True, store=core.store, scan_id=sid),
+                "artifact_digest": artifact_tag(expected_artifacts[filename]), "release_id": release_id})
+
+    def log_remaining_issue_decisions(names) -> None:
+        for filename in names:
+            if filename in remaining_issue_decisions:
+                core.store.log_decision(owner, "release.remaining_issues_authorized", scan_id=sid,
+                                        file=filename, detail=remaining_issue_decisions[filename])
+    if source not in {"sharepoint", "drive"}:
+        # Synchronous delivery: the authorization precedes the side effect it authorizes. The
+        # provider path records it at admission instead (below), atomically with the work.
+        log_remaining_issue_decisions(files)
     results = []
     folder_cache = {}
     synchronous_execution = None
@@ -4008,7 +4019,7 @@ def _publish_release_files(sid: str, request: Request, body: dict,
                       "original_relative_path": (record.get("source_relative_path")
                                                  or record.get("parent_folder") or f),
                       "released_relative_path": None, "status": "queued", "created": False}
-            core.store.record_release_document(release_id, owner, queued)
+            # Written at admission, with the job (see below) — never ahead of it.
             results.append(queued)
             payloads.append({"scan_id": sid, "release_id": release_id,
                              "file": f, "owner": owner,
@@ -4026,28 +4037,41 @@ def _publish_release_files(sid: str, request: Request, body: dict,
                 fingerprint_inputs = {"artifacts": fingerprint_inputs, "automatic_release_id": automatic_release_id}
             fingerprint = hashlib.sha256(json.dumps(fingerprint_inputs, sort_keys=True).encode()).hexdigest()
             snapshot_id, input_manifest_id = _sealed_stage_input(sid, "remediate", release_id)
-            if source == "drive":
-                try:
-                    queue_drive = (core.store.enqueue_automatic_drive_release if automatic_release_id
-                                   else core.store.enqueue_manual_drive_release)
-                    options = {} if automatic_release_id else {"owner": owner}
-                    execution = queue_drive(
-                        sid, payloads, snapshot_id=snapshot_id,
-                        request_fingerprint=fingerprint, input_manifest_id=input_manifest_id, **options)
-                except (ValueError, ActiveStageExecutionError) as exc:
-                    raise HTTPException(409, str(exc)) from exc
-            elif automatic_release_id:
-                try:
-                    execution = core.store.enqueue_automatic_sharepoint_release(
-                        sid, payloads, snapshot_id=snapshot_id,
-                        request_fingerprint=fingerprint, input_manifest_id=input_manifest_id)
-                except (ValueError, ActiveStageExecutionError) as exc:
-                    raise HTTPException(409, str(exc)) from exc
-            else:
-                execution = _enqueue_stage_batch(
-                    sid, "release", "publish_file", payloads,
-                    snapshot_id=snapshot_id, request_fingerprint=fingerprint,
-                    input_manifest_id=input_manifest_id)
+            # ADMISSION IS ATOMIC. The queued receipts, the remaining-issue authorizations and the
+            # stage enqueue commit together or not at all. Writing the receipts first let a request
+            # that then lost the release stage's single-flight fence (409) leave a document reading
+            # 'publishing' with no job behind it, and an authorization for work never started — a
+            # concurrent request makes that reachable no matter what the caller checked beforehand.
+            # It also means a worker can never see a job whose queued receipt is not yet written.
+            import contextlib
+            admission = getattr(core.store, "transaction", None)
+            with admission() if callable(admission) else contextlib.nullcontext():
+                log_remaining_issue_decisions([p["file"] for p in payloads])
+                for queued in results:
+                    if queued.get("status") == "queued":
+                        core.store.record_release_document(release_id, owner, queued)
+                if source == "drive":
+                    try:
+                        queue_drive = (core.store.enqueue_automatic_drive_release if automatic_release_id
+                                       else core.store.enqueue_manual_drive_release)
+                        options = {} if automatic_release_id else {"owner": owner}
+                        execution = queue_drive(
+                            sid, payloads, snapshot_id=snapshot_id,
+                            request_fingerprint=fingerprint, input_manifest_id=input_manifest_id, **options)
+                    except (ValueError, ActiveStageExecutionError) as exc:
+                        raise HTTPException(409, str(exc)) from exc
+                elif automatic_release_id:
+                    try:
+                        execution = core.store.enqueue_automatic_sharepoint_release(
+                            sid, payloads, snapshot_id=snapshot_id,
+                            request_fingerprint=fingerprint, input_manifest_id=input_manifest_id)
+                    except (ValueError, ActiveStageExecutionError) as exc:
+                        raise HTTPException(409, str(exc)) from exc
+                else:
+                    execution = _enqueue_stage_batch(
+                        sid, "release", "publish_file", payloads,
+                        snapshot_id=snapshot_id, request_fingerprint=fingerprint,
+                        input_manifest_id=input_manifest_id)
         if not automatic_release_id:
             _queue_reports_if_settled(sid, owner, release_id)
         status = core.store.release_status(release_id, owner)
