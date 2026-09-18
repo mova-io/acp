@@ -877,6 +877,13 @@ export const getRubric = () => (SIM
   ? sim({ name: 'WCAG 2.1 AA', version: '1', hash: 'e85fcf7e14f9040c', target: 'WCAG 2.1 AA', threshold: 90, criteria: {} })
   : fetch(`${BASE}/rubric`, { headers: headers() }).then(j))
 export const getRules = () => (SIM ? sim(simRules()) : fetch(`${BASE}/rules`, { headers: headers() }).then(j))
+// Settings → Rule explanations: read-only product metadata describing what each rule checks per
+// (criterion × format), derived server-side from the code that does it. SIM has no rule catalog to
+// derive from, so it says so instead of shipping a fixture that would read as a statement about
+// the product — the panel renders `available: false` as "not available in the demo build".
+export const getRuleExplanations = () => (SIM
+  ? sim({ simulated: true, available: false, criteria: [], settings: [], formats: [] })
+  : fetch(`${BASE}/rules/explanations`, { headers: headers() }).then(j))
 // Per-(criterion × format) remediation capability — the single source of truth for which
 // WCAG criteria are auto-fixable per file format (see capability.js). SIM and any fetch
 // failure fall back to the bundled table, so the format-aware UI never regresses to the

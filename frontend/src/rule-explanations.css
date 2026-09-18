@@ -1,0 +1,34 @@
+/* Settings → Rule explanations. Existing tokens only (--ink, --muted, --line, --surface,
+   --font-mono): no new colours, so contrast follows the theme and the high-contrast override. */
+.rx-panel { max-width: 920px; font-size: 13px; line-height: 1.5; color: var(--ink); }
+.rx-intro, .rx-note { font-size: 13px; margin: 0 0 10px; }
+.rx-filters { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: flex-end; margin: 12px 0 6px; }
+.rx-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 600; }
+.rx-field input, .rx-field select { font: inherit; font-weight: 400; font-size: 13px; padding: 6px 9px; border: 1px solid var(--muted); border-radius: 6px; background: var(--surface); color: var(--ink); }
+.rx-field input { min-width: 280px; }
+.rx-count { font-size: 12px; margin: 4px 0 10px; color: var(--muted); }
+.rx-list { list-style: none; padding: 0; margin: 0; }
+.rx-criterion { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; margin: 0 0 10px; background: var(--surface); }
+.rx-criterion-head { margin: 0 0 4px; font-size: 14px; }
+.rx-level { font-weight: 400; font-size: 12px; }
+.rx-summary { margin: 0 0 8px; font-size: 12.5px; }
+.rx-details { margin-top: 10px; }
+.rx-format { border-top: 1px solid var(--line); padding: 10px 0 4px; }
+.rx-format-head { margin: 0 0 4px; font-size: 13px; }
+.rx-status, .rx-tag { display: inline-block; border: 1px solid var(--muted); border-radius: 999px; padding: 0 8px; font-size: 11.5px; font-weight: 600; color: var(--ink); background: var(--surface); margin-right: 4px; }
+.rx-lanes { margin: 2px 0 6px; font-size: 12.5px; }
+.rx-block { margin: 6px 0; }
+.rx-block p { margin: 0; }
+.rx-block ul, .rx-impl ul, .rx-settings { margin: 2px 0 6px; padding-left: 20px; }
+.rx-label { font-weight: 700; font-size: 12px; margin: 6px 0 2px; }
+.rx-impl { margin: 6px 0; }
+.rx-impl summary { cursor: pointer; font-weight: 600; font-size: 12.5px; }
+.rx-impl code, .rx-settings code, .rx-provenance code, .rx-details code { font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
+.rx-section { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--line); }
+.rx-section h4 { margin: 0 0 6px; }
+.rx-setting-meta { font-size: 12px; }
+.rx-empty { padding: 14px; border: 1px dashed var(--line); border-radius: 8px; }
+.rx-empty p { margin: 0 0 8px; }
+.rx-error p { margin: 0 0 8px; color: var(--error-fg-strong); }
+.rx-provenance { margin-top: 18px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 12px; }
+.rx-provenance p { margin: 0 0 4px; }

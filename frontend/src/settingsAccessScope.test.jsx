@@ -66,8 +66,11 @@ describe('the settings panel includes access, worker and AI governance', () => {
     // Settings -> Scheduling PRD §4. The two are one job: Worker Configuration sets warm
     // capacity now, Scheduling says when ACP should hold more of it. It is READ-ONLY — the
     // writable capacity control stays where it is (queuePanelCapacity.test.jsx).
+    // `Rule explanations` joined on 2026-09-18, last: READ-ONLY product metadata (what each rule
+    // checks per criterion and format, its thresholds and limits) with no write control at all —
+    // pinned in ruleExplanations.test.jsx.
     expect(tabTexts(await render())).toEqual(
-      ['Owners', 'Users', 'Roles', 'My Data', 'My Scope', 'Scheduling', 'Release', 'AI Governance', 'Review Memory'])
+      ['Owners', 'Users', 'Roles', 'My Data', 'My Scope', 'Scheduling', 'Release', 'AI Governance', 'Review Memory', 'Rule explanations'])
   })
 
   it('no longer offers any of the removed ADMIN-ONLY tabs', async () => {
