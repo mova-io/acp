@@ -20,6 +20,7 @@ import RemediationReleasePlan from './RemediationReleasePlan.jsx'
 import { authorizeAcceptedRelease } from './releasePlanIntent.js'
 import { remediationReviewCounts, remediationDiffPage } from './remediationCountSummary.js'
 import { selectionFingerprint } from './batchReviewSelection.js'
+import { requestReviewQueueRefresh, viewedDecisionOptions, viewedVersionConflict, viewedVersionMissingError } from './viewedApprovalBinding.js'
 import AssessSummary from './AssessSummary.jsx'
 import { useState, useEffect, useMemo, useRef } from 'react'
 import AssessmentScopeCard from './AssessmentScopeCard.jsx'
@@ -152,6 +153,12 @@ export function hitlFailureCopy(item, kind, err, outcome = 'not_saved') {
   if (outcome === 'unknown') {
     return `ACP could not confirm whether your ${action} of “${file}” was saved because database capacity was exhausted. `
       + 'The card is showing its last known state — refresh the queue before trying again.'
+  }
+  // The version the reviewer looked at is no longer the one the server holds (or was never named).
+  // The server's own sentence says what to do; "try again" would invite re-sending the same stale
+  // version, so it is not said. The queue has been asked to re-read the row.
+  if (err?.viewedVersionConflict) {
+    return `Your ${action} of “${file}” was NOT saved: ${err.message} The review queue is reloading the current version.`
   }
   return `Your ${action} of “${file}” was NOT saved: ${err?.message || err}. It is back in the queue — try again.`
 }
@@ -865,7 +872,10 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
     setActError(hitlFailureCopy(item, kind, err, outcome))
   }
 
-  const settleActFailure = async (item, kind, wanted, err) => {
+  const settleActFailure = async (item, kind, wanted, putError) => {
+    // A 409 viewed-version refusal is a definite "nothing recorded"; read the server's sentence out
+    // of it whichever shape it arrived in. Every other failure passes through unchanged.
+    const err = viewedVersionConflict(putError) || putError
     const settled = await reconcileHitlPutFailure(item?.id, wanted, err)
     if (settled.outcome === 'saved') {
       // The PUT response was lost to capacity pressure, but the durable row proves the decision
@@ -885,13 +895,30 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
   // it awaits this, and a rejection keeps the reviewer on the finding with the error stated inline
   // instead of advancing them past it behind a banner they have already scrolled away from.
   // `undoAct` still performs the local rollback; the re-throw is what makes the failure visible.
-  const act = (id, kind, editedValue, approvedValues, resolution = null, frozen = null) => {
+  //
+  // `viewed` is the row object the review pane was RENDERING when the reviewer clicked. The decision
+  // is bound to its source revision and proposal snapshot ids (viewedApprovalBinding.js) — never to a
+  // re-read of the queue — so the server can refuse an approval of a version nobody looked at. A frozen
+  // batch selection already carries that binding, captured when it was selected.
+  const act = (id, kind, editedValue, approvedValues, resolution = null, frozen = null, viewed = null) => {
     if (reviewReadOnlyRef.current) return Promise.reject(new Error('Historical scans are available for results browsing only.'))
     const current = queue.find((x) => x.id === id)
     if (frozen && (!current || selectionFingerprint(current) !== frozen.decision.selectionFingerprint)) {
       return Promise.reject(Object.assign(new Error('Proposal or source changed — review and select again.'), { status: 409 }))
     }
     const item = frozen?.finding || current
+    const decisionStatus = kind === 'approved' ? 'approved' : kind === 'rejected' ? 'rejected' : kind === 'deferred' ? 'skipped' : null
+    const bound = frozen
+      ? { expectedVersion: frozen.decision.expectedVersion ?? item?._raw?.decision_version ?? 0,
+          expectedProposalSnapshotIds: frozen.decision.expectedProposalSnapshotIds,
+          expectedSourceRevision: frozen.decision.expectedSourceRevision }
+      : viewedDecisionOptions(viewed || item, decisionStatus)
+    // No binding, no approval: refuse BEFORE anything optimistic happens, say why in the pane (this
+    // rejection is what it renders), and ask the queue to re-read the row. Never sent unbound.
+    if (!SIM && item?.id && decisionStatus === 'approved' && !bound) {
+      requestReviewQueueRefresh()
+      return Promise.reject(viewedVersionMissingError())
+    }
     setActError(null)
     setQueue((q) => q.filter((x) => x.id !== id))
     setSelItem(null)
@@ -903,9 +930,7 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
       recordDecided(item, 'skipped')
       setActed((a) => ({ ...a, deferred: a.deferred + 1 }))
       if (!SIM && item?.id) {
-        return updateHitlItem(item.id, 'skipped', null, null, {
-          expectedVersion: item._raw?.decision_version ?? 0,
-        }).catch(
+        return updateHitlItem(item.id, 'skipped', null, null, { ...bound }).catch(
           (e) => settleActFailure(item, 'deferred', { status: 'skipped' }, e))
       }
       return Promise.resolve()
@@ -934,10 +959,10 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
       const p = updateHitlItem(item.id, apiStatus, null,
                                apiStatus === 'approved' ? (editedValue || null) : null,
                                { approvedValues: apiStatus === 'approved' ? (approvedValues || null) : null,
-                                 expectedVersion: frozen?.decision.expectedVersion ?? item._raw?.decision_version ?? 0,
+                                 // The VIEWED version: expected_version, expected_source_revision and
+                                 // expected_proposal_snapshot_ids (a rejection carries them when known).
+                                 ...bound,
                                  requestId: frozen?.decision.requestId,
-                                 expectedProposalSnapshotIds: frozen?.decision.expectedProposalSnapshotIds,
-                                 expectedSourceRevision: frozen?.decision.expectedSourceRevision,
                                  // A WCAG-exception / out-of-scope resolution: status stays 'approved'
                                  // but it writes NO value — the reason is persisted on the row.
                                  resolution: apiStatus === 'approved' ? (resolution || null) : null })
@@ -1948,12 +1973,13 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
               // back to the AI's proposal when they didn't touch it. act() writes it to the document.
               // Every branch RETURNS act()'s promise. The review pane awaits it and only advances to
               // the next finding once the write has actually landed — see act() above.
-              if (d.state === 'accepted') return act(f.id, 'approved', d.value ?? f.after ?? null, d.approvedValues, null, d.selectionFingerprint ? { finding: f, decision: d } : null)
-              if (d.state === 'rejected') return act(f.id, 'rejected')
-              if (d.state === 'assigned') return act(f.id, 'deferred')
+              // `f` is the row the pane was showing — the version every decision below is bound to.
+              if (d.state === 'accepted') return act(f.id, 'approved', d.value ?? f.after ?? null, d.approvedValues, null, d.selectionFingerprint ? { finding: f, decision: d } : null, f)
+              if (d.state === 'rejected') return act(f.id, 'rejected', undefined, undefined, null, null, f)
+              if (d.state === 'assigned') return act(f.id, 'deferred', undefined, undefined, null, null, f)
               // Not applicable / out of scope: resolved as approved-with-no-value + an out_of_scope
               // resolution, so it never blocks certification and leaves the coverage denominator.
-              if (d.state === 'not_applicable') return act(f.id, 'approved', null, undefined, 'out_of_scope')
+              if (d.state === 'not_applicable') return act(f.id, 'approved', null, undefined, 'out_of_scope', null, f)
               return Promise.resolve()
             }}
             assignees={assignees}

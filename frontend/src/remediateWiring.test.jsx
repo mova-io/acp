@@ -64,7 +64,8 @@ describe('the board core is mounted, not merely shipped', () => {
     // so this removed a screen rather than a capability.
     expect(s).toMatch(/<RemediationInbox/)
     expect(s).toMatch(/if \(d\.state === 'accepted'\) return act\(f\.id, 'approved'/)
-    expect(s).toMatch(/if \(d\.state === 'rejected'\) return act\(f\.id, 'rejected'\)/)
+    // (…and pass `f`, the viewed row, as the version the decision is bound to.)
+    expect(s).toMatch(/if \(d\.state === 'rejected'\) return act\(f\.id, 'rejected'[,)]/)
   })
 
   it('gives every lane-aware panel the capability tables', () => {

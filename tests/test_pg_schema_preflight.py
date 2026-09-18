@@ -66,7 +66,9 @@ def previous_schema(url):
     store._PgAdapter(url).init_schema()
     execute(url, 'DROP TABLE document_wide_chunks')
     execute(url, 'DROP TABLE document_wide_chunk_plans')
-    execute(url, 'DELETE FROM acp_schema_version WHERE version=58')
+    # v59's additive remediation_diff location columns are absent from any earlier schema.
+    execute(url, 'ALTER TABLE remediation_diff DROP COLUMN locator, DROP COLUMN page')
+    execute(url, 'DELETE FROM acp_schema_version WHERE version>=58')
     execute(url, "INSERT INTO acp_schema_version(version,checksum) VALUES (57,'4a3338134fdc573bcaa2062935c2711d')")
     execute(url, "CREATE TABLE customer_probe(id INT PRIMARY KEY,value TEXT); INSERT INTO customer_probe VALUES (1,'keep')")
 
@@ -82,18 +84,59 @@ def assert_previous_intact(url):
 def test_fresh_database_prepared_before_any_role_boot(disposable_database):
     url = disposable_database
     result = gate.prepare(url, ROOT / 'api')
-    assert result['state'] == 'prepared' and result['observed_version'] == 58
-    assert gate.schema_marker(url) == (58, store._PgAdapter._SCHEMA_CHECKSUM_AT_VERSION)
+    assert result['state'] == 'prepared' and result['observed_version'] == store._PgAdapter._SCHEMA_VERSION
+    assert gate.schema_marker(url) == (store._PgAdapter._SCHEMA_VERSION,
+                                       store._PgAdapter._SCHEMA_CHECKSUM_AT_VERSION)
 
 
 def test_equal_version_wrong_checksum_refused_without_replay(disposable_database, monkeypatch):
     url = disposable_database
     store._PgAdapter(url).init_schema()
-    execute(url, "UPDATE acp_schema_version SET checksum='unexpected' WHERE version=58")
+    execute(url, "UPDATE acp_schema_version SET checksum='unexpected' WHERE version=%s",
+            (store._PgAdapter._SCHEMA_VERSION,))
     monkeypatch.setattr(store._PgAdapter, '_apply_schema', lambda *args: pytest.fail('unexpected marker replayed DDL'))
     with pytest.raises(gate.PreflightRefused, match='target_schema_checksum_mismatch'):
         gate.prepare(url, ROOT / 'api')
-    assert gate.schema_marker(url) == (58, 'unexpected')
+    assert gate.schema_marker(url) == (store._PgAdapter._SCHEMA_VERSION, 'unexpected')
+
+
+def test_v58_remediation_diff_rows_survive_the_v59_location_columns(disposable_database, monkeypatch):
+    """R1 on the real engine: a v58 database holding verified diffs migrates additively. Its rows
+    keep every value and read as unknown (or the flagged legacy-note fallback); new rows store
+    the exact locator and a real page, through every reader, including the paged CTE."""
+    url = disposable_database
+    store._PgAdapter(url).init_schema()
+    execute(url, 'ALTER TABLE remediation_diff DROP COLUMN locator, DROP COLUMN page')
+    execute(url, 'DELETE FROM acp_schema_version')
+    execute(url, 'INSERT INTO acp_schema_version(version,checksum) VALUES (%s,%s)',
+            (58, 'bcaed9350aa98abb6695f7057e157f63'))
+    execute(url, "INSERT INTO remediation_diff(scan_id,file,rule_id,seq,before,after,note) VALUES "
+                 "('s-r1','deck.pptx','1.4.5',0,'','T','approved by a reviewer · image 1'),"
+                 "('s-r1','deck.pptx','1.3.1',0,'a','b','automatic heading fix')")
+    store._PgAdapter(url).init_schema()
+    assert gate.schema_marker(url) == (store._PgAdapter._SCHEMA_VERSION,
+                                       store._PgAdapter._SCHEMA_CHECKSUM_AT_VERSION)
+    monkeypatch.setattr(store, '_DATABASE_URL', url)
+    st = store.Store()
+    try:
+        where = lambda rows: sorted((r['rule_id'], r['locator'], r['page'], r['location_source'])
+                                    for r in rows)
+        assert where(st.get_remediation_diffs('s-r1', 'deck.pptx')) == [
+            ('1.3.1', None, None, None), ('1.4.5', 'image 1', None, 'legacy_note')]
+        existing = st.get_remediation_diffs('s-r1', 'deck.pptx')
+        st.record_remediation_diffs('s-r1', 'deck.pptx', existing + [
+            {'rule_id': '1.1.1', 'before': '', 'after': 'D', 'note': 'n',
+             'locator': 'pdf:fig:4:2', 'page': 4}])
+        expected = [('1.1.1', 'pdf:fig:4:2', 4, 'recorded'), ('1.3.1', None, None, None),
+                    ('1.4.5', 'image 1', None, 'legacy_note')]
+        assert where(st.get_remediation_diffs('s-r1', 'deck.pptx')) == expected
+        assert where(st.list_remediation_diffs('s-r1')) == expected
+        assert where(st.remediation_diff_page('s-r1')['items']) == expected
+        # The legacy row stays a reconstruction: nothing was promoted into the column.
+        assert execute(url, "SELECT locator FROM remediation_diff WHERE rule_id='1.4.5'") == [(None,)]
+    finally:
+        if st._db._pool:
+            st._db._pool.closeall()
 
 
 def test_held_customer_reader_refused_without_ddl_or_cancel_then_release_succeeds(disposable_database):
@@ -227,7 +270,7 @@ def test_concurrent_gate_candidates_commit_once_and_recheck_after_lock(disposabl
     monkeypatch.setattr(store._PgAdapter, '_apply_schema', apply)
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(lambda _: gate.prepare(url, ROOT / 'api'), range(2)))
-    assert all(r['observed_version'] == 58 for r in results) and len(calls) == 1
+    assert all(r['observed_version'] == store._PgAdapter._SCHEMA_VERSION for r in results) and len(calls) == 1
 
 
 def hanging_migration_child(pipe, dsn, api_path, timeout_seconds):

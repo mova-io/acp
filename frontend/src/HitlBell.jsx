@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { listAllHitl, updateHitlItem } from './api.js'
+import { SIM } from './sim.js'
+import { requestReviewQueueRefresh, viewedDecisionOptions, viewedVersionConflict, viewedVersionMissingError } from './viewedApprovalBinding.js'
 import { metaFor, SEV, sevOf, reasonOf, priorityScore, bellSeverity } from './hitlMeta.js'
 import ReviewCenter from './ReviewCenter.jsx'
 
@@ -16,6 +18,7 @@ export default function HitlBell() {
   const [open, setOpen] = useState(false)      // dropdown
   const [center, setCenter] = useState(false)  // full-screen review center
   const [err, setErr] = useState(false)
+  const [viewedNotice, setViewedNotice] = useState(null)   // a refused approval of a no-longer-current version
   const wrap = useRef(null)
   const mounted = useRef(true)
   useEffect(() => () => { mounted.current = false }, [])
@@ -53,13 +56,35 @@ export default function HitlBell() {
     // Optimistic: mark resolved locally so it leaves `pending` (and the metrics update)
     // immediately — the inbox feels instant. load() reconciles with server truth; a
     // failure reverts to the snapshot so nothing is silently lost.
+    //
+    // Bound to the VIEWED version — the row the Review Center is rendering, never a re-read — so a
+    // re-assessment since it was loaded makes the server refuse (409) instead of recording an approval
+    // of a version nobody saw. No binding: nothing is sent, the card says the item must be refreshed,
+    // and the queue is re-read. A refusal re-reads the row too, and is never retried automatically.
     let prev
-    const expectedVersion = items.find((item) => item.id === itemId)?.decision_version ?? 0
+    const viewed = items.find((item) => item.id === itemId)
+    const bound = viewedDecisionOptions(viewed, status)
+    if (!SIM && status === 'approved' && !bound) {
+      load(); requestReviewQueueRefresh()
+      return Promise.reject(viewedVersionMissingError())
+    }
     const nowIso = new Date().toISOString()
+    setViewedNotice(null)
     setItems((cur) => { prev = cur; return cur.map((i) => (i.id === itemId ? { ...i, status, reviewed_at: nowIso } : i)) })
-    return updateHitlItem(itemId, status, note, approvedValue, { ...telemetry, expectedVersion })
+    return updateHitlItem(itemId, status, note, approvedValue, { ...telemetry, ...bound })
       .then(() => { load(); window.dispatchEvent(new Event('acp:hitl-changed')) })
-      .catch((e) => { if (prev) setItems(prev); throw e })
+      .catch((e) => {
+        if (prev) setItems(prev)
+        const conflict = viewedVersionConflict(e)
+        if (!conflict) throw e
+        // The optimistic update took the item out of `pending`, so the card that was clicked has
+        // unmounted and will come back fresh on the current version — it cannot carry this message.
+        // The bell states it instead, above the Review Center.
+        const file = viewed?.file ? ` for “${viewed.file}”` : ''
+        setViewedNotice(`Approval${file} not saved: ${conflict.message}`)
+        load(); requestReviewQueueRefresh()
+        throw conflict
+      })
   }, [load, items])
 
   const pending = items.filter((i) => i.status === 'pending')
@@ -117,7 +142,17 @@ export default function HitlBell() {
       )}
 
       {center && (
-        <ReviewCenter items={items} onAct={act} onClose={() => setCenter(false)} onRefresh={load} error={err} />
+        <ReviewCenter items={items} onAct={act} onClose={() => { setCenter(false); setViewedNotice(null) }} onRefresh={load} error={err} />
+      )}
+      {center && viewedNotice && (
+        <div role="alert" className="hitlbell-viewed-version"
+             style={{ position: 'fixed', top: 12, left: '50%', transform: 'translateX(-50%)', zIndex: 81,
+                      maxWidth: 'min(720px, 94vw)', padding: '10px 14px', borderRadius: 8, fontSize: 13,
+                      border: '1px solid #C0392B', background: '#FDEDEC', color: '#7B241C',
+                      boxShadow: '0 8px 24px rgba(28,22,32,0.22)', display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+          <span>{viewedNotice} The queue is reloading the current version.</span>
+          <button type="button" className="ghost small" aria-label="Dismiss" onClick={() => setViewedNotice(null)}>✕</button>
+        </div>
       )}
     </div>
   )

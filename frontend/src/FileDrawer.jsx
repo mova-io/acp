@@ -8,6 +8,8 @@ import { allRules, PLAIN_NAMES } from './rules/index.js'
 import { explainFinding, getFileContent, uploadToDrive, markRemediated, remediateScan, getQueueJob, queueHitlReview, queueHitlVerify, getFileRemediationState, getFileRemediationDiffs, downloadRemediated, getRules, getRubric, getConfig, getCapability, listHitlQueue, updateHitlItem, openTraceUrl, getDocumentTimeline } from './api.js'
 import { reviewableInPlace } from './reviewCard.js'
 import EvidenceCard from './EvidenceCard.jsx'
+import { SIM as SIM_MODE } from './sim.js'
+import { requestReviewQueueRefresh, viewedBindingKey, viewedDecisionOptions, viewedVersionConflict, viewedVersionMissingError } from './viewedApprovalBinding.js'
 import { CAPABILITY_FALLBACK, fmtOf, autoSCs, modeFor, reviewRecommended } from './capability.js'
 import PagePreview from './PagePreview.jsx'
 import SharePointMetadata from './SharePointMetadata.jsx'
@@ -585,15 +587,35 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
     }).catch(() => false)
   // Same contract as the inbox's act(): the card carries the note/value/telemetry; a
   // success removes the item locally and tells the bell to reconcile.
-  const drawerAct = (itemId, status, note = null, approvedValue = null, telemetry = {}) =>
-    updateHitlItem(itemId, status, note, approvedValue, {
-      ...telemetry,
-      expectedVersion: hitlItems.find((item) => item.id === itemId)?.decision_version ?? 0,
-    })
+  //
+  // Bound to the VIEWED version: the row this drawer is rendering (the in-place card below is keyed by
+  // that version, so its editors were seeded from it). An approval without a complete binding is not
+  // sent; a 409 viewed-version refusal is stated above the card, the row is re-read, and the card
+  // remounts on the current version for a fresh decision. Nothing is retried automatically.
+  const [viewedNotice, setViewedNotice] = useState(null)   // { id, message }
+  const drawerAct = (itemId, status, note = null, approvedValue = null, telemetry = {}) => {
+    const viewed = hitlItems.find((item) => item.id === itemId)
+    const bound = viewedDecisionOptions(viewed, status)
+    if (!SIM_MODE && status === 'approved' && !bound) {
+      const refused = viewedVersionMissingError()
+      setViewedNotice({ id: itemId, message: refused.message })
+      requestReviewQueueRefresh()
+      return Promise.reject(refused)
+    }
+    setViewedNotice(null)
+    return updateHitlItem(itemId, status, note, approvedValue, { ...telemetry, ...bound,
+      expectedVersion: bound?.expectedVersion ?? viewed?.decision_version ?? 0 })
       .then(() => {
         setHitlItems((cur) => cur.filter((h) => h.id !== itemId))
         window.dispatchEvent(new Event('acp:hitl-changed'))
+      }, (e) => {
+        const conflict = viewedVersionConflict(e)
+        if (!conflict) throw e
+        setViewedNotice({ id: itemId, message: conflict.message })
+        requestReviewQueueRefresh()
+        throw conflict
       })
+  }
   // Download the stored fixed copy. downloadRemediated() rejects on a non-2xx (e.g. the
   // 404 an ADR 0011 incremental re-scan produced for a file whose fixed copy lives under
   // an earlier scan_id) — but the bare onClick used to drop that rejection, so the button
@@ -1150,7 +1172,18 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
                           </button>
                           {openHere && (
                             <div style={{ marginTop: 8 }}>
-                              <EvidenceCard item={hi} onAct={drawerAct}
+                              {/* A refused approval of a version that is no longer current, stated
+                                  here because the card below remounts on the current version. */}
+                              {viewedNotice?.id === hi.id && (
+                                <div role="alert" className="drawer-viewed-version"
+                                     style={{ marginBottom: 8, padding: '8px 10px', borderRadius: 8, fontSize: 12.5,
+                                              border: '1px solid #C0392B', background: '#FDEDEC', color: '#7B241C' }}>
+                                  <b>Not approved.</b> {viewedNotice.message}
+                                </div>
+                              )}
+                              {/* Keyed by the row's version: an editor seeded from an older version
+                                  must not carry its text into an approval of a newer one. */}
+                              <EvidenceCard item={hi} onAct={drawerAct} key={viewedBindingKey(hi)}
                                             onResolved={() => setReviewSc(null)}
                                             traceUrl={hi.scan_id ? openTraceUrl(hi.scan_id, 'file', hi.file) : null} />
                             </div>

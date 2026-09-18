@@ -90,7 +90,9 @@ describe('the bell / ReviewCenter path also surfaces a refused decision', () => 
   const card = code('EvidenceCard.jsx')
 
   it('HitlBell rolls its optimistic list back and rethrows', () => {
-    expect(bell).toMatch(/\.catch\(\(e\) => \{ if \(prev\) setItems\(prev\); throw e \}\)/)
+    // Every failure rolls back and rethrows; a viewed-version 409 is rethrown as its normalised
+    // conflict (the server's sentence) — see viewedApprovalBell.test.jsx.
+    expect(bell).toMatch(/\.catch\(\(e\) => \{\s*if \(prev\) setItems\(prev\)\s*const conflict = viewedVersionConflict\(e\)\s*if \(!conflict\) throw e[\s\S]{0,500}throw conflict\s*\}\)/)
   })
 
   it('EvidenceCard catches that rethrow instead of leaving it unhandled', () => {

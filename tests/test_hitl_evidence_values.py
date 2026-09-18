@@ -18,6 +18,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from hitl_viewed import viewed_fields
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "api"))
 
@@ -156,7 +157,7 @@ def route(st, monkeypatch):
 def test_route_stores_evidence_values_and_enqueues_the_write(st, route):
     hitl_update, HitlUpdate, jobs = route
     row = _deferred_row(st)
-    hitl_update(row["id"], HitlUpdate(status="approved",
+    hitl_update(row["id"], HitlUpdate(status="approved", **viewed_fields(row["id"]),
                                       approved_values=["a nurse", "a bar chart", "the logo"]), _req())
     got = {e["locator"]: e.get("approved_value") for e in st.get_hitl_item(row["id"])["evidence"]}
     assert got["ppt/slides/slide1.xml#rId2"] == "a nurse"
@@ -166,5 +167,5 @@ def test_route_stores_evidence_values_and_enqueues_the_write(st, route):
 def test_route_does_not_enqueue_when_nothing_was_described(st, route):
     hitl_update, HitlUpdate, jobs = route
     row = _deferred_row(st)
-    hitl_update(row["id"], HitlUpdate(status="approved", approved_values=[None, None, None]), _req())
+    hitl_update(row["id"], HitlUpdate(status="approved", **viewed_fields(row["id"]), approved_values=[None, None, None]), _req())
     assert not any(name == "apply_approved_values" for name, _ in jobs)

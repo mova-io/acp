@@ -23,6 +23,7 @@ import pytest
 
 import review_target_reconciliation as rtr
 from apply_office_image_replacement import apply_office_image_replacement
+from hitl_viewed import viewed_fields
 
 SID = 'trm-scan'
 FILE = 'synthetic-target-replacement.docx'
@@ -480,9 +481,16 @@ def test_the_route_maps_the_refusal_to_409(store, monkeypatch):
     w = World(store)
     w.reconcile()
     monkeypatch.setattr(core, 'store', store)
+    # A single reviewer's approval gets the coded, actionable 409 (nothing recorded)...
+    response = routes.hitl_update(w.alt, routes.HitlUpdate(status='approved', **viewed_fields(w.alt)), None)
+    assert response.status_code == 409
+    assert json.loads(response.body)['code'] == 'target_removed'
+    # ...and a frozen batch selection keeps its existing refusal.
+    batch = {**viewed_fields(w.alt), 'approval_scope': None, 'request_id': 'batch-1'}
     with pytest.raises(HTTPException) as exc:
-        routes.hitl_update(w.alt, routes.HitlUpdate(status='approved'), None)
+        routes.hitl_update(w.alt, routes.HitlUpdate(status='approved', **batch), None)
     assert exc.value.status_code == 409
+    assert store.get_hitl_item(w.alt)['status'] == 'pending'
 
 
 def test_pending_resync_does_not_resurrect_the_finding(store):

@@ -832,6 +832,16 @@ _SCHEMA = [
       before TEXT, after TEXT, note TEXT,
       PRIMARY KEY (scan_id, file, rule_id, seq)
     )""",
+    # WHERE the verified change is, when the producer actually knew (report follow-up R1). Every
+    # verified change used to read "Location not recorded", because the only trace of its
+    # position was prose in `note` — capped at 500 characters and, for automatic fixes, often
+    # absent. `locator` is the exact target the writer resolved (never truncated, never inferred
+    # from the criterion); `page` is a real one-based page and only ever set by a producer that
+    # read one (PDF) — never a Word "page" computed from a paragraph index. Both nullable: rows
+    # written before v59, and changes whose producer knew neither, stay unknown. Additive: an
+    # older replica keeps inserting the original seven columns and its rows read as unknown.
+    "ALTER TABLE remediation_diff ADD COLUMN IF NOT EXISTS locator TEXT",
+    "ALTER TABLE remediation_diff ADD COLUMN IF NOT EXISTS page INT",
     # HITL review telemetry — one row per human decision, so the Intelligent Review
     # Workspace can report the metric that matters (reviewer TIME eliminated) and calibrate
     # confidence from the human's edit/reject signal. action: approve|edit|reject|skip;
@@ -2533,8 +2543,11 @@ class _PgAdapter:
     # idempotent union DDL fill the missing columns and records one unambiguous schema identity.
     # v58 adds feature-disabled immutable document-wide chunk plans and child
     # receipt slots. No dispatch path reads these tables.
-    _SCHEMA_VERSION = 58
-    _SCHEMA_CHECKSUM_AT_VERSION = "bcaed9350aa98abb6695f7057e157f63"
+    # v59 adds nullable remediation_diff.locator/page: where a verified change is, when its
+    # producer knew. A v58 replica keeps inserting the original columns (its rows read as
+    # unknown location), and newer readers treat NULL as unknown — never as page 1.
+    _SCHEMA_VERSION = 59
+    _SCHEMA_CHECKSUM_AT_VERSION = "815f59854e7da2b1c36886c76000be19"
     # Namespaced so it cannot collide with an advisory lock taken anywhere else. Session-scoped
     # (pg_advisory_lock, not _xact) because the migration spans several transactions.
     _MIGRATION_ADVISORY_KEY = 0x4143500001          # 'ACP' + slot 1
@@ -8327,10 +8340,67 @@ class Store:
                 (scan_id, limit))
             return self._db.fetchall(cur)
 
+    # Where a diff's location came from, as every reader reports it (`location_source`):
+    #   "recorded"    — the producer stored it in the locator/page columns (schema v59+);
+    #   "legacy_note" — reconstructed at READ time from exact durable evidence written before the
+    #                   columns existed: a note the writer composed as "<prefix> · <locator>"
+    #                   (_LEGACY_LOCATION_NOTE_PREFIXES), untruncated. Never written back as a
+    #                   stored location (record_remediation_diffs drops it on replacement);
+    #   None          — unknown. locator and page are then both None.
+    DIFF_LOCATION_RECORDED = "recorded"
+    DIFF_LOCATION_LEGACY_NOTE = "legacy_note"
+    _LEGACY_LOCATION_NOTE_PREFIXES = (
+        "approved by a reviewer · ",                              # handlers commit_credit
+        "AI applied; exact saved copy subsequently verified · ",  # unverified_changes re-verify
+    )
+    _DIFF_NOTE_MAX = 500
+
+    @staticmethod
+    def _diff_page(value) -> int | None:
+        """A real one-based page, or None. bool is not a page; neither is 0 or a string."""
+        return value if type(value) is int and value > 0 else None
+
+    @staticmethod
+    def _diff_locator(value) -> str | None:
+        """The exact locator string, untouched — or None when there is not one."""
+        return value if isinstance(value, str) and value.strip() else None
+
+    @classmethod
+    def _stored_diff_location(cls, entry: dict) -> tuple[str | None, int | None]:
+        """The (locator, page) a diff ENTRY asks to store. An entry a reader marked as a
+        read-time reconstruction (any location_source other than absent/"recorded") stores
+        nothing: replacement paths hand get_remediation_diffs' rows straight back, and a
+        location reconstructed from a note must not become a recorded one on the way through."""
+        if entry.get("location_source") not in (None, cls.DIFF_LOCATION_RECORDED):
+            return None, None
+        return cls._diff_locator(entry.get("locator")), cls._diff_page(entry.get("page"))
+
+    @classmethod
+    def _with_diff_location(cls, row: dict) -> dict:
+        """A diff row with `locator`, `page` and `location_source` resolved for readers."""
+        locator, page = cls._diff_locator(row.get("locator")), cls._diff_page(row.get("page"))
+        source = cls.DIFF_LOCATION_RECORDED if (locator or page) else None
+        if source is None:
+            note = str(row.get("note") or "")
+            # A note at the storage cap may have been cut short, and a cut locator names a
+            # different target — unknown is the honest answer then.
+            if len(note) < cls._DIFF_NOTE_MAX:
+                for prefix in cls._LEGACY_LOCATION_NOTE_PREFIXES:
+                    if note.startswith(prefix) and note[len(prefix):].strip():
+                        locator, source = note[len(prefix):], cls.DIFF_LOCATION_LEGACY_NOTE
+                        break
+        return {**row, "locator": locator, "page": page, "location_source": source}
+
     def record_remediation_diffs(self, scan_id: str, file: str, diffs: list[dict]) -> None:
         """Replace the stored before→after records for one (scan, file). Called once per
         remediate_file run with only the verified-cleared fixes, so a re-run overwrites
-        rather than accumulating stale diffs. No-op for an empty list after clearing."""
+        rather than accumulating stale diffs. No-op for an empty list after clearing.
+
+        Each entry may carry `locator` (the exact target the writer resolved) and `page` (a real
+        one-based page), and both are stored only when they are genuinely that — see
+        _stored_diff_location. The locator is never truncated: a shortened locator names a
+        different target, so it is stored whole or not at all. Replacement callers pass the
+        rows get_remediation_diffs returned, so a stored location survives every re-record."""
         with self._db.cursor() as cur:
             self._db.execute(cur,
                 "DELETE FROM remediation_diff WHERE scan_id=%s AND file=%s", (scan_id, file))
@@ -8339,12 +8409,13 @@ class Store:
                 rid = str(d.get("rule_id") or "")
                 seq = seq_by_rule.get(rid, 0)
                 seq_by_rule[rid] = seq + 1
+                locator, page = self._stored_diff_location(d)
                 self._db.execute(cur,
-                    "INSERT INTO remediation_diff(scan_id,file,rule_id,seq,before,after,note) "
-                    "VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                    "INSERT INTO remediation_diff(scan_id,file,rule_id,seq,before,after,note,"
+                    "locator,page) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     (scan_id, file, rid, seq,
                      str(d.get("before") or "")[:2000], str(d.get("after") or "")[:2000],
-                     str(d.get("note") or "")[:500]))
+                     str(d.get("note") or "")[:self._DIFF_NOTE_MAX], locator, page))
         by_rule: dict[str, list[str]] = {}
         evidence_seq_by_rule: dict[str, int] = {}
         for diff in diffs:
@@ -9123,9 +9194,11 @@ class Store:
         what the certification PDF's 'Before → After' section renders."""
         with self._db.cursor() as cur:
             self._db.execute(cur,
-                "SELECT rule_id,seq,before,after,note,TRUE AS verified FROM remediation_diff "
+                "SELECT rule_id,seq,before,after,note,locator,page,TRUE AS verified "
+                "FROM remediation_diff "
                 "WHERE scan_id=%s AND file=%s ORDER BY rule_id, seq", (scan_id, file))
-            return [{**row, "verified": bool(row["verified"])} for row in self._db.fetchall(cur)]
+            return [self._with_diff_location({**row, "verified": bool(row["verified"])})
+                    for row in self._db.fetchall(cur)]
 
     def list_remediation_diffs(self, scan_id: str, limit: int = 2000) -> list[dict]:
         """Every verified-cleared before→after record across the whole scan — the honest,
@@ -9135,9 +9208,11 @@ class Store:
         Includes `file` so the caller can reconcile per-document."""
         with self._db.cursor() as cur:
             self._db.execute(cur,
-                "SELECT file,rule_id,seq,before,after,note,TRUE AS verified FROM remediation_diff "
+                "SELECT file,rule_id,seq,before,after,note,locator,page,TRUE AS verified "
+                "FROM remediation_diff "
                 "WHERE scan_id=%s ORDER BY rule_id, file, seq LIMIT %s", (scan_id, limit))
-            return [{**row, "verified": bool(row["verified"])} for row in self._db.fetchall(cur)]
+            return [self._with_diff_location({**row, "verified": bool(row["verified"])})
+                    for row in self._db.fetchall(cur)]
 
     def remediation_diff_page(self, scan_id: str, limit: int = 2000) -> dict:
         """Bounded details and full totals from one database statement/snapshot."""
@@ -9145,15 +9220,18 @@ class Store:
             self._db.execute(cur,
                 "WITH totals AS (SELECT COUNT(*) AS total, COUNT(DISTINCT file) AS documents "
                 "FROM remediation_diff WHERE scan_id=%s), "
-                "page AS (SELECT file,rule_id,seq,before,after,note,TRUE AS verified FROM remediation_diff "
+                "page AS (SELECT file,rule_id,seq,before,after,note,locator,page,TRUE AS verified "
+                "FROM remediation_diff "
                 "WHERE scan_id=%s ORDER BY rule_id,file,seq LIMIT %s) "
                 "SELECT totals.total,totals.documents,page.* FROM totals LEFT JOIN page ON 1=1 "
                 "ORDER BY page.rule_id,page.file,page.seq", (scan_id, scan_id, limit))
             rows = self._db.fetchall(cur)
         total, documents = int(rows[0]['total']), int(rows[0]['documents'])
-        items = [{key: row[key] for key in ('file', 'rule_id', 'seq', 'before', 'after', 'note', 'verified')}
+        items = [{key: row[key] for key in ('file', 'rule_id', 'seq', 'before', 'after', 'note',
+                                            'locator', 'page', 'verified')}
                  for row in rows if row['file'] is not None]
-        items = [{**row, 'verified': bool(row['verified'])} for row in items]
+        items = [self._with_diff_location({**row, 'verified': bool(row['verified'])})
+                 for row in items]
         return {'items': items, 'total': total, 'documents': documents,
                 'loaded': len(items), 'complete': len(items) == total}
 
@@ -9227,6 +9305,8 @@ class Store:
                 applied.append({
                     "sc": sc, "criterion": rule_names.get(sc, sc),
                     "before": d.get("before"), "after": d.get("after"), "note": d.get("note"),
+                    "locator": d.get("locator"), "page": d.get("page"),
+                    "location_source": d.get("location_source"),
                     "value": fx.get("value"), "source": fx.get("source"), "thumb": fx.get("thumb"),
                     "decision": decision, "approved_value": hq.get("approved_value"),
                     "reviewer": rv.get("actor"), "reviewed_at": rv.get("ts") or hq.get("reviewed_at"),
@@ -12102,6 +12182,7 @@ class Store:
         # the review card can say why nothing changed. Pending rows are untouched (no key).
         from apply_outcome import annotate_apply_outcomes
         annotate_apply_outcomes(rows, unverified)
+        revisions: dict = {}
         for row in rows:
             if row.get('status') == 'approved' and not row.get('applied'):
                 if row["id"] in superseded:
@@ -12109,10 +12190,11 @@ class Store:
                     # record, nothing is left to save it into, and nothing needs re-approval.
                     row['approval_recheck_required'] = False
                     continue
-                _, refusal = self.approved_write_binding(row, check_target_removal=False)
-                row['approval_recheck_required'] = refusal in {
-                    self.RETRY_SOURCE_MOVED, self.RETRY_VALUES_CHANGED,
-                    self.RETRY_PROPOSALS_SUPERSEDED}
+                # EXACTLY the rows the ordinary writer holds (approved_write_hold), so a held
+                # approval is never an invisible wedge: the flag is what asks for the re-check
+                # that re-binds it. A superset of the retry gate's three stale reasons.
+                row['approval_recheck_required'] = (
+                    self.approved_write_hold(row, revisions=revisions) is not None)
         if include_superseded:
             for r in rows:
                 r["superseded"] = r["id"] in superseded
@@ -12282,13 +12364,25 @@ class Store:
                                expected_proposal_snapshot_ids: list[str] | None = None,
                                expected_source_revision: str | None = None,
                                release_intent_id: str | None = None,
-                               standing_approval_run_id: str | None = None) -> tuple[dict | None, bool]:
+                               standing_approval_run_id: str | None = None,
+                               viewed: bool = False) -> tuple[dict | None, bool]:
         """Persist one reviewer decision atomically and make exact PUT replays a no-op.
 
         These writes collectively make the decision true.  Keeping them behind the adapter's
         single commit boundary prevents pool exhaustion (or any SQL failure) from publishing a
         card state without its values, finding disposition, audit evidence, described-image
         obligation, or durable apply job.
+
+        `viewed=True` is a SINGLE reviewer decision bound to the version the reviewer was shown
+        (routes/hitl.py, `approval_scope: "single"`). An approval then must name that version —
+        `expected_version`, `expected_source_revision` and `expected_proposal_snapshot_ids` (the
+        row's list as served; `[]` when it has none) — and all three are compared here, under
+        the row lock: missing raises "viewed version required", different raises "stale viewed
+        version", and nothing is written either way. A match stamps the revision the reviewer
+        sent, never one read at click time (audit gap 8). The frozen-BATCH guard below is not
+        applied to such a decision: it demands unedited drafts, complete snapshot lineage and a
+        pending row, none of which a single reviewer's edited, legacy or re-checked approval can
+        honestly promise. Reject/skip need no binding under `viewed` (they write nothing).
         """
         draft_fallback = resolution != self.DESCRIBED_RESOLUTION
         import hashlib
@@ -12305,6 +12399,8 @@ class Store:
             payload["release_intent_id"] = release_intent_id
         if standing_approval_run_id is not None:
             payload['standing_approval_run_id'] = standing_approval_run_id
+        if viewed:
+            payload['viewed'] = True
         fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True,
                                     separators=(",", ":")).encode()).hexdigest()
 
@@ -12353,9 +12449,47 @@ class Store:
                     raise ValueError('stale source revision')
                 eligible_item(self, actor, current['scan_id'], standing_approval_run_id, current)
             current_version = int(current.get("decision_version") or 0)
+            viewed_approval = viewed and status == "approved"
+            replay = (current.get("status") == status
+                      and (current.get("reviewer_note") or None) == (reviewer_note or None)
+                      and (current.get("resolution") or None) == (resolution or None)
+                      and (approved_value is None
+                           or (current.get("approved_value") or None) == approved_value)
+                      and _values_match(current))
+            if (replay and viewed_approval
+                    and (not str(current.get("approved_source_revision") or "").strip()
+                         or self.approved_write_hold(current) is not None)):
+                # A RE-CHECK, not a replay. The reviewer re-approved, against the version now on
+                # screen, an approval the writer is holding (its source, values or proposals
+                # moved) or one that never recorded what it was given for. Treating it as a
+                # replay changed nothing, so the row could never leave "needs recheck" — the
+                # approval loop. It is compared and re-bound below like any approval.
+                replay = False
+            if viewed_approval:
+                if (expected_version is None or expected_proposal_snapshot_ids is None
+                        or not str(expected_source_revision or "").strip()):
+                    raise ValueError("viewed version required")
+                if replay:
+                    # An exact repeat of an approval that is already recorded and still current
+                    # (a transport retry without a request id): it writes nothing, so there is
+                    # no unseen version it could bind to.
+                    return current, True
+                # The row as served: a missing list is the empty list GET /hitl/queue shows.
+                served = current.get("proposal_snapshot_ids")
+                served = list(served) if isinstance(served, list) else []
+                try:
+                    now_revision = (self.remediation_source_revision(current["scan_id"])
+                                    if current.get("scan_id") else None)
+                except Exception:
+                    now_revision = None    # unknown is not "the version the reviewer saw"
+                if (int(expected_version) != current_version
+                        or list(expected_proposal_snapshot_ids) != served
+                        or not now_revision or expected_source_revision != now_revision):
+                    raise ValueError("stale viewed version")
             if expected_version is not None and int(expected_version) != current_version:
                 raise ValueError("stale decision version")
-            if expected_proposal_snapshot_ids is not None or expected_source_revision is not None:
+            if not viewed and (expected_proposal_snapshot_ids is not None
+                               or expected_source_revision is not None):
                 # Guard frozen selections under the same row lock as the decision. Omission is
                 # legacy single-item behavior; a batch must supply a complete aligned identity.
                 proposals = current.get("proposals") or []
@@ -12396,12 +12530,6 @@ class Store:
                 if (not expected_source_revision or not current.get("scan_id")
                         or expected_source_revision != self.remediation_source_revision(current["scan_id"])):
                     raise ValueError("stale source revision")
-            replay = (current.get("status") == status
-                      and (current.get("reviewer_note") or None) == (reviewer_note or None)
-                      and (current.get("resolution") or None) == (resolution or None)
-                      and (approved_value is None
-                           or (current.get("approved_value") or None) == approved_value)
-                      and _values_match(current))
             if replay:
                 return current, True
 
@@ -12510,6 +12638,84 @@ class Store:
             return None
         return hashlib.sha256(json.dumps(values, separators=(",", ":"),
                                          ensure_ascii=False).encode()).hexdigest()
+
+    # The writer's hold reasons, as the safe codes the audit line records (never the prose).
+    WRITE_HOLD_CODES = {
+        RETRY_SOURCE_MOVED: "source_moved",
+        RETRY_VALUES_CHANGED: "values_changed",
+        RETRY_PROPOSALS_SUPERSEDED: "proposals_superseded",
+        RETRY_NO_BINDING: "source_revision_unavailable",
+    }
+
+    def approved_write_hold(self, item: dict | None, *,
+                            revisions: dict | None = None) -> str | None:
+        """Why the ORDINARY approved-value writer must pass this approval by, or None to admit it.
+
+        Writer-specific admission (audit gap 9). approved_write_binding is the RETRY gate and
+        demands a complete binding plus an existing corrected copy; the ordinary writer cannot:
+        its first write may precede any corrected copy, a decorative marking holds no text, and
+        rows recorded before any binding existed (and the described-image obligation
+        queue_described_image_alt creates) carry none. So this holds only on POSITIVE evidence
+        that the approval no longer describes the row — each recorded part of the binding is
+        compared, and an unrecorded part is not evidence:
+
+          * approved_source_revision recorded and the scan's current revision differs
+            (RETRY_SOURCE_MOVED; a current revision that cannot be read is RETRY_NO_BINDING —
+            a recorded binding that cannot be confirmed is not admitted either);
+          * approved_value_sha256 recorded and the row's values no longer hash to it
+            (RETRY_VALUES_CHANGED — e.g. a later run replaced the drafts in place, which the
+            draft fallback would otherwise have written as if approved);
+          * approved_proposal_snapshot_ids recorded and the row's aligned snapshots differ
+            (RETRY_PROPOSALS_SUPERSEDED).
+
+        Target removal is answered separately (review_target_reconciliation), as before.
+
+        Deliberately NOT applied to _approved_unapplied_rows: every compliance counter reads
+        that, and a held approval is still approved content the document does not carry.
+        list_hitl_queue flags exactly these rows `approval_recheck_required`, so a hold is never
+        invisible, and re-approving the current version re-binds it (complete_hitl_decision).
+
+        `revisions` caches {scan_id: revision} across the rows of one read.
+        """
+        if not item or str(item.get("status") or "") != "approved" or item.get("applied"):
+            return None
+        scan_id = item.get("scan_id")
+        approved_revision = str(item.get("approved_source_revision") or "").strip()
+        if approved_revision:
+            cache = revisions if revisions is not None else {}
+            if scan_id not in cache:
+                try:
+                    cache[scan_id] = str(self.remediation_source_revision(scan_id) or "").strip()
+                except Exception:
+                    cache[scan_id] = ""
+            if not cache[scan_id]:
+                return self.RETRY_NO_BINDING
+            if cache[scan_id] != approved_revision:
+                return self.RETRY_SOURCE_MOVED
+        approved_digest = str(item.get("approved_value_sha256") or "").strip()
+        if approved_digest and self._approved_value_digest(item) != approved_digest:
+            return self.RETRY_VALUES_CHANGED
+        approved_snapshots = item.get("approved_proposal_snapshot_ids")
+        if isinstance(approved_snapshots, list):
+            captured = item.get("proposal_snapshot_ids")
+            captured = captured if isinstance(captured, list) else []
+            instances = item.get("proposals") or item.get("evidence") or []
+            aligned = [captured[i] if i < len(captured) else None for i in range(len(instances))]
+            if list(approved_snapshots) != aligned:
+                return self.RETRY_PROPOSALS_SUPERSEDED
+        return None
+
+    def approved_write_holds(self, rows) -> dict[str, str]:
+        """{item_id: hold reason} for the rows the ordinary writer must pass by."""
+        revisions: dict = {}
+        out: dict[str, str] = {}
+        for row in rows or ():
+            if not row:
+                continue
+            reason = self.approved_write_hold(row, revisions=revisions)
+            if reason:
+                out[str(row["id"])] = reason
+        return out
 
     def approved_write_binding(self, item: dict | None, *,
                                check_target_removal: bool = True) -> tuple[dict | None, str | None]:

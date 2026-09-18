@@ -40,6 +40,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from hitl_viewed import viewed_fields
 
 ACP = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ACP / "api"))
@@ -358,7 +359,7 @@ def test_the_route_persists_the_resolution_on_the_row(store, route):
     hitl_update, HitlUpdate, _jobs = route
     _remediated(store)
     item = _deco_row(store)
-    hitl_update(item, HitlUpdate(status="approved", resolution="decorative"), _req())
+    hitl_update(item, HitlUpdate(status="approved", **viewed_fields(item), resolution="decorative"), _req())
 
     assert store.get_hitl_item(item)["resolution"] == "decorative"
     assert store.count_unapplied_approved_values(SID, FILE) == 0
@@ -369,7 +370,7 @@ def test_the_route_schedules_the_marking_for_a_decorative_resolution(store, rout
     scheduled nothing and the marking never reached the document."""
     hitl_update, HitlUpdate, jobs = route
     _remediated(store)
-    hitl_update(_deco_row(store), HitlUpdate(status="approved", resolution="decorative"), _req())
+    hitl_update(_deco_row(store), HitlUpdate(status="approved", **viewed_fields(_deco_row(store)), resolution="decorative"), _req())
 
     assert [n for n, _ in jobs] == ["apply_approved_values"]
 
@@ -381,8 +382,8 @@ def test_reversing_a_resolution_restores_the_authored_value(store, route):
     hitl_update, HitlUpdate, _jobs = route
     _remediated(store)
     item = _deco_row(store)
-    hitl_update(item, HitlUpdate(status="approved", resolution="decorative"), _req())
-    hitl_update(item, HitlUpdate(status="approved", approved_values=["A nurse at a bedside."]),
+    hitl_update(item, HitlUpdate(status="approved", **viewed_fields(item), resolution="decorative"), _req())
+    hitl_update(item, HitlUpdate(status="approved", **viewed_fields(item), approved_values=["A nurse at a bedside."]),
                 _req())
 
     assert store.get_hitl_item(item)["resolution"] in (None, "")
@@ -395,7 +396,7 @@ def test_a_rejection_un_resolves_the_finding(store, route):
     hitl_update, HitlUpdate, _jobs = route
     _remediated(store)
     item = _deco_row(store)
-    hitl_update(item, HitlUpdate(status="approved", resolution="decorative"), _req())
+    hitl_update(item, HitlUpdate(status="approved", **viewed_fields(item), resolution="decorative"), _req())
     hitl_update(item, HitlUpdate(status="rejected", reject_reason="incorrect_object"), _req())
 
     assert store.get_hitl_item(item)["resolution"] in (None, "")

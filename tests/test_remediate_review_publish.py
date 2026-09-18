@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from hitl_viewed import viewed_fields
 
 ACP = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ACP / "api"))
@@ -137,7 +138,7 @@ def _approve(store, monkeypatch, user_email):
     created = store.queue_hitl_review_for_file(
         "s1", "deck.pptx", _residual_review_rules(store, "s1", "deck.pptx", cleared={"1.4.3"}))
     assert len(created) == 1                                   # just the link-purpose residual
-    return hitl_update(created[0]["id"], HitlUpdate(status="approved"), _req(user_email))
+    return hitl_update(created[0]["id"], HitlUpdate(status="approved", **viewed_fields(created[0]["id"])), _req(user_email))
 
 
 def _approval_actor(store):

@@ -47,6 +47,47 @@ def test_concurrent_duplicate_decision_commits_once():
         "apply_approved_values"]
 
 
+def test_viewed_binding_is_a_compare_and_set_under_the_row_lock():
+    """Two reviewers approve the same row from the same viewed version with different text. The
+    row lock serializes them: exactly one approval is recorded and bound to the viewed revision;
+    the other is refused as a stale view and writes nothing — no second audit line, no second job.
+    Then a re-assessment holds the recorded approval from the ordinary writer."""
+    st = store_mod.Store()
+    scan_id = f"hitl-viewed-{uuid.uuid4()}"
+    st.init_scan_run(scan_id, "drive", 1, "t0", "rubric", "hash")
+    item_id = st.enqueue_proposals(scan_id, "deck.pptx", "1.1.1", [{
+        "locator": "ppt/slides/slide1.xml#Picture 1", "proposed_value": "A synthetic chart."}])
+    viewed_revision = st.remediation_source_revision(scan_id)
+    barrier = threading.Barrier(2)
+
+    def decide(text, request_id):
+        barrier.wait()
+        try:
+            return st.complete_hitl_decision(
+                item_id, "approved", None, None, resolution=None, approved_values=[text],
+                actor="reviewer@example.com", detail=None, request_id=request_id,
+                expected_version=0, expected_proposal_snapshot_ids=[],
+                expected_source_revision=viewed_revision, viewed=True)
+        except ValueError as exc:
+            return str(exc)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [f.result() for f in [pool.submit(decide, "First reviewer text", "r-1"),
+                                        pool.submit(decide, "Second reviewer text", "r-2")]]
+    assert sorted(r if isinstance(r, str) else "recorded" for r in results) == [
+        "recorded", "stale viewed version"]
+    row = st.get_hitl_item(item_id)
+    assert row["decision_version"] == 1
+    assert row["approved_source_revision"] == viewed_revision
+    assert [d["action"] for d in st.list_decisions(scan_id)] == ["hitl.approved"]
+    assert [j["type"] for j in st.list_jobs() if j.get("scan_id") == scan_id] == [
+        "apply_approved_values"]
+    with st._db.cursor() as cur:
+        st._db.execute(cur, "UPDATE scan_runs SET rubric_hash=%s WHERE id=%s", ("moved", scan_id))
+    assert st.approved_write_hold(st.get_hitl_item(item_id)) == st.RETRY_SOURCE_MOVED
+    assert st.count_unapplied_approved_values(scan_id, "deck.pptx") == 1
+
+
 @pytest.mark.parametrize('mutation', ['none', 'review_changed_upload', 'consent_changed_upload', 'serialized_review_note'])
 def test_office_retry_commit_rechecks_exact_authority_on_postgres(monkeypatch, mutation):
     """Use the actual queued Office writer on a separate guarded disposable database.

@@ -143,6 +143,39 @@ def saved_changes(store, scan_id, filename):
             for entry in pending_records(store, scan_id, filename) for change in entry.get('changes', [])]
 
 
+# How get_remediation_diffs marks a locator it STORED, as opposed to one it reconstructed at read
+# time from older evidence (e.g. a reviewer note). Only a stored location is written back.
+_STORED_LOCATION_SOURCES = (None, 'recorded')
+
+
+def _known_location(change):
+    """{'locator', 'page'} as the writer recorded them for this change; absent = unknown.
+
+    Copies, never derives: a page is carried only when the writer put a real one-based page
+    on the change, and is never read out of the locator text or a paragraph index."""
+    out = {}
+    locator = change.get('locator')
+    if isinstance(locator, str) and locator.strip():
+        out['locator'] = locator
+    page = change.get('page')
+    if isinstance(page, int) and not isinstance(page, bool) and page > 0:
+        out['page'] = page
+    return out
+
+
+def _as_recorded(diff):
+    """An existing diff row, ready to be re-recorded by the whole-list replacement below.
+
+    record_remediation_diffs REPLACES the (scan, file) set, so every earlier row is written
+    again. Its stored location must survive that; a location the reader only reconstructed
+    must not be promoted into a stored one on the way through."""
+    row = dict(diff)
+    if row.get('location_source') not in _STORED_LOCATION_SOURCES:
+        row.pop('locator', None)
+        row.pop('page', None)
+    return row
+
+
 def record_verification(store, scan_id, filename, data, verification):
     """Clear exact durable writes only after rechecking these same bytes; idempotent."""
     from hashlib import sha256
@@ -154,7 +187,7 @@ def record_verification(store, scan_id, filename, data, verification):
     with store.transaction():
         if (store.get_file_record(scan_id, filename) or {}).get('corrected_sha256') != digest:
             return 0
-        diffs=list(store.get_remediation_diffs(scan_id, filename) or [])
+        diffs=[_as_recorded(d) for d in (store.get_remediation_diffs(scan_id, filename) or [])]
         for entry in pending_records(store, scan_id, filename):
             if entry.get('requires_semantic_review') is True:
                 continue  # Presence-only scans cannot certify model-generated meaning.
@@ -173,7 +206,8 @@ def record_verification(store, scan_id, filename, data, verification):
             store.log_decision('system','apply.reverified',scan_id=scan_id,file=filename,
                 rule_id=entry['rule_id'],detail=json.dumps({'source_event_id':entry['event_id'],'artifact_sha256':digest}))
             diffs.extend({'rule_id':entry['rule_id'],'before':c.get('before',''),'after':c.get('after',''),
-                'note':'AI applied; exact saved copy subsequently verified · '+str(c.get('locator',''))}
+                'note':'AI applied; exact saved copy subsequently verified · '+str(c.get('locator','')),
+                **_known_location(c)}
                 for c in entry.get('changes',[]))
             count+=1
         if count:

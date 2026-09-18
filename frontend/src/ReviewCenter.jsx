@@ -3,6 +3,7 @@ import { SEV, sevOf, reasonOf, priorityScore, groupLabel } from './hitlMeta.js'
 import { confidenceForFinding, confClass } from './confidence.js'
 import { openTraceUrl } from './api.js'
 import EvidenceCard from './EvidenceCard.jsx'
+import { viewedBindingKey } from './viewedApprovalBinding.js'
 // proposalMeta / firstProposed live in reviewCard.js — the single source of truth for how a
 // hitl_queue.proposals row is read. EvidenceCard uses them too; don't fork the logic.
 import { VALUE_FIX, firstProposed, proposalMeta, reviewType, REVIEW_TYPES } from './reviewCard.js'
@@ -238,8 +239,13 @@ export default function ReviewCenter({ items, onAct, onClose, onRefresh, error }
                             confidence level, and the real before/after diff for this
                             criterion. EvidenceCard owns the write so review telemetry
                             (edited / review_ms / ai_value) is recorded — that is how
-                            "review in seconds" gets measured rather than asserted. */}
+                            "review in seconds" gets measured rather than asserted.
+                            Keyed by the row's VERSION: the card seeds its editors once, at mount,
+                            and HitlBell binds the approval to the row it holds now. A poll that
+                            brings a new version must remount the card, or its old text would be
+                            approved under the new version's binding (viewedApprovalBinding.js). */}
                         <EvidenceCard
+                          key={viewedBindingKey(it)}
                           item={it}
                           onAct={onAct}
                           onResolved={() => setExpanded(null)}

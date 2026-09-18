@@ -16,6 +16,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from hitl_viewed import viewed_fields
 
 ACP = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ACP / "api"))
@@ -363,7 +364,7 @@ def test_the_approve_route_enqueues_the_write_and_records_the_values(store, monk
     from routes.hitl import hitl_update, HitlUpdate
 
     item_id = _seed(store)
-    res = hitl_update(item_id, HitlUpdate(status="approved",
+    res = hitl_update(item_id, HitlUpdate(status="approved", **viewed_fields(item_id),
                                           approved_values=["A clinician at a desk.", None]), _req())
     assert res["status"] == "approved"
 
@@ -389,7 +390,7 @@ def test_a_judgement_approval_schedules_no_write(store, monkeypatch):
 
     store.init_scan_run(SID, "drive", 1, "t", "r", "h")
     item = store.queue_hitl_deferral(SID, FILE, "contrast needs sign-off", 1, rule_id="1.4.3")
-    hitl_update(item, HitlUpdate(status="approved"), _req())
+    hitl_update(item, HitlUpdate(status="approved", **viewed_fields(item)), _req())
     assert store.claim_job("w1") is None
 
 
@@ -444,7 +445,7 @@ def test_a_link_text_only_approval_still_schedules_the_write(store, monkeypatch)
     from routes.hitl import hitl_update, HitlUpdate
 
     item = _seed_link(store)                                  # a docx whose ONLY row is 2.4.4
-    hitl_update(item, HitlUpdate(status="approved", approved_values=[None]), _req())
+    hitl_update(item, HitlUpdate(status="approved", **viewed_fields(item), approved_values=[None]), _req())
 
     assert store.approved_alt_values(SID, DOC_FILE) == {}     # nothing on the alt lane
     job = store.claim_job("w1")
