@@ -814,7 +814,9 @@ def _narrate_replacements(store, scan_id, file, batch_id, lines):
             store.append_scan_event(scan_id, 'remediate.review_target_replaced', phase='remediate',
                                     document=file, correlation_id=batch_id, detail=detail)
         except Exception:
-            pass
+            from swallowed import swallowed
+            swallowed("review_target_reconciliation._narrate_replacements: appending the "
+                      "review_target_replaced event failed", scan_id)
 
 
 # ── trigger points ─────────────────────────────────────────────────────────────────────────

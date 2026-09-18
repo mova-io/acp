@@ -8,7 +8,7 @@ import { dbItemToUi } from './Remediate.jsx'
 import { exclusionReason } from './batchReviewSelection.js'
 afterEach(unmountAll)
 const ready = id => ({ id, file: `z-${id}.docx`, ruleId: '1.1.1', hasProposal: true, after: `alt ${id}`,
-  proposals: [{ proposed_value: `alt ${id}` }], _raw: { decision_version: 0, source_revision: 'source', proposal_snapshot_ids: [`snapshot-${id}`] } })
+  proposals: [{ proposed_value: `alt ${id}` }], _raw: { decision_version: 0, source_revision: 'source', proposal_snapshot_ids: [`snapshot-${id}`], corrected_artifact: 'none' } })
 const applied = Array.from({ length: 119 }, (_, i) => ({ id: `applied-${i}`, file: `a-${i}.docx`, autoApplied: true, after: 'Applied change' }))
 const click = async el => act(async () => el.tagName === 'OPTION' ? (el.parentElement.value = el.value, el.parentElement.dispatchEvent(new Event('change', { bubbles: true }))) : el.dispatchEvent(new MouseEvent('click', { bubbles: true })))
 async function mount(Component, props) {
@@ -158,7 +158,7 @@ it('includes ready HITL rows beyond the separate 2000 applied-inspection cap', a
 })
 
 it('preserves server proposal lineage through the completion-refresh mapper without inventing missing evidence', () => {
-  const raw = { id: 'persisted', file: 'document.docx', rule_id: '1.1.1', proposals: [{ proposed_value: 'Actual proposal' }], decision_version: 0, source_revision: 'source', proposal_snapshot_ids: ['snapshot'] }
+  const raw = { id: 'persisted', file: 'document.docx', rule_id: '1.1.1', proposals: [{ proposed_value: 'Actual proposal' }], decision_version: 0, source_revision: 'source', proposal_snapshot_ids: ['snapshot'], corrected_artifact: 'none' }
   const before = JSON.stringify(raw)
   Object.freeze(raw)
   const mapped = dbItemToUi(raw, [])

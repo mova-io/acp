@@ -514,6 +514,12 @@ _SCHEMA = [
     "ALTER TABLE hitl_queue ADD COLUMN IF NOT EXISTS approved_proposal_snapshot_ids TEXT",
     "ALTER TABLE hitl_queue ADD COLUMN IF NOT EXISTS approved_source_revision TEXT",
     "ALTER TABLE hitl_queue ADD COLUMN IF NOT EXISTS approved_value_sha256 TEXT",
+    # The corrected ARTIFACT the approval was given against: file_records.corrected_sha256 as the
+    # reviewer saw it, or "none" when the document had no corrected copy yet (a first write,
+    # built on the assessed source the source revision already binds). The assessment revision
+    # alone does not move when a new corrected copy is saved, so without this an approval given
+    # against one copy was written into different bytes. NULL = not recorded (legacy): held.
+    "ALTER TABLE hitl_queue ADD COLUMN IF NOT EXISTS approved_corrected_sha256 TEXT",
     # Where the finding IS, in words, for the formats that have no page number. `page`/`pages`
     # above are integers and answer this for PDF only; a spreadsheet's answer is "Sheet
     # 'Findings' cell B2" and a deck's is "Slide 3". Without this column the review card's
@@ -1937,6 +1943,10 @@ _SCHEMA.extend([*_AI_SPENDING_SCHEMA, _AI_RUN_POLICY_SCHEMA,
 # v56 adds bounded scheduled execution to the existing occurrence ledger.
 from scheduled_scan_store import SCHEMA as _SCHEDULED_EXECUTION_SCHEMA
 _SCHEMA.extend(_SCHEDULED_EXECUTION_SCHEMA)
+# Report history (R-B2): per-write assessment envelopes and the rows a same-scan
+# re-assessment replaced. Additive; see api/report_history.py.
+from report_history import SCHEMA as _REPORT_HISTORY_SCHEMA
+_SCHEMA.extend(_REPORT_HISTORY_SCHEMA)
 
 # ── Power BI read-only views (Postgres only) ────────────────────────────────
 # Three views that expose ACP scan data for Power BI DirectQuery. They are
@@ -2546,8 +2556,14 @@ class _PgAdapter:
     # v59 adds nullable remediation_diff.locator/page: where a verified change is, when its
     # producer knew. A v58 replica keeps inserting the original columns (its rows read as
     # unknown location), and newer readers treat NULL as unknown — never as page 1.
-    _SCHEMA_VERSION = 59
-    _SCHEMA_CHECKSUM_AT_VERSION = "815f59854e7da2b1c36886c76000be19"
+    # v60 adds file_assessment_history (R-B2 report history): additive, and additive in
+    # BEHAVIOUR — an older replica neither reads nor writes it; its re-assessments simply
+    # record no history, and readers treat a missing snapshot as "not captured".
+    # v61 adds nullable hitl_queue.approved_corrected_sha256: the corrected artifact an approval
+    # was given against. An older replica never writes it, and newer writers HOLD an approved row
+    # without it until it is re-approved — the safe direction for a binding that was not recorded.
+    _SCHEMA_VERSION = 61
+    _SCHEMA_CHECKSUM_AT_VERSION = "e7f27561225a4d1df3d3c1bc9f426912"
     # Namespaced so it cannot collide with an advisory lock taken anywhere else. Session-scoped
     # (pg_advisory_lock, not _xact) because the migration spans several transactions.
     _MIGRATION_ADVISORY_KEY = 0x4143500001          # 'ACP' + slot 1
@@ -4960,7 +4976,10 @@ class Store:
         scope = self.scope_for_file(scan_id, f["file"], scope)
         import json as _json
         catalog = _CATALOG_JSON
+        import report_history as _report_history
         with self._db.cursor() as cur:
+            # R-B2: the row the upsert below overwrites (locked on Postgres), read first.
+            _outgoing = _report_history.capture_outgoing(self, cur, scan_id, f["file"])
             # The WHERE on DO UPDATE is the fence. Supported by both SQLite and Postgres, and
             # confirmed by experiment rather than by reading: a failed WHERE leaves rowcount 0,
             # which is what the refusal below reads.
@@ -5000,6 +5019,10 @@ class Store:
                       f"from job {_job_id} attempt {_attempt} — a later attempt of that same job "
                       f"has already written it", flush=True)
                 return False
+            # R-B2: keep the assessment being replaced (its rows, manifest and the envelope
+            # recorded at its own write) before the DELETE — same cursor, same transaction.
+            _report_history.record_assessment_write(self, cur, scan_id, f, completed_at,
+                                                    _outgoing, file_scope=scope, job=job)
             self._db.execute(cur, "DELETE FROM issue_records WHERE scan_id=%s AND file=%s", (scan_id, f["file"]))
             issues = f.get("issues", [])
             if issues:
@@ -5332,7 +5355,7 @@ class Store:
     # preserved" promise. If you add a table that stores scan/review output, ADD IT HERE — the
     # reset-completeness test (test_reset_leaves_no_customer_data) fails closed if a data table
     # is left out.
-    _ANALYTICS_TABLES = ["scan_runs", "workflow_executions", "file_records", "issue_records", "scan_rule_traces",
+    _ANALYTICS_TABLES = ["scan_runs", "workflow_executions", "file_records", "issue_records", "scan_rule_traces", "file_assessment_history",
                          "file_stage_timings", "scan_file_manifests", "scan_inventory", "file_tags",
                          "scan_decisions", "pii_findings", "hitl_queue", "hitl_events",
                          "disposition_audit", "decision_log", "inventory", "jobs", "documents",
@@ -5432,7 +5455,7 @@ class Store:
     # — nothing to do with any scan). The scan_id-IN-subquery reset_user_data runs against this
     # list cannot reach those NULL-scan_id rows, so reset_user_data ALSO deletes
     # orchestration_events by owner_email directly, after this loop — see its body.
-    _RESET_USER_SCAN_TABLES = ["file_records", "issue_records", "scan_rule_traces",
+    _RESET_USER_SCAN_TABLES = ["file_records", "issue_records", "scan_rule_traces", "file_assessment_history",
                                "file_stage_timings", "scan_file_manifests", "scan_inventory",
                                "file_tags", "pii_findings", "hitl_queue", "hitl_events",
                                "finding_disposition", "finding_disposition_event",
@@ -6081,6 +6104,13 @@ class Store:
                              tuple(params))
             rows = self._db.fetchall(cur)
         return {r["kind"]: {"value": r["value"], "updated_at": r["updated_at"]} for r in rows}
+
+    def change_reviews_for_scan(self, scan_id: str, owner: str, *,
+                                files: list[str] | None = None) -> dict[str, dict]:
+        """R-B4: {file: get_change_reviews(scan_id, file, owner=owner)} for the whole scan (or
+        `files`); files with no verdict are absent. `owner` is required (ValueError)."""
+        import report_history as _report_history
+        return _report_history.change_reviews_for_scan(self, scan_id, owner, files=files)
 
     def save_decision(self, scan_id: str, file: str, kind: str, value: str,
                       owner: str | None, when: str) -> None:
@@ -9200,6 +9230,14 @@ class Store:
             return [self._with_diff_location({**row, "verified": bool(row["verified"])})
                     for row in self._db.fetchall(cur)]
 
+    def remediation_diffs_for_scan(self, scan_id: str, *, owner: str | None = None,
+                                   files: list[str] | None = None) -> dict[str, list[dict]]:
+        """R-B4: {file: get_remediation_diffs(scan_id, file)} for the whole scan (or `files`) in
+        one statement per chunk — every row, not list_remediation_diffs' 2,000 cap — projected
+        through _with_diff_location. `owner` given: {} for an unknown/foreign scan."""
+        import report_history as _report_history
+        return _report_history.remediation_diffs_for_scan(self, scan_id, owner=owner, files=files)
+
     def list_remediation_diffs(self, scan_id: str, limit: int = 2000) -> list[dict]:
         """Every verified-cleared before→after record across the whole scan — the honest,
         scan-wide 'what actually got fixed' set. Unlike applied_fixes (image alt text only),
@@ -10489,10 +10527,15 @@ class Store:
         if owner is not None:
             conditions.append("f.scan_id IN (SELECT id FROM scan_runs WHERE owner_email=%s)")
             params.append(owner)
+        # `blob_url` IS THE COMMITTED ARTIFACT POINTER, and blob._remediated_client reads it
+        # through get_file_record to decide which object is the corrected copy. It used to be
+        # missing from this projection, so that reader never saw a digest-scoped pointer and
+        # always served the mutable canonical blob — whatever the committed record said.
         with self._db.cursor() as cur:
             self._db.execute(cur,
                 "SELECT f.file,f.engine,f.status,f.score,f.compliant,f.drive_file_id,"
                 "f.remediated_at,f.published_at,f.published_url,f.checksum,f.corrected_sha256,f.source_modified,"
+                "f.blob_url,"
                 "i.source_name,i.path AS source_relative_path,i.parent_folder,i.drive_id,i.site_id,"
                 "i.library_name,i.site_name "
                 "FROM file_records f LEFT JOIN scan_inventory i "
@@ -12365,7 +12408,8 @@ class Store:
                                expected_source_revision: str | None = None,
                                release_intent_id: str | None = None,
                                standing_approval_run_id: str | None = None,
-                               viewed: bool = False) -> tuple[dict | None, bool]:
+                               viewed: bool = False,
+                               expected_corrected_sha256: str | None = None) -> tuple[dict | None, bool]:
         """Persist one reviewer decision atomically and make exact PUT replays a no-op.
 
         These writes collectively make the decision true.  Keeping them behind the adapter's
@@ -12401,6 +12445,8 @@ class Store:
             payload['standing_approval_run_id'] = standing_approval_run_id
         if viewed:
             payload['viewed'] = True
+        if expected_corrected_sha256 is not None:
+            payload['expected_corrected_sha256'] = expected_corrected_sha256
         fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True,
                                     separators=(",", ":")).encode()).hexdigest()
 
@@ -12457,8 +12503,7 @@ class Store:
                            or (current.get("approved_value") or None) == approved_value)
                       and _values_match(current))
             if (replay and viewed_approval
-                    and (not str(current.get("approved_source_revision") or "").strip()
-                         or self.approved_write_hold(current) is not None)):
+                    and self.approved_write_hold(current) is not None):
                 # A RE-CHECK, not a replay. The reviewer re-approved, against the version now on
                 # screen, an approval the writer is holding (its source, values or proposals
                 # moved) or one that never recorded what it was given for. Treating it as a
@@ -12467,7 +12512,8 @@ class Store:
                 replay = False
             if viewed_approval:
                 if (expected_version is None or expected_proposal_snapshot_ids is None
-                        or not str(expected_source_revision or "").strip()):
+                        or not str(expected_source_revision or "").strip()
+                        or not str(expected_corrected_sha256 or "").strip()):
                     raise ValueError("viewed version required")
                 if replay:
                     # An exact repeat of an approval that is already recorded and still current
@@ -12484,7 +12530,9 @@ class Store:
                     now_revision = None    # unknown is not "the version the reviewer saw"
                 if (int(expected_version) != current_version
                         or list(expected_proposal_snapshot_ids) != served
-                        or not now_revision or expected_source_revision != now_revision):
+                        or not now_revision or expected_source_revision != now_revision
+                        or expected_corrected_sha256 != self.corrected_artifact_token(
+                            current.get("scan_id"), current.get("file"))):
                     raise ValueError("stale viewed version")
             if expected_version is not None and int(expected_version) != current_version:
                 raise ValueError("stale decision version")
@@ -12530,6 +12578,9 @@ class Store:
                 if (not expected_source_revision or not current.get("scan_id")
                         or expected_source_revision != self.remediation_source_revision(current["scan_id"])):
                     raise ValueError("stale source revision")
+                if (expected_corrected_sha256 is not None and expected_corrected_sha256
+                        != self.corrected_artifact_token(current["scan_id"], current.get("file"))):
+                    raise ValueError("stale source revision")
             if replay:
                 return current, True
 
@@ -12564,20 +12615,37 @@ class Store:
                         value = str(instance.get("proposed_value") or "").strip()
                     approved_values_for_digest.append(value)
                     approved_aligned.append(captured[index] if index < len(captured) else None)
-                digest = hashlib.sha256(json.dumps(
-                    approved_values_for_digest, separators=(",", ":"), ensure_ascii=False).encode()
-                ).hexdigest() if approved_values_for_digest else None
+                # The digest of the values AS PERSISTED — the same function the writer and the
+                # retry gate recompute. Hashing the request instead disagreed with the row
+                # whenever an approval sent no values over values an earlier approval had stored
+                # (a re-check of an unedited card), so a fresh re-approval read as "changed".
+                digest = (self._approved_value_digest(self._get_hitl_item_for_decision(item_id) or {})
+                          if approved_values_for_digest else None)
                 source_revision = expected_source_revision or (
                     self.remediation_source_revision(current["scan_id"]) if current.get("scan_id") else None)
+                # The corrected artifact: the one the reviewer SENT (a viewed approval, compared
+                # above), else — for the automatic paths that call this directly (standing
+                # approvals, release continuation), which verify the exact artifact themselves —
+                # the one current under this lock.
+                artifact = expected_corrected_sha256 or self.corrected_artifact_token(
+                    current.get("scan_id"), current.get("file"))
                 with self._db.cursor() as cur:
                     self._db.execute(cur,
                         "UPDATE hitl_queue SET approved_proposal_snapshot_ids=%s,"
-                        "approved_source_revision=%s,approved_value_sha256=%s WHERE id=%s",
+                        "approved_source_revision=%s,approved_value_sha256=%s,"
+                        "approved_corrected_sha256=%s WHERE id=%s",
                         (json.dumps(approved_aligned, separators=(",", ":")),
-                         source_revision, digest, item_id))
-            if (status == "approved" and resolution == self.DESCRIBED_RESOLUTION
-                    and self.queue_described_image_alt(item_id) is None):
-                raise ValueError("described decision produced no alt-text obligation")
+                         source_revision, digest, artifact, item_id))
+            if status == "approved" and resolution == self.DESCRIBED_RESOLUTION:
+                described_id = self.queue_described_image_alt(item_id)
+                if described_id is None:
+                    raise ValueError("described decision produced no alt-text obligation")
+                # ADR 0055's alt-text obligation is written by the ordinary writer, so it needs a
+                # complete binding of its own — the SAME version the reviewer approved on the
+                # image-of-text row (source revision + corrected artifact, from this decision), and
+                # a digest and snapshot alignment of the described row's own values, recorded now,
+                # in the transaction that created them.
+                self._bind_derived_approval(described_id, source_revision, artifact)
             self.log_decision('system' if standing_approval_run_id else actor,
                               'hitl.approved_under_run_policy' if standing_approval_run_id else f"hitl.{status}", scan_id=current.get("scan_id"),
                               file=current.get("file"), rule_id=current.get("rule_id"),
@@ -12608,6 +12676,9 @@ class Store:
     RETRY_PROPOSALS_SUPERSEDED = ("A newer remediation run replaced the suggestions on this "
                                   "item, so the approval no longer describes what is on it. "
                                   "Review the current suggestion before saving.")
+    RETRY_ARTIFACT_MOVED = ("The saved corrected copy of this document has changed since this "
+                            "was approved, so the approval describes different bytes. Review "
+                            "this suggestion against the current copy, then approve it again.")
     RETRY_TARGET_REMOVED = ("A different verified change already removed the content this "
                             "suggestion was written for, so there is nothing left to save it "
                             "into. The approval stays on record; no further action is needed.")
@@ -12644,31 +12715,81 @@ class Store:
         RETRY_SOURCE_MOVED: "source_moved",
         RETRY_VALUES_CHANGED: "values_changed",
         RETRY_PROPOSALS_SUPERSEDED: "proposals_superseded",
-        RETRY_NO_BINDING: "source_revision_unavailable",
+        RETRY_ARTIFACT_MOVED: "artifact_moved",
+        RETRY_NO_BINDING: "binding_missing",
     }
+    # The artifact token for "this document has no corrected copy yet".
+    NO_CORRECTED_ARTIFACT = "none"
+
+    def corrected_artifact_token(self, scan_id: str | None, file: str | None) -> str:
+        """The corrected artifact an approval is bound to: file_records.corrected_sha256, or
+        NO_CORRECTED_ARTIFACT when none is recorded. GET /hitl/queue lists it per row as
+        `corrected_artifact`, and an approval sends it back as `expected_corrected_sha256`."""
+        record = (self.get_file_record(scan_id, file) or {}) if scan_id and file else {}
+        return str(record.get("corrected_sha256") or "").strip() or self.NO_CORRECTED_ARTIFACT
+
+    def _bind_derived_approval(self, item_id: str, source_revision: str | None,
+                               artifact: str) -> None:
+        """Record a complete binding on an approval DERIVED from a human decision in the same
+        transaction (ADR 0055's described-image obligation): the parent's revision and artifact,
+        and this row's own value digest and snapshot alignment as just written."""
+        row = self._get_hitl_item_for_decision(item_id) or {}
+        instances = row.get("proposals") or row.get("evidence") or []
+        captured = row.get("proposal_snapshot_ids")
+        captured = captured if isinstance(captured, list) else []
+        aligned = [captured[i] if i < len(captured) else None for i in range(len(instances))]
+        with self._db.cursor() as cur:
+            self._db.execute(cur,
+                "UPDATE hitl_queue SET approved_proposal_snapshot_ids=%s,approved_source_revision=%s,"
+                "approved_value_sha256=%s,approved_corrected_sha256=%s WHERE id=%s",
+                (json.dumps(aligned, separators=(",", ":")), source_revision,
+                 self._approved_value_digest(row), artifact, item_id))
+
+    @classmethod
+    def _row_writes_document(cls, row: dict) -> bool:
+        """Whether the ordinary writer writes anything for this approved row: approved content
+        at a locator, or a decorative marking. Judgement resolutions, explain-only maps and
+        companion files (delivered beside the document) are never written, so the writer has
+        nothing to admit or hold for them."""
+        if cls._row_approved_values(row):
+            return True
+        return (str(row.get("rule_id") or "").strip() == "1.1.1"
+                and (row.get("resolution") or "").strip() == "decorative"
+                and bool(cls._row_proposal_locators(row)))
+
+    _ARTIFACT_UNSET = object()
 
     def approved_write_hold(self, item: dict | None, *,
-                            revisions: dict | None = None) -> str | None:
+                            revisions: dict | None = None,
+                            artifact=_ARTIFACT_UNSET) -> str | None:
         """Why the ORDINARY approved-value writer must pass this approval by, or None to admit it.
 
-        Writer-specific admission (audit gap 9). approved_write_binding is the RETRY gate and
-        demands a complete binding plus an existing corrected copy; the ordinary writer cannot:
-        its first write may precede any corrected copy, a decorative marking holds no text, and
-        rows recorded before any binding existed (and the described-image obligation
-        queue_described_image_alt creates) carry none. So this holds only on POSITIVE evidence
-        that the approval no longer describes the row — each recorded part of the binding is
-        compared, and an unrecorded part is not evidence:
+        Writer-specific admission (audit gap 9). An approval is admitted only when its binding
+        is COMPLETE and every part of it still holds. A missing part is not "unknown, so
+        admit" — that failed open for every row approved without a binding (legacy approvals,
+        paths that never recorded one). Nothing is reconstructed from the current state:
 
-          * approved_source_revision recorded and the scan's current revision differs
-            (RETRY_SOURCE_MOVED; a current revision that cannot be read is RETRY_NO_BINDING —
-            a recorded binding that cannot be confirmed is not admitted either);
-          * approved_value_sha256 recorded and the row's values no longer hash to it
-            (RETRY_VALUES_CHANGED — e.g. a later run replaced the drafts in place, which the
-            draft fallback would otherwise have written as if approved);
-          * approved_proposal_snapshot_ids recorded and the row's aligned snapshots differ
-            (RETRY_PROPOSALS_SUPERSEDED).
+          * any of approved_source_revision, approved_corrected_sha256,
+            approved_value_sha256 or approved_proposal_snapshot_ids unrecorded, or a current
+            revision that cannot be read (RETRY_NO_BINDING, "binding_missing");
+          * the scan's assessment revision moved (RETRY_SOURCE_MOVED);
+          * the corrected ARTIFACT the write would build on is not the one the approval was
+            given against (RETRY_ARTIFACT_MOVED). The assessment revision does not move when a
+            new corrected copy is saved, so this is the only part that binds the bytes. The
+            token is "none" for an approval given before any corrected copy existed: a first
+            write builds on the assessed source, which the revision binds, and a corrected copy
+            that appeared since is bytes the reviewer never saw. Deliberately the same for every
+            write kind (values, decorative markings, the ADR 0055 described obligation): each
+            writes INTO those bytes, so none is re-applied to newer ones silently;
+          * the row's values no longer hash to the approved digest (RETRY_VALUES_CHANGED);
+          * the row's aligned snapshots differ (RETRY_PROPOSALS_SUPERSEDED).
 
-        Target removal is answered separately (review_target_reconciliation), as before.
+        Rows the writer never writes (_row_writes_document: judgement resolutions, explain-only
+        maps, companions) have nothing to admit and are never held. Target removal is answered
+        separately (review_target_reconciliation), as before.
+
+        `artifact` overrides the current corrected artifact: the writer passes the one its job
+        was built on, so its own commit (which moves the pointer) is not mistaken for a change.
 
         Deliberately NOT applied to _approved_unapplied_rows: every compliance counter reads
         that, and a held approval is still approved content the document does not carry.
@@ -12679,40 +12800,50 @@ class Store:
         """
         if not item or str(item.get("status") or "") != "approved" or item.get("applied"):
             return None
-        scan_id = item.get("scan_id")
+        if not self._row_writes_document(item):
+            return None
+        scan_id, file = item.get("scan_id"), item.get("file")
         approved_revision = str(item.get("approved_source_revision") or "").strip()
-        if approved_revision:
-            cache = revisions if revisions is not None else {}
-            if scan_id not in cache:
-                try:
-                    cache[scan_id] = str(self.remediation_source_revision(scan_id) or "").strip()
-                except Exception:
-                    cache[scan_id] = ""
-            if not cache[scan_id]:
-                return self.RETRY_NO_BINDING
-            if cache[scan_id] != approved_revision:
-                return self.RETRY_SOURCE_MOVED
+        approved_artifact = str(item.get("approved_corrected_sha256") or "").strip()
         approved_digest = str(item.get("approved_value_sha256") or "").strip()
-        if approved_digest and self._approved_value_digest(item) != approved_digest:
-            return self.RETRY_VALUES_CHANGED
         approved_snapshots = item.get("approved_proposal_snapshot_ids")
-        if isinstance(approved_snapshots, list):
-            captured = item.get("proposal_snapshot_ids")
-            captured = captured if isinstance(captured, list) else []
-            instances = item.get("proposals") or item.get("evidence") or []
-            aligned = [captured[i] if i < len(captured) else None for i in range(len(instances))]
-            if list(approved_snapshots) != aligned:
-                return self.RETRY_PROPOSALS_SUPERSEDED
+        if (not approved_revision or not approved_artifact or not approved_digest
+                or not isinstance(approved_snapshots, list)):
+            return self.RETRY_NO_BINDING
+        cache = revisions if revisions is not None else {}
+        if scan_id not in cache:
+            try:
+                cache[scan_id] = str(self.remediation_source_revision(scan_id) or "").strip()
+            except Exception:
+                cache[scan_id] = ""
+        if not cache[scan_id]:
+            return self.RETRY_NO_BINDING
+        if cache[scan_id] != approved_revision:
+            return self.RETRY_SOURCE_MOVED
+        current_artifact = (self.corrected_artifact_token(scan_id, file)
+                            if artifact is self._ARTIFACT_UNSET
+                            else (str(artifact or "").strip() or self.NO_CORRECTED_ARTIFACT))
+        if current_artifact != approved_artifact:
+            return self.RETRY_ARTIFACT_MOVED
+        if self._approved_value_digest(item) != approved_digest:
+            return self.RETRY_VALUES_CHANGED
+        captured = item.get("proposal_snapshot_ids")
+        captured = captured if isinstance(captured, list) else []
+        instances = item.get("proposals") or item.get("evidence") or []
+        aligned = [captured[i] if i < len(captured) else None for i in range(len(instances))]
+        if list(approved_snapshots) != aligned:
+            return self.RETRY_PROPOSALS_SUPERSEDED
         return None
 
-    def approved_write_holds(self, rows) -> dict[str, str]:
-        """{item_id: hold reason} for the rows the ordinary writer must pass by."""
+    def approved_write_holds(self, rows, *, artifact=_ARTIFACT_UNSET) -> dict[str, str]:
+        """{item_id: hold reason} for the rows the ordinary writer must pass by. `artifact`:
+        see approved_write_hold."""
         revisions: dict = {}
         out: dict[str, str] = {}
         for row in rows or ():
             if not row:
                 continue
-            reason = self.approved_write_hold(row, revisions=revisions)
+            reason = self.approved_write_hold(row, revisions=revisions, artifact=artifact)
             if reason:
                 out[str(row["id"])] = reason
         return out
@@ -12751,6 +12882,12 @@ class Store:
             return None, self.RETRY_NO_BINDING
         if revision != approved_revision:
             return None, self.RETRY_SOURCE_MOVED
+        # The corrected artifact the approval was given against must be the current one.
+        approved_artifact = str(item.get("approved_corrected_sha256") or "").strip()
+        if not approved_artifact:
+            return None, self.RETRY_NO_BINDING
+        if approved_artifact != self.corrected_artifact_token(scan_id, file):
+            return None, self.RETRY_ARTIFACT_MOVED
         approved_digest = str(item.get("approved_value_sha256") or "").strip()
         if not approved_digest:
             return None, self.RETRY_NO_BINDING
@@ -14785,44 +14922,33 @@ class Store:
         method only establishes that the two rows describe the same document, owned by the same
         person, assessed before this one.
         """
-        with self._db.cursor() as cur:
-            self._db.execute(cur,
-                "SELECT r.*, f.drive_file_id FROM scan_runs r "
-                "LEFT JOIN file_records f ON f.scan_id=r.id AND f.file=%s WHERE r.id=%s",
-                (file, scan_id))
-            current = self._db.fetchone(cur)
-            if not current or current.get("owner_email") != owner:
-                return None
-            when = current.get("assessed_at") or current.get("completed_at") or current.get("started_at")
-            drive_file_id = current.get("drive_file_id")
-            sql = ("SELECT r.id AS run_id, f.* FROM file_records f "
-                   "JOIN scan_runs r ON r.id=f.scan_id "
-                   "WHERE r.owner_email=%s AND r.id<>%s AND r.source=%s "
-                   "AND COALESCE(r.assessed_at,r.completed_at,r.started_at) < %s ")
-            params = [owner, scan_id, current.get("source"), when or ""]
-            if drive_file_id:
-                sql += "AND f.drive_file_id=%s "
-                params.append(drive_file_id)
-            else:
-                sql += "AND f.drive_file_id IS NULL AND f.file=%s "
-                params.append(file)
-            sql += "ORDER BY COALESCE(r.assessed_at,r.completed_at,r.started_at) DESC LIMIT 1"
-            self._db.execute(cur, sql, tuple(params))
-            previous_file = self._db.fetchone(cur)
-            if not previous_file:
-                return None
-            self._db.execute(cur, "SELECT * FROM scan_runs WHERE id=%s", (previous_file["scan_id"],))
-            run = self._db.fetchone(cur)
-            run = self._fill_run_aggregate(cur, run)
-            import json as _json
-            raw = run.get("scope")
-            scope = _json.loads(raw) if isinstance(raw, str) and raw else (raw or None)
-            run["scan_scope"] = scope.get("scan_scope") if isinstance(scope, dict) else None
-            self._db.execute(cur,
-                "SELECT rule_id,wcag,severity,detail,page,location FROM issue_records "
-                "WHERE scan_id=%s AND file=%s", (previous_file["scan_id"], previous_file["file"]))
-            issues = self._db.fetchall(cur)
-        return {"run": run, "file_row": previous_file, "issues": issues}
+        # One selection for the per-file route and the scan index (R-B1): same identity rule,
+        # owner/source filter and ordering, plus an explicit tie-break (r.id DESC, f.file DESC)
+        # for equal timestamps and a deterministic issue order (report_history.issue_sort_key).
+        import report_history as _report_history
+        return _report_history.previous_assessment_for_file(self, scan_id, file, owner=owner)
+
+    def previous_assessments_for_scan(self, scan_id: str, *, owner: str,
+                                      files: list[str] | None = None) -> dict[str, dict]:
+        """R-B1: previous_assessment_for_file for every file of the scan (or `files`) in a
+        bounded number of queries; files without a baseline are absent. See report_history."""
+        import report_history as _report_history
+        return _report_history.previous_assessments_for_scan(self, scan_id, owner=owner,
+                                                             files=files)
+
+    def prior_assessment_in_scan(self, scan_id: str, file: str, *, owner: str) -> dict | None:
+        """R-B2: the assessment a later write in the SAME scan replaced, with the envelope
+        recorded at its own write. None = none captured (not "none existed")."""
+        import report_history as _report_history
+        return _report_history.prior_assessment_in_scan(self, scan_id, file, owner=owner)
+
+    def change_reviews_for_document(self, scan_id: str, file: str, *, owner: str,
+                                    limit: int = 200) -> dict | None:
+        """R-B3: change-review verdicts on strictly EARLIER scans of the same document (same
+        owner, source, identity). Read-only; bounded, with total/truncated. None = foreign."""
+        import report_history as _report_history
+        return _report_history.change_reviews_for_document(self, scan_id, file, owner=owner,
+                                                           limit=limit)
 
     def stage_work_item_for_job(self, job_id: str | None) -> dict | None:
         if not job_id:

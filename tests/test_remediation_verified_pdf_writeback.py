@@ -59,6 +59,7 @@ pytest.importorskip("pikepdf")
 
 from test_pdf_figure_alt_approval import _alts, _tagged_pdf   # noqa: E402
 from test_pdf_form_field_names import _form_pdf, _tus         # noqa: E402
+from hitl_viewed import approve_bound
 
 FILE = "report.pdf"
 SID = "rv-pdf"
@@ -101,6 +102,9 @@ class _Blob:
         self.data = data
         self.uploads.append((f, mime))
         return "http://b/2"
+    # The approved writer publishes digest-scoped and moves the pointer at commit.
+    def upload_immutable_retry(self, owner, sid, f, data, mime):
+        return self.upload_remediated(owner, sid, f, data, mime)
 
 
 @pytest.fixture()
@@ -122,8 +126,7 @@ def _seed(store, *, sc: str, rule_name: str, rule_id: str, values: dict[str, str
     item_id = store.enqueue_proposals(SID, FILE, sc, [
         {"locator": loc, "before": "(nothing)", "proposed_value": "", "rationale": "r",
          "source": "reviewer"} for loc in values], rule_name=rule_name)
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, list(values.values()))
+    approve_bound(store, item_id, list(values.values()))
     return item_id
 
 

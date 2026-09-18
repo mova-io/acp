@@ -461,9 +461,18 @@ def test_a_failing_append_never_fails_the_retirement(isolated_store, monkeypatch
             raise RuntimeError('event log down')
         return real(sid, kind, **kw)
     monkeypatch.setattr(isolated_store, 'append_scan_event', broken)
+    import swallowed
+    reported = []
+    monkeypatch.setattr(swallowed, 'swallowed', lambda op, scan_id=None: reported.append((op, scan_id)))
     result = w.reconcile()
     assert [s['item_id'] for s in result['superseded']] == [w.alt]
     assert len(w.lines()) == 1
+    # Best-effort, but never silent: the failed narration is reported through the rate-limited
+    # diagnostic (tests/test_no_handler_fails_silently.py forbids a bare `pass`).
+    assert [op for op, _ in reported] == [
+        'review_target_reconciliation._narrate_replacements: appending the '
+        'review_target_replaced event failed']
+    assert reported[0][1] is not None
 
 
 def test_the_replacement_event_projects_as_review_and_suppresses_the_name(isolated_store):

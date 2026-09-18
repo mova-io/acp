@@ -291,7 +291,7 @@ def test_a_binding_that_moves_during_the_write_is_rechecked_under_the_locks(env)
                             lambda store, ids: locked.append(sorted(ids)) or real_lock_rows(store, ids))
     env.monkeypatch.setitem(sys.modules, "blob", SimpleNamespace(
         download_remediated=lambda *a: b"synthetic-local-only",
-        upload_remediated=upload_then_move))
+        upload_immutable_retry=upload_then_move))
     with pytest.raises(RuntimeError, match="approval binding changed"):
         env.handlers._apply_approved_values({"scan_id": SCAN, "file": file}, {"id": "j1"})
     assert locked == [[item_id]], "the refusal came from the re-check under the review-row lock"
@@ -318,7 +318,7 @@ def test_a_row_re_decided_during_the_write_is_not_credited(env):
                                   approved_values=None, actor=ACTOR, detail=None)
         return "https://blob.invalid/copy"
     env.monkeypatch.setitem(sys.modules, "blob", SimpleNamespace(
-        download_remediated=lambda *a: b"synthetic-local-only", upload_remediated=upload_then_reject))
+        download_remediated=lambda *a: b"synthetic-local-only", upload_immutable_retry=upload_then_reject))
     with pytest.raises(RuntimeError, match="approval binding changed"):
         env.handlers._apply_approved_values({"scan_id": SCAN, "file": file}, {"id": "j1"})
     row = st.get_hitl_item(item_id)

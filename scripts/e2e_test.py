@@ -509,7 +509,8 @@ def main():
                             "approval_scope": "single",
                             "expected_version": listed.get("decision_version") or 0,
                             "expected_source_revision": listed.get("source_revision"),
-                            "expected_proposal_snapshot_ids": listed.get("proposal_snapshot_ids") or []})
+                            "expected_proposal_snapshot_ids": listed.get("proposal_snapshot_ids") or [],
+                            "expected_corrected_sha256": listed.get("corrected_artifact")})
             assert updated["status"] == "approved", f"Expected approved, got {updated['status']}"
             print(c("green", f"  ✓ Approved item {first['id']} ({first['rule_id']} in {first['file']})"))
 

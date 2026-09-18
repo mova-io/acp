@@ -51,6 +51,7 @@ pytest.importorskip("openpyxl")
 import office_structure as _os                                            # noqa: E402
 from apply_link_text import apply_link_text                               # noqa: E402
 from proposals import extract_office_links, propose_link_texts            # noqa: E402
+from hitl_viewed import approve_bound
 
 FILE = "findings.xlsx"
 SID = "rv-xlsx-244"
@@ -164,6 +165,9 @@ class _Blob:
         self.data = data
         self.uploads.append((f, mime))
         return "http://b/2"
+    # The approved writer publishes digest-scoped and moves the pointer at commit.
+    def upload_immutable_retry(self, owner, sid, f, data, mime):
+        return self.upload_remediated(owner, sid, f, data, mime)
 
 
 @pytest.fixture(scope="module")
@@ -394,8 +398,7 @@ def test_the_whole_lane_runs_through_the_handler_with_the_rescan_unpatched(monke
     item_id = store.enqueue_proposals(SID, FILE, "2.4.4", [
         {k: p[k] for k in ("locator", "before", "proposed_value", "rationale", "source")}
         for p in props], rule_name="Link Purpose (In Context)")
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, [APPROVED])
+    approve_bound(store, item_id, [APPROVED])
 
     blob = _Blob(book)
     monkeypatch.setattr(core, "store", store)
@@ -432,8 +435,7 @@ def test_the_handler_withholds_credit_when_the_approved_text_is_itself_vague(mon
     item_id = store.enqueue_proposals(SID, FILE, "2.4.4", [
         {k: p[k] for k in ("locator", "before", "proposed_value", "rationale", "source")}
         for p in props], rule_name="Link Purpose (In Context)")
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, ["read more"])          # still vague
+    approve_bound(store, item_id, ["read more"])          # still vague
 
     blob = _Blob(book)
     monkeypatch.setattr(core, "store", store)

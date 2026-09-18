@@ -42,7 +42,7 @@ function hitl({ id, rule, status = 'pending', applied = false, validated = false
     status: status === 'pending' ? undefined : status, applied, validated,
     hasProposal: true, after: value, proposals, proposalSource: source,
     _raw: { id, scan_id: SCAN, file: FILE, rule_id: rule, status, applied: applied ? 1 : null, validated: validated ? 1 : 0,
-      finding_count: 1, proposals, proposal_snapshot_ids: [`snap-${id}`], source_revision: 1, decision_version: 0, ...raw },
+      finding_count: 1, proposals, proposal_snapshot_ids: [`snap-${id}`], source_revision: 1, decision_version: 0, corrected_artifact: 'none', ...raw },
   }
 }
 

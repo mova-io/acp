@@ -23,7 +23,8 @@ def expectations(st, item_id):
     return dict(status="approved", approved_values=[p["proposed_value"] for p in row["proposals"]],
                 request_id="frozen-batch-1", expected_version=row.get("decision_version") or 0,
                 expected_proposal_snapshot_ids=row["proposal_snapshot_ids"],
-                expected_source_revision=st.stage_snapshot_id(row["scan_id"]))
+                expected_source_revision=st.stage_snapshot_id(row["scan_id"]),
+                expected_corrected_sha256=st.corrected_artifact_token(row["scan_id"], row["file"]))
 
 
 @pytest.mark.parametrize("change", ["snapshot", "source", "value", "locator", "missing_slot"])
@@ -69,6 +70,51 @@ def test_same_request_id_cannot_be_reused_with_different_snapshot_expectation(de
         update(item_id, Body(**expected), request)
     assert getattr(exc.value, "status_code", None) == 409
     assert len(st.list_decisions("s1")) == 1
+
+
+def _saved_copy(st, sha):
+    st.save_file_result("s1", {"file": "deck.pptx", "engine": "office", "status": "analysed",
+                               "score": 50, "compliant": 0, "skipped_rules": 0, "issues": []},
+                        "2026-09-01T00:00:00Z")
+    st.record_remediation("s1", "deck.pptx", corrected_sha256=sha)
+
+
+def test_a_frozen_batch_is_refused_when_another_write_changed_the_corrected_copy(decision):
+    """The exact-artifact binding covers batches too: the selection froze corrected copy A; an
+    approved write since saved B under the SAME assessment revision. Nothing is recorded."""
+    st, item_id, update, Body, request = decision
+    _saved_copy(st, "a" * 64)
+    frozen = expectations(st, item_id)
+    assert frozen["expected_corrected_sha256"] == "a" * 64
+    st.record_remediation("s1", "deck.pptx", corrected_sha256="b" * 64)
+    assert frozen["expected_source_revision"] == st.stage_snapshot_id("s1")
+    with pytest.raises(Exception) as exc:
+        update(item_id, Body(**frozen), request)
+    assert getattr(exc.value, "status_code", None) == 409
+    assert st.get_hitl_item(item_id)["status"] == "pending"
+    assert st.list_decisions("s1") == []
+    assert all(j["type"] != "apply_approved_values" for j in st.list_jobs())
+
+
+def test_a_frozen_batch_without_the_corrected_copy_it_saw_records_nothing(decision):
+    import json
+    st, item_id, update, Body, request = decision
+    frozen = {**expectations(st, item_id), "expected_corrected_sha256": None}
+    response = update(item_id, Body(**frozen), request)
+    assert response.status_code == 409
+    assert json.loads(response.body)["code"] == "viewed_version_required"
+    assert st.list_decisions("s1") == []
+
+
+def test_an_unchanged_frozen_batch_binds_its_copy_and_replays_idempotently(decision):
+    st, item_id, update, Body, request = decision
+    _saved_copy(st, "a" * 64)
+    body = Body(**expectations(st, item_id))
+    first = update(item_id, body, request)
+    assert first["approved_corrected_sha256"] == "a" * 64
+    assert update(item_id, body, request) == first
+    assert len(st.list_decisions("s1")) == 1
+    assert st.approved_write_hold(st.get_hitl_item(item_id)) is None
 
 
 def test_frozen_batch_cannot_cross_owner_boundary(decision):

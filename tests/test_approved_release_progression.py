@@ -12,6 +12,7 @@ import io
 import sys
 
 import pytest
+from hitl_viewed import approve_bound
 
 SID = "approved-release-fixture"
 FILE = "review.pptx"
@@ -33,6 +34,11 @@ class MemoryBlob:
         self.data = data
         self.uploads += 1
         return "https://fixture.invalid/corrected-v2"
+
+    # The approved writer publishes to a digest-scoped immutable object and moves the pointer
+    # at commit (handlers._apply_approved_values); this fake serves whatever was stored last.
+    def upload_immutable_retry(self, owner, sid, f, data, mime):
+        return self.upload_remediated(owner, sid, f, data, mime)
 
 
 @pytest.fixture
@@ -69,8 +75,7 @@ def progression(isolated_store, monkeypatch, tmp_path):
         "locator": "slide 1", "before": "", "proposed_value": "",
         "rationale": "Human supplied title", "source": "reviewer",
     }], rule_name="Headings and Labels")
-    store.update_hitl_item(item, "approved", None, None)
-    store.approve_proposal_values(item, [TITLE])
+    approve_bound(store, item, [TITLE])
 
     def verify(data, filename, **kwargs):
         path = tmp_path / filename

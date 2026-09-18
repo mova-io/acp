@@ -5264,6 +5264,18 @@ _PDF_STRUCTURE_EXTS = ("pdf",)
 _APPLY_VALUE_EXTS = tuple(_OFFICE_ALT_MIME) + _PDF_APPLY_EXTS
 
 
+def _immutable_pointer_ok(filename: str) -> bool:
+    """Whether blob._remediated_client will follow a digest-scoped pointer for this name.
+
+    Mirrors that reader's identity checks exactly: it refuses a name with a dot segment, '%' or
+    a backslash (the owner check is the scan's own owner, owner-less scans included). The writer
+    REFUSES such a document before uploading anything rather than falling back to overwriting
+    the canonical object — the fallback would reopen exactly the late-refusal overwrite the
+    immutable publication closes."""
+    return not (any(part in {'.', '..'} for part in filename.split('/'))
+                or '%' in filename or '\\' in filename)
+
+
 def _known_diff_location(change: dict) -> dict:
     """{'locator', 'page'} for a remediation_diff entry, copied from a writer's change record
     only where the writer actually recorded them. Absent means unknown: a page is never read
@@ -6111,8 +6123,11 @@ def _apply_approved_values(payload: dict, job: dict, *, _retry_locked=False) -> 
         # next attempt holds that row at admission and writes the rest.
         rows = (locked_rows if locked_rows is not None
                 else {i: core.store.get_hitl_item(i) for i in candidate_items})
+        # Judged against the artifact THIS job built on (the pointer CAS under the lock holds it
+        # still), not the pointer its own commit has just moved.
         moved = set(core.store.approved_write_holds(
-            [rows.get(i) for i in sorted(candidate_items)])) & candidate_items
+            [rows.get(i) for i in sorted(candidate_items)],
+            artifact=prior_record_sha)) & candidate_items
         # A row re-decided (rejected, skipped, reopened) or applied by another job since it was
         # read is no longer an approval awaiting THIS write, and must not be credited by it.
         moved |= {i for i in candidate_items
@@ -6125,10 +6140,26 @@ def _apply_approved_values(payload: dict, job: dict, *, _retry_locked=False) -> 
     _binding_moved_since_read()
     _phase(job, "storing the corrected copy")
     retry_proof = residual_state.get('office_retry')
-    blob_url = (_blob.upload_immutable_retry(owner, scan_id, filename, working,
-                    _OFFICE_ALT_MIME.get(ext, 'application/pdf')) if retry_proof
-                else _blob.upload_remediated(owner, scan_id, filename, working,
-                    _OFFICE_ALT_MIME.get(ext, 'application/pdf')))
+    # PUBLISH IMMUTABLY, THEN MOVE THE POINTER UNDER THE LOCKS. The canonical blob used to be
+    # overwritten here, before the commit transaction re-checked admission — so a refusal found
+    # under the locks (a binding that moved, a row re-decided, a target another fix removed)
+    # rolled back the DB pointer and credits while the ACTIVE artifact's bytes were already the
+    # refused write's. Every corrected-copy reader resolves the committed pointer
+    # (blob._remediated_client, behind download_remediated and download_report_evidence), so the
+    # write goes to a new digest-scoped object that nothing reads until the commit below points
+    # file_records at it; a refusal leaves the prior pointer, and so the prior bytes, in force.
+    # The same publication the office retry already uses, with its owner/digest readback.
+    if not _immutable_pointer_ok(filename):
+        core.store.log_decision(
+            "system", "apply.publication_refused", scan_id=scan_id, file=filename,
+            detail="the document name cannot address an immutable corrected copy; nothing was "
+                   "uploaded and the approval remains saved")
+        raise FatalJobError(
+            "This document's name cannot be published as an immutable corrected copy (it contains "
+            "'%', a backslash or a '.'/'..' path segment), so nothing was saved and the approval "
+            "remains on record. Rename the document at its source and re-run remediation.")
+    blob_url = _blob.upload_immutable_retry(owner, scan_id, filename, working,
+                                            _OFFICE_ALT_MIME.get(ext, 'application/pdf'))
     if not blob_url:
         raise RuntimeError("approved values were verified but durable storage is unavailable")
     # Upload first: failed storage must leave every approval retryable. The database commit
@@ -6141,8 +6172,13 @@ def _apply_approved_values(payload: dict, job: dict, *, _retry_locked=False) -> 
         begin_write(core.store)
         locked_rows = lock_rows(core.store, candidate_items | {str(item['id']) for item in
                   ((payload.get('standing_approval') or {}).get('items') or []) if item.get('id')})
-        lock_file(core.store, scan_id, filename)
+        locked_sha = lock_file(core.store, scan_id, filename)
         _removed_since_read()
+        if not retry_proof and (locked_sha or None) != (prior_record_sha or None):
+            # Pointer compare-and-set: these bytes were built on the artifact committed when the
+            # job read it. Another writer moved the pointer since, so publishing would silently
+            # discard its change. Retryable: the next attempt builds on the new artifact.
+            raise RuntimeError('corrected copy changed during this write; not published')
         if retry_proof:
             # The upload is outside SQL: an intervening review/revocation must not
             # advance its pointer or inherit credit. Match decide_hitl's review-before-

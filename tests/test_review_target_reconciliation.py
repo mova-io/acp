@@ -77,6 +77,11 @@ class Blob:
         self.uploads.append(f)
         return 'http://b/new'
 
+    # The approved writer publishes to a digest-scoped immutable object and moves the pointer
+    # at commit (handlers._apply_approved_values); this fake serves whatever was stored last.
+    def upload_immutable_retry(self, owner, sid, f, data, mime):
+        return self.upload_remediated(owner, sid, f, data, mime)
+
 
 class World:
     def __init__(self, store, *, colors=('red',), alt_targets=('word/document.xml#Picture 1',),

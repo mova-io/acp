@@ -46,6 +46,9 @@ class HitlUpdate(BaseModel):
     # see hitl_update. Entries may be null exactly where the served list has null.
     expected_proposal_snapshot_ids: list[str | None] | None = None
     expected_source_revision: str | None = None
+    # The corrected ARTIFACT the reviewer saw: the row's `corrected_artifact` exactly as GET
+    # /hitl/queue lists it — the saved copy's sha256, or "none" before any corrected copy exists.
+    expected_corrected_sha256: str | None = None
     # "single" — one reviewer's decision on the row on screen: the viewed binding is compared
     # under the row lock and edited values are allowed. Absent (or "batch") with a binding keeps
     # the frozen-batch guard: unedited drafts with complete, current proposal lineage only.
@@ -218,12 +221,20 @@ def hitl_list(request: Request, status: str | None = None, scan_id: str | None =
     rows = [serialize_review_item(row) for row in rows]
     from automatic_review_queue import annotate
     rows = annotate(core.store, rows, owner)
-    revisions = {}
+    revisions, artifacts = {}, {}
     for row in rows:
         sid = row.get("scan_id")
         if sid and sid not in revisions:
             revisions[sid] = core.store.remediation_source_revision(sid)
+            artifacts[sid] = {f: (r.get("corrected_sha256") or "")
+                              for f, r in core.store.get_file_records(sid).items()}
         row["source_revision"] = revisions.get(sid)
+        # The corrected artifact this row is shown against — what an approval sends back as
+        # expected_corrected_sha256: the saved copy's sha256, or "none" when the document has no
+        # corrected copy yet. Not named corrected_sha256 on purpose: "none" is not a digest, and
+        # a truthiness check on a sha-named field would read it as one.
+        row["corrected_artifact"] = ((artifacts.get(sid) or {}).get(row.get("file"))
+                                   or core.store.NO_CORRECTED_ARTIFACT)
     return rows
 
 
@@ -274,7 +285,8 @@ def hitl_update(item_id: str, body: HitlUpdate, request: Request = None):
     # bind to their own authorised revision. Reject/skip write nothing and need no binding.
     if body.status == "approved" and (
             body.expected_version is None or body.expected_proposal_snapshot_ids is None
-            or not str(body.expected_source_revision or "").strip()):
+            or not str(body.expected_source_revision or "").strip()
+            or not str(body.expected_corrected_sha256 or "").strip()):
         return _approval_conflict(VIEWED_VERSION_REQUIRED)
     viewed = body.approval_scope == "single"
     # ADR 0055: describe-instead-of-replace is the one resolution that is incomplete without
@@ -383,7 +395,7 @@ def hitl_update(item_id: str, body: HitlUpdate, request: Request = None):
             expected_version=body.expected_version,
             expected_proposal_snapshot_ids=body.expected_proposal_snapshot_ids,
             expected_source_revision=body.expected_source_revision,
-            viewed=viewed)
+            viewed=viewed, expected_corrected_sha256=body.expected_corrected_sha256)
     except ValueError as exc:
         if str(exc) == "viewed version required":
             return _approval_conflict(VIEWED_VERSION_REQUIRED)

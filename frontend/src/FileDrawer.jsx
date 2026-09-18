@@ -9,7 +9,7 @@ import { explainFinding, getFileContent, uploadToDrive, markRemediated, remediat
 import { reviewableInPlace } from './reviewCard.js'
 import EvidenceCard from './EvidenceCard.jsx'
 import { SIM as SIM_MODE } from './sim.js'
-import { requestReviewQueueRefresh, viewedBindingKey, viewedDecisionOptions, viewedVersionConflict, viewedVersionMissingError } from './viewedApprovalBinding.js'
+import { REAPPROVE_ACTION, REAPPROVE_EXPLANATION, needsReapproval, requestReviewQueueRefresh, viewedBindingKey, viewedDecisionOptions, viewedVersionConflict, viewedVersionMissingError } from './viewedApprovalBinding.js'
 import { CAPABILITY_FALLBACK, fmtOf, autoSCs, modeFor, reviewRecommended } from './capability.js'
 import PagePreview from './PagePreview.jsx'
 import SharePointMetadata from './SharePointMetadata.jsx'
@@ -568,7 +568,7 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
     // reviewer approved, nothing changed, and this card is where they learn why. reviewableInPlace
     // is the one definition of that set.
     const load = () => listHitlQueue(scanId)
-      .then((rows) => { if (live) setHitlItems((rows || []).filter((r) => r.file === file.file && reviewableInPlace(r))) })
+      .then((rows) => { if (live) setHitlItems((rows || []).filter((r) => r.file === file.file && (reviewableInPlace(r) || needsReapproval(r)))) })
       .catch(() => {})
     load()
     window.addEventListener('acp:hitl-changed', load)
@@ -860,7 +860,7 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
     </>
   )
 
-  if (context === 'graph') return <GraphFindingsDrawer key={`${scanId}:${file.file}`} file={file} scanId={scanId} onClose={onClose} items={hitlItems} readOnly={readOnly} onAct={drawerAct} />
+  if (context === 'graph') return <GraphFindingsDrawer key={`${scanId}:${file.file}`} file={file} scanId={scanId} onClose={onClose} items={hitlItems} readOnly={readOnly} onAct={drawerAct} notice={viewedNotice} />
 
   // Discover (steps 1–3): inventory · classify · retain — NO accessibility assessment.
   if (context === 'discover') {
@@ -1168,7 +1168,8 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
                         <div style={{ marginTop: 8 }}>
                           <button className="ghost small" aria-expanded={openHere}
                                   onClick={() => setReviewSc(openHere ? null : sc)}>
-                            {openHere ? '× Close review' : `⚖ Review here — ${hi.finding_count > 1 ? `${hi.finding_count} findings, ` : ''}evidence & approve`}
+                            {openHere ? '× Close review' : needsReapproval(hi) ? `⚖ ${REAPPROVE_ACTION} — approved earlier, changed since`
+                              : `⚖ Review here — ${hi.finding_count > 1 ? `${hi.finding_count} findings, ` : ''}evidence & approve`}
                           </button>
                           {openHere && (
                             <div style={{ marginTop: 8 }}>
@@ -1180,6 +1181,13 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
                                               border: '1px solid #C0392B', background: '#FDEDEC', color: '#7B241C' }}>
                                   <b>Not approved.</b> {viewedNotice.message}
                                 </div>
+                              )}
+                              {/* A held approval: the card below is the CURRENT version; approving it
+                                  re-binds the approval (one 'single' decision, never repeated). */}
+                              {needsReapproval(hi) && (
+                                <p className="drawer-reapprove" role="note" style={{ margin: '0 0 8px', fontSize: 12.5 }}>
+                                  <b>{REAPPROVE_ACTION}.</b> {REAPPROVE_EXPLANATION}
+                                </p>
                               )}
                               {/* Keyed by the row's version: an editor seeded from an older version
                                   must not carry its text into an approval of a newer one. */}

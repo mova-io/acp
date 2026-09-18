@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { createTestRoot, unmountAll } from './testRoots.js'
 import Inbox from './RemediationInbox.jsx'
 afterEach(unmountAll)
-const ready = (id, extra = {}) => ({ id, file: `${id}.docx`, ruleId: '1.1.1', title: 'Image description', kind: 'ai-draft', aiAssisted: true, hasProposal: true, after: 'A useful image description', _raw: { decision_version: 1, source_revision: 'source', proposal_snapshot_ids: [`proposal-${id}`] }, ...extra })
+const ready = (id, extra = {}) => ({ id, file: `${id}.docx`, ruleId: '1.1.1', title: 'Image description', kind: 'ai-draft', aiAssisted: true, hasProposal: true, after: 'A useful image description', _raw: { decision_version: 1, source_revision: 'source', proposal_snapshot_ids: [`proposal-${id}`], corrected_artifact: 'none' }, ...extra })
 const click = async button => act(async () => button.click())
 async function mount(props) {
  const { root, container } = createTestRoot()

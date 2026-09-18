@@ -47,6 +47,11 @@ class _Blob:
         self.uploads.append(f)
         return 'http://b/2'
 
+    # The approved writer publishes to a digest-scoped immutable object and moves the pointer
+    # at commit (handlers._apply_approved_values); this fake serves whatever was stored last.
+    def upload_immutable_retry(self, owner, sid, f, data, mime):
+        return self.upload_remediated(owner, sid, f, data, mime)
+
 
 @pytest.fixture
 def store(isolated_store):

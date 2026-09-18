@@ -10,7 +10,7 @@ import Inbox from './RemediationInbox.jsx'
 afterEach(unmountAll)
 const heading={kind:'pdf-tag-heading',locator:'pdf:struct:source-bound-node',proposed_value:'{"op":"heading","role":"H1"}',before:'/P',subject_text:'Introduction',source:'tagged text match (heuristic)',explain_only:false}
 const header={kind:'pdf-table-header-scope',locator:'pdf:struct:source-bound-header',proposed_value:'{"op":"header-scope","scope":"Column"}',subject_text:'Analyte',source:'existing tagged table (heuristic)',explain_only:false}
-function finding(proposals=[heading],rule_id='2.4.6') {return {id:91,file:'report.pdf',rule_id,status:'pending',hasProposal:true,after:proposals[0].proposed_value,proposals,_raw:{finding_count:proposals.length,decision_version:2,source_revision:3,proposal_snapshot_ids:proposals.map((_,i)=>`snapshot-${i}`),proposals}}}
+function finding(proposals=[heading],rule_id='2.4.6') {return {id:91,file:'report.pdf',rule_id,status:'pending',hasProposal:true,after:proposals[0].proposed_value,proposals,_raw:{finding_count:proposals.length,decision_version:2,source_revision:3,corrected_artifact:'none',proposal_snapshot_ids:proposals.map((_,i)=>`snapshot-${i}`),proposals}}}
 it('summarizes only recognized valid source-anchored plans without inventing text',()=>{
  expect(pdfStructuralSummary(heading)).toBe('Mark “Introduction” as Heading 1')
  expect(pdfStructuralSummary(header)).toBe('Associate “Analyte” with its column')

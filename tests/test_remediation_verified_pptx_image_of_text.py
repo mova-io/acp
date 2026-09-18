@@ -39,6 +39,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from hitl_viewed import approve_bound
 
 ACP = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ACP / "api"))
@@ -208,6 +209,9 @@ class _Blob:
         self.data = data
         self.uploads.append((f, mime))
         return "http://b/2"
+    # The approved writer publishes digest-scoped and moves the pointer at commit.
+    def upload_immutable_retry(self, owner, sid, f, data, mime):
+        return self.upload_remediated(owner, sid, f, data, mime)
 
 
 @pytest.fixture()
@@ -231,8 +235,7 @@ def _seed(store, values: dict[str, str], rule_id: str = "1.4.5") -> str:
     item_id = store.enqueue_proposals(SID, FILE, rule_id, [
         {"locator": loc, "before": "text baked into an image", "proposed_value": "",
          "rationale": "r", "source": "OCR"} for loc in values], rule_name="Images of Text")
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, list(values.values()))
+    approve_bound(store, item_id, list(values.values()))
     return item_id
 
 

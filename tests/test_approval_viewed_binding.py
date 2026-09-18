@@ -35,6 +35,7 @@ def viewed(st, item_id):
     return dict(expected_version=row.get("decision_version") or 0,
                 expected_source_revision=st.remediation_source_revision(row["scan_id"]),
                 expected_proposal_snapshot_ids=list(row.get("proposal_snapshot_ids") or []),
+                expected_corrected_sha256=st.corrected_artifact_token(row["scan_id"], row["file"]),
                 approval_scope="single")
 
 
@@ -75,7 +76,8 @@ def test_expected_version_only_approval_is_refused_and_stamps_nothing(decision):
 
 
 @pytest.mark.parametrize("missing", ["expected_version", "expected_source_revision",
-                                     "expected_proposal_snapshot_ids"])
+                                     "expected_proposal_snapshot_ids",
+                                     "expected_corrected_sha256"])
 def test_each_viewed_field_is_required_on_approve(decision, missing):
     st, item_id, update, Body, request = decision
     fields = viewed(st, item_id)

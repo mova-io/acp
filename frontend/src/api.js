@@ -1629,6 +1629,9 @@ export const updateHitlItem = (itemId, status, reviewerNote = null, approvedValu
         // binding above under the row lock and allows edited values. Omitted (null) by a frozen batch
         // selection, which keeps the batch guard. See viewedApprovalBinding.js.
         approval_scope: opts.approvalScope ?? null,
+        // The corrected copy the reviewer was looking at: the row's `corrected_artifact` VERBATIM (its
+        // sha256, or "none" when no corrected copy exists). Required on every approval, single and batch.
+        expected_corrected_sha256: opts.expectedCorrectedSha256 ?? null,
         // Feedback intelligence: WHY a rejection happened (enum; bulk/keyboard paths send 'unspecified')
         reject_reason: opts.rejectReason ?? null,
         // WCAG exception the reviewer applied instead of writing a fix: 'decorative' (1.1.1 — image

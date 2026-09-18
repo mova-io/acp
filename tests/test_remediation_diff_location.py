@@ -185,7 +185,7 @@ def writer_env(st, monkeypatch):
     monkeypatch.setattr(core, "fire_webhook", lambda *a, **k: None)
     monkeypatch.setitem(sys.modules, "blob", SimpleNamespace(
         download_remediated=lambda *a: b"synthetic-local-only",
-        upload_remediated=lambda *a: "https://blob.invalid/copy"))
+        upload_immutable_retry=lambda *a: "https://blob.invalid/copy"))
     monkeypatch.setattr(handlers, "_verify_residual", lambda *a, **kw: Verification(True, ()))
     monkeypatch.setattr("output_provenance.stamp_output", lambda data, name: data)
     return SimpleNamespace(st=st, handlers=handlers, monkeypatch=monkeypatch)

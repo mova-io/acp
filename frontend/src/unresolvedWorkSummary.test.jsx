@@ -3,9 +3,9 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { unresolvedWorkSummary } from './unresolvedWorkSummary.js'
 import RemainingWorkStatus from './RemainingWorkStatus.jsx'
 const draft = (id, extra = {}) => ({id, file:`${id}.docx`, rule_id:'1.1.1',status:'pending',after:'An image description',hasProposal:true,
-  _raw:{proposal_snapshot_ids:['p'],source_revision:1,decision_version:1},...extra})
+  _raw:{corrected_artifact:'none',proposal_snapshot_ids:['p'],source_revision:1,decision_version:1},...extra})
 const mixed = [
-  draft(1, {_raw:{finding_count:40}}),
+  draft(1, {_raw:{corrected_artifact:'none',finding_count:40}}),
   draft(2, {status:'verification_failed'}),
   draft(3, {file:'source.pdf',rule_id:'1.3.1'}),
   draft(4, {manual:true}),
@@ -22,7 +22,7 @@ it('partitions outstanding items once without counting findings, jobs, or saved 
   expect(result.groups.reduce((sum,group)=>sum+group.count,0)).toBe(result.total)
 })
 it('does not call generic manual reasons unsupported or incomplete assigned work automatic', () => {
-  const result=unresolvedWorkSummary([draft(1,{_raw:{}}),draft(2,{automaticDisposition:{responsibility:'human',reason:'Manual work or no supported proposal writer'}})],{1:{state:'assigned'}})
+  const result=unresolvedWorkSummary([draft(1,{_raw:{corrected_artifact:'none',}}),draft(2,{automaticDisposition:{responsibility:'human',reason:'Manual work or no supported proposal writer'}})],{1:{state:'assigned'}})
   expect(result.groups.find(group=>group.key==='human').count).toBe(2)
   expect(result.groups.find(group=>group.key==='unsupported').count).toBe(0)
 })

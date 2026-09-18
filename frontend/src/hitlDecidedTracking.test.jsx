@@ -31,7 +31,7 @@ afterEach(unmountAll)
 const row = (i, extra = {}) => ({
   id: `row-${i}`, scan_id: 'scan-1', file: `doc-${i}.docx`, rule_id: '1.1.1',
   rule_name: 'Images need a text alternative', finding_count: 1, status: 'pending',
-  decision_version: 0, source_revision: 'source', proposal_snapshot_ids: [`snap-${i}`],
+  decision_version: 0, source_revision: 'source', proposal_snapshot_ids: [`snap-${i}`], corrected_artifact: 'none',
   proposals: [{ proposed_value: `alt text ${i}`, source: 'ai vision', snapshot_id: `snap-${i}` }],
   ...extra,
 })

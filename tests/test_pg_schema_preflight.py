@@ -68,6 +68,10 @@ def previous_schema(url):
     execute(url, 'DROP TABLE document_wide_chunk_plans')
     # v59's additive remediation_diff location columns are absent from any earlier schema.
     execute(url, 'ALTER TABLE remediation_diff DROP COLUMN locator, DROP COLUMN page')
+    # v60's report history table is absent from any earlier schema too.
+    execute(url, 'DROP TABLE file_assessment_history')
+    # And v61's approval artifact binding.
+    execute(url, 'ALTER TABLE hitl_queue DROP COLUMN approved_corrected_sha256')
     execute(url, 'DELETE FROM acp_schema_version WHERE version>=58')
     execute(url, "INSERT INTO acp_schema_version(version,checksum) VALUES (57,'4a3338134fdc573bcaa2062935c2711d')")
     execute(url, "CREATE TABLE customer_probe(id INT PRIMARY KEY,value TEXT); INSERT INTO customer_probe VALUES (1,'keep')")
@@ -105,8 +109,12 @@ def test_v58_remediation_diff_rows_survive_the_v59_location_columns(disposable_d
     keep every value and read as unknown (or the flagged legacy-note fallback); new rows store
     the exact locator and a real page, through every reader, including the paged CTE."""
     url = disposable_database
+    # The DROP/DELETE below rewrite the schema: prove the target is a throwaway at the site itself
+    # (tests/test_pg_destructive_guard.py checks each destructive test body, not its fixtures).
+    require_disposable_postgres(url)
     store._PgAdapter(url).init_schema()
     execute(url, 'ALTER TABLE remediation_diff DROP COLUMN locator, DROP COLUMN page')
+    execute(url, 'DROP TABLE file_assessment_history')   # v60, also absent from a v58 schema
     execute(url, 'DELETE FROM acp_schema_version')
     execute(url, 'INSERT INTO acp_schema_version(version,checksum) VALUES (%s,%s)',
             (58, 'bcaed9350aa98abb6695f7057e157f63'))

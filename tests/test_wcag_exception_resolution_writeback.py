@@ -40,7 +40,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from hitl_viewed import viewed_fields
+from hitl_viewed import approve_bound, viewed_fields
 
 ACP = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ACP / "api"))
@@ -97,9 +97,8 @@ def _deco_row(store, file=FILE, locator=LOGO):
 
 def _resolve(store, item_id, resolution="decorative", note=None, value=None):
     """What the client sends for an exception: a note, no values (EvidenceCard suppresses them)."""
-    store.update_hitl_item(item_id, "approved",
-                           note or "Marked decorative — no description needed", value,
-                           resolution=resolution)
+    approve_bound(store, item_id, None, resolution=resolution,
+                  note=note or "Marked decorative — no description needed", value=value)
 
 
 class _Blob:
@@ -107,6 +106,9 @@ class _Blob:
     def download_remediated(self, owner, sid, f): return self.data
     def upload_remediated(self, owner, sid, f, data, mime):
         self.data = data; self.uploads.append((f, mime)); return "http://b/2"
+    # The approved writer publishes digest-scoped and moves the pointer at commit.
+    def upload_immutable_retry(self, owner, sid, f, data, mime):
+        return self.upload_remediated(owner, sid, f, data, mime)
 
 
 def _run_handler(monkeypatch, store, blob, *, residual=frozenset(), file=FILE):
@@ -272,8 +274,7 @@ def test_a_described_image_and_a_decorative_one_land_in_one_document(store, monk
     ], rule_name="Non-text Content")
     # enqueue_proposals REPLACES per (scan, file, rule), so the two cards are one row here; the
     # decorative one is re-stated as its own row below to keep both alive.
-    store.update_hitl_item(described, "approved", None, None)
-    store.approve_proposal_values(described, [])
+    approve_bound(store, described, [])
     deco_row = store.enqueue_proposals(SID, FILE, "1.1.1/decorative", [
         {"locator": LOGO, "before": "(no alt text)", "proposed_value": DECO_LABEL,
          "rationale": "r", "kind": "decorative", "source": "heuristic"},

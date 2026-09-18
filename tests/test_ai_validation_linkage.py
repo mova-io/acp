@@ -22,6 +22,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from hitl_viewed import approve_bound
 
 ACP = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ACP / "api"))
@@ -167,6 +168,9 @@ class _Blob:
     def download_remediated(self, owner, sid, f): return self.data
     def upload_remediated(self, owner, sid, f, data, mime):
         self.data = data; self.uploads.append((f, mime)); return "http://b/2"
+    # The approved writer publishes digest-scoped and moves the pointer at commit.
+    def upload_immutable_retry(self, owner, sid, f, data, mime):
+        return self.upload_remediated(owner, sid, f, data, mime)
 
 
 def _seed_linked(store, *, names=("Picture 1",)):
@@ -186,8 +190,7 @@ def _seed_linked(store, *, names=("Picture 1",)):
          "proposed_value": f"AI draft for {n}", "rationale": "r", "source": "llava"}
         for n in names
     ], rule_name="Non-text Content")
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, [])
+    approve_bound(store, item_id, [])
     return item_id, _accepted_call(store, item_id=item_id)
 
 
@@ -323,8 +326,7 @@ def test_a_human_authored_approval_yields_no_validation_row(store, monkeypatch):
         {"locator": f"{SLIDE}#Picture 1", "before": "(no alt text)",
          "proposed_value": "A human wrote this", "rationale": "r", "source": "human"},
     ], rule_name="Non-text Content")
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, [])
+    approve_bound(store, item_id, [])
     store.record_hitl_event(SID, FILE, "1.1.1", item_id, "approve")     # no model_call_id
     _run(monkeypatch, store, _Blob(_deck("Picture 1")), _sequence({"1.1.1"}, set()))
     assert store.list_ai_validation_outcomes(SID, FILE) == []
@@ -373,8 +375,7 @@ def _seed_docx_rows(store, rows):
     out = {}
     for rule_id, proposals in rows:
         item_id = store.enqueue_proposals(SID, DOC, rule_id, proposals, rule_name=rule_id)
-        store.update_hitl_item(item_id, "approved", None, None)
-        store.approve_proposal_values(item_id, [])
+        approve_bound(store, item_id, [])
         out[rule_id] = (item_id, _accepted_call(store, item_id=item_id, file=DOC, rule=rule_id))
     return out
 

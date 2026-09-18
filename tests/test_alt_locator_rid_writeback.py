@@ -36,6 +36,7 @@ ACP = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ACP / "api"))
 
 import apply_alt  # noqa: E402
+from hitl_viewed import approve_bound
 
 SLIDE = "ppt/slides/slide1.xml"
 DOC = "word/document.xml"
@@ -300,6 +301,9 @@ class _Blob:
     def download_remediated(self, owner, sid, f): return self.data
     def upload_remediated(self, owner, sid, f, data, mime):
         self.data = data; self.uploads.append((f, mime)); return "http://b/2"
+    # The approved writer publishes digest-scoped and moves the pointer at commit.
+    def upload_immutable_retry(self, owner, sid, f, data, mime):
+        return self.upload_remediated(owner, sid, f, data, mime)
 
 
 def test_an_approved_vision_draft_now_certifies_the_file(store, monkeypatch):
@@ -319,8 +323,7 @@ def test_an_approved_vision_draft_now_certifies_the_file(store, monkeypatch):
          "proposed_value": "A dense field of coloured noise.", "rationale": "vision",
          "source": "AI vision model (stub-vision)"},
     ], rule_name="Non-text Content")
-    store.update_hitl_item(item, "approved", None, None)
-    store.approve_proposal_values(item, [])
+    approve_bound(store, item, [])
     assert store.count_unapplied_approved_values(SID, FILE) == 1     # owed, not yet written
 
     blob = _Blob(_pkg(SLIDE, _slide(_pic("p:cNvPr", "3", "Picture 3", "rId2"))))
