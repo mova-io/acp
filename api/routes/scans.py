@@ -5128,7 +5128,22 @@ def get_file_page(scan_id: str, filename: str, page: int, request: Request,
     """Serve a PNG of page N of a file — the rendering primitive the Intelligent Review
     Workspace's 'locate in document' evidence uses. Same blob-cache → render-on-demand →
     cache → serve as the thumbnail; the renderer clamps `page` to the document's real range.
-    PDF only in phase 1 (Office → 404 → placeholder). Owner-scoped, non-blocking."""
+    PDF always; Office (docx/pptx/xlsx) wherever LibreOffice is installed (render.can_render),
+    otherwise 404 → placeholder. Owner-scoped, non-blocking.
+
+    THE CLAMP IS KEPT, AND NOW IT IS SAID. Page 999 of a one-page PDF is still a 200 with page 1,
+    byte-identical — but the 200 carries `X-ACP-Rendered-Page` (the page actually drawn,
+    min(page, count)) and `X-ACP-Page-Count`, so a client can tell "page 999" from "the last page".
+    Both are omitted, never guessed, when the count is unknown: the client captions that as
+    "not confirmed".
+
+    PROVENANCE IS BOUND TO THE EXACT CACHED PNG, never to the file. Each cached page carries a
+    sidecar (`{filename}#p{N}#meta`) recording the sha256 of the PNG it describes plus the page
+    that PNG shows and the count at the time it was drawn. A hit emits headers only when the
+    sidecar parses, is self-consistent, and its digest equals the cached bytes. A per-file count
+    cannot do this: page 999 cached from a one-page version shows page 1, and a later two-page
+    render would relabel those same pixels "page 2". Anything else — a legacy PNG with no sidecar,
+    a partial cache write, a digest mismatch — serves the PNG with no provenance at all."""
     import blob as _blob
     import render as _render
 
@@ -5142,11 +5157,42 @@ def get_file_page(scan_id: str, filename: str, page: int, request: Request,
 
     page = max(1, min(int(page or 1), 5000))          # sane bound; renderer clamps to real range
     cache_key = f"{filename}#p{page}"                  # page-specific blob cache entry
+    meta_key = f"{cache_key}#meta"                     # provenance of THAT exact PNG
+
+    def served(png: bytes, provenance: tuple[int, int] | None) -> Response:
+        headers = {"Cache-Control": "private, max-age=86400"}
+        if provenance:
+            headers["X-ACP-Rendered-Page"] = str(provenance[0])
+            headers["X-ACP-Page-Count"] = str(provenance[1])
+        return Response(png, media_type="image/png", headers=headers)
+
+    def cached_provenance(png: bytes) -> tuple[int, int] | None:
+        """(rendered_page, page_count) iff the sidecar describes exactly these bytes.
+
+        Absent (legacy), partial or garbled sidecars are EXPECTED states of a best-effort cache,
+        not failures: each answers None (no provenance), explicitly. download_render never raises,
+        so the only thing caught is the parse of bytes we already hold."""
+        raw = _blob.download_render(owner, scan_id, meta_key)
+        if not raw:
+            return None                                # legacy PNG or sidecar write that never landed
+        try:
+            meta = _json.loads(raw.decode())
+        except (UnicodeDecodeError, ValueError):       # partial/garbled sidecar → say nothing
+            return None
+        if not isinstance(meta, dict):
+            return None
+        rendered, count = meta.get("rendered_page"), meta.get("page_count")
+        if (meta.get("v") == 1
+                and meta.get("png_sha256") == hashlib.sha256(png).hexdigest()
+                and type(rendered) is int and type(count) is int
+                and count >= 1 and rendered == min(page, count)):
+            return rendered, count
+        return None
+
     if not fresh:
         cached = _blob.download_render(owner, scan_id, cache_key)
         if cached is not None:
-            return Response(cached, media_type="image/png",
-                            headers={"Cache-Control": "private, max-age=86400"})
+            return served(cached, cached_provenance(cached))
 
     data = _source_bytes_for_render(request, scan_id, filename, owner)
     if not data:
@@ -5156,9 +5202,19 @@ def get_file_page(scan_id: str, filename: str, page: int, request: Request,
     if not png:
         raise HTTPException(404, "could not render this page")
 
-    _blob.upload_render(owner, scan_id, cache_key, png)   # best-effort cache; never raises
-    return Response(png, media_type="image/png",
-                    headers={"Cache-Control": "private, max-age=86400"})
+    count = _render.page_count(data, ext)             # never raises; None = unknown
+    provenance = (min(page, count), count) if count else None
+    # PNG first, then its sidecar — and the sidecar only if the PNG write landed. The digest makes
+    # the order a belt, not the braces: a sidecar can only ever vouch for the bytes it hashed, so a
+    # PNG write that failed after, or a sidecar write that failed after, leaves a digest mismatch
+    # (no headers) rather than a borrowed label. Unknown count → no sidecar worth trusting: write
+    # one with no digest so an older sidecar for this key cannot survive a fresh re-render.
+    if _blob.upload_render(owner, scan_id, cache_key, png):     # best-effort; never raises
+        meta = ({"v": 1, "png_sha256": hashlib.sha256(png).hexdigest(),
+                 "rendered_page": provenance[0], "page_count": provenance[1]}
+                if provenance else {"v": 1, "png_sha256": None})
+        _blob.upload_render(owner, scan_id, meta_key, _json.dumps(meta).encode())
+    return served(png, provenance)
 
 
 @router.get("/scans/{scan_id}/files/{filename:path}/geometry")
