@@ -10413,8 +10413,84 @@ class Store:
             return self._db.fetchone(cur)
 
     def record_release_document(self, release_id: str, owner: str, result: dict) -> None:
-        """Upsert a safe per-document outcome without accepting a foreign release id."""
+        """Upsert a safe per-document outcome without accepting a foreign release id.
+
+        Also SETTLES release_executions.status in the same transaction. It used to be written
+        'running' at insert and never again, so a release whose every document had published —
+        with its stage execution succeeded and its reports delivered — still read 'running' in
+        the durable column. The rule is project_delivery's: 'completed' once every counted
+        document is published, 'attention' when any failed, otherwise 'running'.
+
+        Lock the execution row FIRST (the same `SET id=id` idiom release_report_delivery uses),
+        so concurrent receipts serialize and the count below always sees every committed
+        receipt; locking it after the document row would invert the order other writers take.
+        Existing rows are only corrected by this normal write path — there is deliberately no
+        backfill of legacy rows.
+
+        A FAILURE NEVER ERASES A DELIVERED COPY'S RECEIPT. Once a row has published an exact
+        artifact (published_at + a `sha256:` tag), that copy stays at the provider whatever a
+        later attempt does — a republish of a newer correction that fails, or a stale job
+        retried after the copy changed. Writing status='failed' over it recorded a successful
+        delivery as failed, and three failure categories also stamp the ATTEMPTED digest, which
+        made the row claim bytes the provider never received. So the row keeps its published
+        identity (status, digest, location, verification) and the currency projection
+        (release_publication) reports it out_of_date against the current copy, retry offered.
+
+        THE REFUSED ATTEMPT IS NOT WRITTEN ONTO THAT ROW. Every column of it is hashed by
+        release_report_delivery._fingerprint, so stamping even the attempt's failure_category
+        re-identified the delivered reports: a refused request that delivered nothing built and
+        delivered a second report bundle for unchanged bytes. The row is restored exactly as it
+        was, and the attempt is appended to the immutable decision_log as
+        'release.publish_attempt_failed', which is where release_publication reads it from.
+        """
         with self._db.cursor() as cur:
+            self._db.execute(cur,
+                "UPDATE release_executions SET id=id WHERE id=%s AND owner_email=%s",
+                (release_id, owner))
+            refused_attempt = None
+            forget_undelivered_digest = False
+            if result.get("status") != "published":
+                self._db.execute(cur,
+                    "SELECT d.*,e.scan_id AS release_scan_id FROM release_documents d JOIN release_executions e "
+                    "ON e.id=d.release_id WHERE d.release_id=%s AND d.file=%s AND e.owner_email=%s",
+                    (release_id, result["file"], owner))
+                held = self._db.fetchone(cur)
+                # DELIVERED means what release_publication.held_copy calls held: an exact digest the
+                # provider actually received. Three failure categories stamp the ATTEMPTED digest
+                # instead, and such a row must never be restored as a delivered copy.
+                from release_publication import held_copy
+                evidence, delivered_hex = held_copy(held) if held else (False, None)
+                delivered = bool(evidence and delivered_hex and held.get("published_at"))
+                # Nor may an undelivered digest ride along (COALESCE) under a new status or category,
+                # where it would then read as delivered bytes.
+                forget_undelivered_digest = bool(held and not delivered and held.get("artifact_digest"))
+                if result.get("status") == "failed" and delivered:
+                    forget_undelivered_digest = False
+                    refused_attempt = {
+                        "scan_id": held["release_scan_id"], "file": result["file"],
+                        "detail": {"release_id": release_id,
+                                   "failure_category": result.get("failure_category"),
+                                   "explanation": result.get("explanation"),
+                                   # The bytes the refused attempt was FOR (a job's payload digest), so
+                                   # release_publication attributes it to that version and no other.
+                                   "attempted_artifact_digest": (result.get("attempted_artifact_digest")
+                                                                 or result.get("artifact_digest")),
+                                   "published_artifact_digest": held["artifact_digest"]}}
+                    # Restore the delivered row exactly (see the docstring): its own failure
+                    # fields, created flag and every location/identity column as they stood.
+                    result = {"file": result["file"], "status": "published",
+                              "source_document_id": held.get("source_document_id"),
+                              "original_relative_path": held.get("source_relative_path"),
+                              "released_relative_path": held.get("destination_relative_path"),
+                              "released_document_id": held.get("released_document_id"),
+                              "published_url": held.get("released_document_url"),
+                              "corrected_checksum": held.get("corrected_checksum"),
+                              "verification": held.get("verification"),
+                              "created": held.get("created_result"),
+                              "published_at": held["published_at"],
+                              "artifact_digest": held["artifact_digest"],
+                              "failure_category": held.get("failure_category"),
+                              "explanation": held.get("explanation")}
             self._db.execute(cur,
                 "INSERT INTO release_documents(release_id,file,source_document_id,"
                 "source_relative_path,destination_relative_path,released_document_id,"
@@ -10423,14 +10499,19 @@ class Store:
                 "SELECT %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s WHERE EXISTS "
                 "(SELECT 1 FROM release_executions WHERE id=%s AND owner_email=%s) "
                 "ON CONFLICT(release_id,file) DO UPDATE SET "
-                "destination_relative_path=EXCLUDED.destination_relative_path,"
+                # A queued/failed attempt carries no location or verification of its own; the
+                # previously delivered copy's must survive it (like the URL and digest below).
+                "destination_relative_path=COALESCE(EXCLUDED.destination_relative_path,release_documents.destination_relative_path),"
                 "released_document_id=COALESCE(EXCLUDED.released_document_id,release_documents.released_document_id),"
                 "released_document_url=COALESCE(EXCLUDED.released_document_url,release_documents.released_document_url),"
                 "corrected_checksum=COALESCE(EXCLUDED.corrected_checksum,release_documents.corrected_checksum),"
                 "artifact_digest=COALESCE(EXCLUDED.artifact_digest,release_documents.artifact_digest),"
-                "verification=EXCLUDED.verification,status=EXCLUDED.status,"
+                "verification=COALESCE(EXCLUDED.verification,release_documents.verification),status=EXCLUDED.status,"
                 "failure_category=EXCLUDED.failure_category,explanation=EXCLUDED.explanation,"
-                "created_result=EXCLUDED.created_result,"
+                # Whether the provider object was CREATED is a fact of the delivery that made it; a
+                # queued or failed attempt must not reset it (it is part of the report fingerprint).
+                "created_result=CASE WHEN EXCLUDED.status='published' THEN EXCLUDED.created_result "
+                "ELSE release_documents.created_result END,"
                 "published_at=COALESCE(EXCLUDED.published_at,release_documents.published_at)",
                 (release_id, result["file"], result.get("source_document_id"),
                  result.get("original_relative_path") or result["file"],
@@ -10440,6 +10521,33 @@ class Store:
                  result.get("failure_category"), result.get("explanation"),
                  int(bool(result.get("created"))), result.get("published_at"), result.get("artifact_digest"),
                  release_id, owner))
+            if forget_undelivered_digest:
+                self._db.execute(cur,
+                    "UPDATE release_documents SET artifact_digest=%s WHERE release_id=%s AND file=%s",
+                    (result.get("artifact_digest"), release_id, result["file"]))
+            self._db.execute(cur,
+                "SELECT e.status,e.documents_total,"
+                "SUM(CASE WHEN d.status='published' THEN 1 ELSE 0 END) AS published,"
+                "SUM(CASE WHEN d.status='failed' THEN 1 ELSE 0 END) AS failed "
+                "FROM release_executions e LEFT JOIN release_documents d ON d.release_id=e.id "
+                "WHERE e.id=%s AND e.owner_email=%s GROUP BY e.status,e.documents_total",
+                (release_id, owner))
+            row = self._db.fetchone(cur)
+            if row:
+                total = int(row["documents_total"] or 0)
+                published, failed = int(row["published"] or 0), int(row["failed"] or 0)
+                settled = ("completed" if total and published == total
+                           else "attention" if failed else "running")
+                if settled != row["status"]:
+                    self._db.execute(cur,
+                        "UPDATE release_executions SET status=%s,updated_at=%s "
+                        "WHERE id=%s AND owner_email=%s",
+                        (settled, self._now(), release_id, owner))
+        if refused_attempt:
+            import json
+            self.log_decision(owner, "release.publish_attempt_failed",
+                              scan_id=refused_attempt["scan_id"], file=refused_attempt["file"],
+                              detail=json.dumps(refused_attempt["detail"], sort_keys=True))
 
     def release_status(self, release_id: str, owner: str) -> dict | None:
         """Owner-scoped release, roots and document outcomes for retries and UI reloads."""

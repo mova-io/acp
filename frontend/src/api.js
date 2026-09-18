@@ -1758,6 +1758,42 @@ export const publishAllFiles = (scanId, files, releaseFolderName = '', options =
         ...(options.allowRemainingIssues ? { allow_remaining_issues: true } : {}),
         ...(options.expectedArtifacts ? { expected_artifacts: options.expectedArtifacts, expected_destination: options.destination || null } : {}) }),
     }).then(j))
+// Republish copies whose correction landed AFTER publication. The body binds the request to the
+// exact saved artifacts the user saw (64-hex, no "sha256:" prefix) and states explicitly whether
+// remaining issues were confirmed; the server refuses anything else with a coded 409.
+export const REPUBLISH_ERROR_MESSAGES = {
+  artifact_changed: 'A newer corrected copy was saved after this page loaded. Refresh release status and review the latest version before publishing.',
+  remaining_issues_confirmation_required: 'This version still has remaining issues. Confirm publishing it with its remaining issues recorded, then try again.',
+  republish_blocked: 'The updated copy cannot be published yet. Approved changes may still be applying, or another publication is in progress.',
+  release_not_found: 'No saved release was found for this scan. Refresh release status.',
+  republish_refused: 'None of the selected copies were published. The reason for each is shown below; earlier published copies are unchanged.',
+}
+// remaining_issue_files names exactly the files whose confirmation box was ticked; the server
+// refuses any file needing confirmation that is not listed (409, detail.files).
+export const republishRelease = (scanId, { expected_artifacts, allow_remaining_issues = false, remaining_issue_files } = {}) => (SIM
+  ? Promise.reject(new Error('Publishing an updated copy is unavailable in demo mode.'))
+  : fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/release/republish`, {
+      method: 'POST',
+      headers: headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ expected_artifacts, allow_remaining_issues: allow_remaining_issues === true,
+        ...(Array.isArray(remaining_issue_files) ? { remaining_issue_files } : {}) }),
+    }).then(j).catch((error) => {
+      const detail = error?.detail && typeof error.detail === 'object' ? error.detail : null
+      const code = detail?.code || error?.code
+      if (code) error.code = code
+      if (Array.isArray(detail?.files)) error.files = detail.files
+      if (Array.isArray(detail?.results)) error.results = detail.results
+      const serverMessage = detail?.message || null
+      if (code === 'remaining_issues_confirmation_required' && error.files?.length) {
+        error.message = `${error.files.join(', ')} still ${error.files.length === 1 ? 'has' : 'have'} remaining issues. Refresh release status, confirm publishing ${error.files.length === 1 ? 'that version' : 'those versions'} with remaining issues recorded, then try again.`
+      } else if (code === 'republish_blocked' && serverMessage) error.message = serverMessage
+      else if (REPUBLISH_ERROR_MESSAGES[code]) error.message = REPUBLISH_ERROR_MESSAGES[code]
+      else if (serverMessage) error.message = serverMessage
+      else if (/^\[object Object\]$/.test(error?.message || '')) error.message = 'The updated copy could not be published.'
+      // Both mean the page's view of the current copy is stale: re-read before asking again.
+      if (code === 'artifact_changed' || code === 'remaining_issues_confirmation_required') error.refreshRequired = true
+      throw error
+    }))
 export const getReleaseStatus = (scanId) => (SIM
   ? sim({ release_id: null, roots: [], documents: [], documents_total: 0, published: 0, failed: 0, remaining: 0 }, 50)
   : fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/release`, { headers: headers() }).then(j))

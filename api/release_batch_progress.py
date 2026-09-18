@@ -87,11 +87,17 @@ def _project(store, row):
         # receipts use the tagged wire representation. Accept old tagged progress
         # too, without accepting malformed or partial identities.
         raw_digest = digest[7:] if isinstance(digest, str) and digest.startswith('sha256:') else digest
-        if (isinstance(raw_digest, str) and len(raw_digest) == 64
-                and all(c in '0123456789abcdef' for c in raw_digest)
-                and current_records.get(file, {}).get('corrected_sha256') == raw_digest
-                and receipt.get('status') == 'published'
-                and receipt.get('artifact_digest') == artifact_tag(raw_digest)):
+        current = current_records.get(file, {}).get('corrected_sha256')
+        # Delivered means the CURRENT corrected copy's exact receipt is at this destination. The
+        # plan froze the digest it admitted; a correction saved after publication and then
+        # delivered by the owner's explicit, digest-bound republish (/release/republish) is the
+        # current copy of an authorized document and counts. A receipt for any other bytes never
+        # does, so an out-of-date delivery reads 0 until the current copy is actually delivered.
+        exact = lambda value: (isinstance(value, str) and len(value) == 64
+                               and all(c in '0123456789abcdef' for c in value))
+        if (exact(current) and receipt.get('status') == 'published'
+                and receipt.get('artifact_digest') == artifact_tag(current)
+                and (current == raw_digest or exact(raw_digest))):
             delivered += 1
             category = 'published'
         else:

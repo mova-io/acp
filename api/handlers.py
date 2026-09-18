@@ -901,10 +901,21 @@ def _propose_media_captions(scan_id: str, filename: str, drive_file_id: str,
 REMEDIATION_SOURCES = ("drive", "local", "sharepoint")
 
 
+import contextvars as _contextvars
+
+# The exact artifact the running publish_file job was admitted for (its payload digest). A
+# failure is recorded AGAINST that version: when it lands on a still-delivered receipt, the
+# store logs it as 'release.publish_attempt_failed' and release_publication attaches it only to
+# that version. `record` is the file's CURRENT record, which may already be a newer copy, so it
+# cannot answer "which bytes was this attempt for".
+_ATTEMPTED_ARTIFACT = _contextvars.ContextVar("release_attempted_artifact", default=None)
+
+
 def _release_failure(release_id: str, owner: str, filename: str, record: dict,
                      category: str, explanation: str) -> None:
     """Persist one safe Release failure; provider exception text never crosses the API."""
     core.store.record_release_document(release_id, owner, {
+        "attempted_artifact_digest": _ATTEMPTED_ARTIFACT.get(),
         "file": filename,
         "source_document_id": record.get("drive_file_id") or filename,
         "original_relative_path": (record.get("source_relative_path")
@@ -924,12 +935,28 @@ def _publish_file(payload: dict, job: dict) -> None:
         from automatic_release import publish_job
         return publish_job(core.store, payload, job, _publish_file_guarded)
     result = _publish_file_guarded(payload, job)
-    from release_report_delivery import queue_if_release_settled
-    queue_if_release_settled(core.store, payload["scan_id"], payload["owner"], payload.get("release_id"))
+    from release_report_delivery import queue_if_release_settled, report_superseded
+    try:
+        queue_if_release_settled(core.store, payload["scan_id"], payload["owner"], payload.get("release_id"))
+    except ValueError as exc:
+        # The copy was delivered. If it was corrected again meanwhile, reports for it cannot be
+        # built from the newer repair records — that is currency, surfaced by the Release
+        # projection as out_of_date, not a failure of this job. Failing here sent a successful
+        # delivery round the retry loop, where the stale payload then failed it outright.
+        if not report_superseded(exc):
+            raise
     return result
 
 
 def _publish_file_guarded(payload: dict, job: dict) -> None:
+    token = _ATTEMPTED_ARTIFACT.set(payload.get("artifact_digest"))
+    try:
+        return _publish_file_attempt(payload, job)
+    finally:
+        _ATTEMPTED_ARTIFACT.reset(token)
+
+
+def _publish_file_attempt(payload: dict, job: dict) -> None:
     """Durably publish one approved corrected copy to its source provider.
 
     Tokens are resolved from the short-lived Redis token store at execution time and are never
@@ -956,6 +983,13 @@ def _publish_file_guarded(payload: dict, job: dict) -> None:
         if source not in {"drive", "sharepoint"}:
             raise FatalJobError("Uploaded cloud delivery needs a saved cloud destination")
     provider = "Google Drive" if source == "drive" else "SharePoint"
+    delivered = core.store.get_release_document(release_id, filename, owner)
+    if (payload.get("artifact_digest") and delivered and delivered.get("status") == "published"
+            and delivered.get("artifact_digest") == payload["artifact_digest"]):
+        # This job's exact artifact is already delivered (a retry after the write landed).
+        # Re-validating it against a NEWER corrected copy would call it changed and record a
+        # failure over the receipt; the job is simply done.
+        return
     from release_artifacts import release_ready, release_review_evidence
     allow_remaining_issues = payload.get("allow_remaining_issues") is True
     record = core.store.get_file_record(scan_id, filename)

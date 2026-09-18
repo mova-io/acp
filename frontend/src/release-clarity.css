@@ -16,3 +16,5 @@
   .release-action-sticky > button { flex: 1 1 auto; min-height: 44px; }
   .release-selection__drawer dl { grid-template-columns: 1fr; }
 }
+/* The `hidden` attribute must win over display:flex: this accounting was retired from view in #1986. */
+.release-clarity-counts[hidden] { display: none; }

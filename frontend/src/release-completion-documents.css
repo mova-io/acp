@@ -22,3 +22,5 @@
 
 .release-completion-documents {font-family:var(--font-ui);}
 .release-completion-documents tbody th {font-family:var(--font-mono,ui-monospace);font-size:12px;font-weight:500;}
+/* Headers wrap only between words: overflow-wrap:anywhere let "Corrected copy" break as "Correcte d copy". */
+.release-completion-documents thead th { overflow-wrap:normal; word-break:normal; hyphens:none; }
