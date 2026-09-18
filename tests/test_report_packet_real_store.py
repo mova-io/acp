@@ -224,14 +224,10 @@ def test_the_recording_the_frontend_replays_matches_the_routes(client):
     assert sorted(saved["fileFacts"]) == sorted(rec["fileFacts"])
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "DEFECT found while building this fixture (not in rf-C's files): api/app.py _access_gate "
-    "passes request.url.path to core.is_public, and Starlette's URL truncates a DECODED path at "
-    "'#' or '?'. So /scans/{sid}/files/a%23b.xlsx/report-facts is judged as '/scans/{sid}/files/a' "
-    "— no registered route — and waved through as PUBLIC: the handler runs with owner 'demo'. "
-    "The owner gets 404 for any document named with # or ?, and the request skips the gate. "
-    "Fix: use request.scope['path'] in the gate (the capability middleware already does). "
-    "Remove this marker when fixed."))
+# Found while building this fixture: api/app.py's gate judged request.url.path, which Starlette
+# truncates at a DECODED '#' or '?', so a document named with either was 404 to its owner and
+# answered as 'demo' without credentials. Fixed in the gate (ab3554a6, which judges the raw scope
+# path); this is the packet exporter's end-to-end guard that it stays fixed.
 @pytest.mark.parametrize("name", ["Budget #3.xlsx", "Why? notes.docx"])
 def test_a_document_named_with_hash_or_question_mark_is_served_to_its_owner(client, name):
     _save(client.acp_store, "s-hash", completed="2026-09-01T05:05:00+00:00",
