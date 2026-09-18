@@ -647,7 +647,11 @@ def summary_blocks(blocks: list, trim: int = 0) -> tuple[list, list[str]]:
         kept.append(block)
     # Trailing prose is the model's own footer (generation stamp, printed-copy notice); the page
     # footer already carries the stamp and the summary is not where the notice earns its space.
-    while kept and block_kind(kept[-1]) in ("text", "gap", "pageBreak", "link"):
+    # It stops at BOLD text: that is a decision line, not a footer — the scan report's comparison
+    # headline ("N newly reported since the previous assessment") is the last section of its
+    # summary, and this loop used to strip it on every scan Summary, at every trim level.
+    while kept and block_kind(kept[-1]) in ("text", "gap", "pageBreak", "link") and not (
+            block_kind(kept[-1]) == "text" and (kept[-1].get("o") or {}).get("bold")):
         kept.pop()
     # Under pressure the comparison's own heading goes: the summary callout opens with "Since the
     # previous assessment", so the heading says it twice, and one heading's height is what stood
@@ -954,7 +958,7 @@ class _Renderer:
         head = "".join(f'<th scope="col">{_t(h) or "<span class=muted>(unlabelled)</span>"}</th>' for h in headers)
         body = []
         for r in rows:
-            cells = "".join(f"<td>{_t(c)}</td>" for c in r)
+            cells = "".join(f"<td>{self._cell_html(c)}</td>" for c in r)
             body.append(f"<tr>{cells}</tr>")
         if not body:
             # NOT colspan. WeasyPrint's tagger does not write /ColSpan into the structure tree, so
@@ -1061,6 +1065,16 @@ class _Renderer:
                          + (f'<br><span class="muted">{_t(it.get("detail"))}</span>' if _s(it.get("detail")) else "")
                          + "</li>")
         return f'<ol class="stages">{"".join(items)}</ol>' if items else ""
+
+    def _cell_html(self, cell) -> str:
+        """A table cell: text, or `{text, href}` (scanReport.docCell — a document's evidence view).
+
+        The href is an APP link, so it goes through safe_app_href: absolute against the trusted
+        origin, or the text alone. A cell never becomes a link to another host.
+        """
+        if isinstance(cell, dict) and cell.get("href"):
+            return self._link(cell.get("text"), cell.get("href"), app=True)
+        return _t(cell)
 
     def _location_html(self, location) -> str:
         text = _location_text(location)

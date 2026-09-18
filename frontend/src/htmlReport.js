@@ -126,6 +126,10 @@ function metricGrid(cards) {
   return `<dl class="metrics">${cells}</dl>`
 }
 
+// A table cell is text, or { text, href } — a link cell (scanReport.docCell). The href goes through
+// exportHref like every other link: absolute against a trusted origin, or the text alone.
+const cellHtml = (cell) => (cell && typeof cell === 'object' ? linkOrText(cell.text, cell.href) : esc(cell))
+
 // Table with caption, column-group widths, a row header on the first column, and
 // scoped column headers — everything ACP's 1.3.1 check wants to see.
 function table(b, { id = null, visibleCaption = false } = {}) {
@@ -136,7 +140,7 @@ function table(b, { id = null, visibleCaption = false } = {}) {
   const thead = `<thead><tr>` + headers.map((h) => `<th scope="col">${esc(h)}</th>`).join('') + `</tr></thead>`
   const body = (b.rows || []).length
     ? (b.rows || []).map((r) => `<tr>` + r.map((cell, i) =>
-      i === 0 ? `<th scope="row">${esc(cell)}</th>` : `<td>${esc(cell)}</td>`
+      i === 0 ? `<th scope="row">${cellHtml(cell)}</th>` : `<td>${cellHtml(cell)}</td>`
     ).join('') + `</tr>`).join('')
     : `<tr><td colspan="${headers.length || 1}">No records.</td></tr>`
   const cap = `<caption class="${visibleCaption ? 'cap' : 'sr-only'}">${esc(b.caption || 'Table')}</caption>`

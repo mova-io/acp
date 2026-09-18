@@ -24,6 +24,7 @@ import {
   buildComparisonFromFacts, boundList, changeIdOf, scOfValue, criterionName,
 } from './reportEvidence.js'
 import { MODE_LABEL } from './reportModel.js'
+import { fileEvidenceHref } from './evidenceLink.js'
 
 // Normalize a filename to one of the native-app formats the remediation guide keys on.
 const CHECKLIST_CAP = 60
@@ -48,6 +49,14 @@ const MODES = ['summary', 'reviewer', 'full']
 const REVIEWER_FINDING_CAP = 50
 const NR = 'Not recorded'
 const orNR = (v) => (v == null || v === '' ? NR : String(v))
+// A document-name cell that opens that document's evidence view in ACP (evidenceLink contract 2).
+// The scan report's cards carry client-side ids, so it cannot name an exact finding; it CAN name
+// the document, and that is the link it offers — never a finding-level link it cannot back.
+// Relative here; every renderer absolutizes it against a trusted origin or prints text only.
+export const docCell = (file, scanId) => {
+  const href = scanId && file ? fileEvidenceHref({ scanId, file }) : null
+  return href ? { text: file, href } : file
+}
 
 // getScanRemediationDiffs(scanId, true) answers { items, total, documents, loaded, complete } from a
 // real server, and a bare array in SIM — or [] when the request FAILED (api.js swallows errors).
@@ -249,6 +258,7 @@ export function buildScanReportModel(data = {}) {
   const blocks = []
   const H = (text, lvl = 1) => blocks.push({ k: 'heading', text, level: lvl })
   const T = (text, o) => blocks.push({ k: 'text', text, o: o || {} })
+  const scanIdForLinks = data.scanId ?? facts?.identity?.scanId ?? null
 
   // Remaining findings: only on documents WITHOUT a saved corrected copy. A remediated document's
   // issue list is the pre-remediation assessment, so counting it would report fixed work as open.
@@ -356,7 +366,7 @@ export function buildScanReportModel(data = {}) {
   if (estate) {
     // C4: the server's REAL estate comparison — every document compared finding by finding with
     // its own most recent earlier assessment, then totalled. Nothing is inferred from scores.
-    estateComparisonBlocks(estate, { factsFiles, mode, atLeast, T, H, blocks })
+    estateComparisonBlocks(estate, { factsFiles, mode, atLeast, T, H, blocks, scanId: scanIdForLinks })
   } else {
     let cmp
     if (facts) {
@@ -468,7 +478,7 @@ export function buildScanReportModel(data = {}) {
         rows: factsFiles.map((f) => {
           const s = screen.get(f.file) || {}
           return [
-            f.file,
+            docCell(f.file, scanIdForLinks),
             `${ASSESS_TXT[f.assessment?.state] || orNR(f.assessment?.state)}${f.assessment?.state && f.assessment.state !== 'assessed' && f.assessment.stateReason ? ` — ${f.assessment.stateReason}` : ''}`,
             orNR(f.findingsTotal), orNR(f.findingsOpen), orNR(f.findingsResolvedVerified),
             `${orNR(f.savedChangesVerified)} / ${orNR(f.savedChangesUnverified)}${f.savedChangesComplete === false ? ' (list incomplete)' : ''}`,
@@ -585,11 +595,14 @@ export function rowComparisonText(c) {
 }
 
 // C4: the estate comparison as blocks every renderer lays out truthfully. A `text` block carries
-// the whole answer in words (the one-page summary keeps text), and the Reviewer packet / Full
+// the whole answer in words, and the Reviewer packet / Full
 // evidence add the table and the per-document rows. It is deliberately NOT a `comparison` block:
 // that block's renderers count their `resolved`/`introduced` LISTS, and an estate's findings are
 // not listed here — a list of zero items would print "Newly reported: 0" over a real count.
-function estateComparisonBlocks(cmp, { factsFiles, mode, atLeast, T, blocks }) {
+// The headline sentence is BOLD on purpose. Under page pressure the one-page summary drops plain
+// text and keeps bold (report_render.summary_blocks, trim >= 2), and a Summary that silently
+// loses "N newly reported since the previous assessment" hides the new problems it exists to show.
+function estateComparisonBlocks(cmp, { factsFiles, mode, atLeast, T, blocks, scanId = null }) {
   const t = cmp.totals || {}
   const docs = [
     `${orNR(t.filesCompared)} compared with their own most recent earlier assessment`,
@@ -599,12 +612,12 @@ function estateComparisonBlocks(cmp, { factsFiles, mode, atLeast, T, blocks }) {
     t.filesNotComparable ? `${t.filesNotComparable} not fully assessed this time, so not compared` : null,
   ].filter(Boolean)
   if (cmp.status !== 'compared') {
-    T(`Change since the previous assessment: not compared. ${cmp.reason || ''}`.trim(), { color: AMBER_HEX })
+    T(`Change since the previous assessment: not compared. ${cmp.reason || ''}`.trim(), { bold: true, color: AMBER_HEX })
     T(`Documents: ${docs.join('; ')}.`, { size: 9, color: MUTED_HEX })
   } else {
     const reopened = t.reopened != null ? `${t.reopened} reopened (reported again after being recorded as resolved)`
       : `reopened not recorded for ${t.filesReopenedUndetermined} document(s)${t.reopenedDetermined ? ` (${t.reopenedDetermined} reopened where it is recorded)` : ''}`
-    T(`Across the documents compared: ${orNR(t.introduced)} newly reported finding(s), ${orNR(t.resolved)} no longer reported, ${orNR(t.persisting)} still present; ${reopened}.${t.notComparable ? ` ${t.notComparable} current finding(s) have no detector location, so they cannot be matched one by one and are counted as neither new nor resolved.` : ''} "No longer reported" means absent from the newer assessment — it is not a verified fix.`)
+    T(`Across the documents compared: ${orNR(t.introduced)} newly reported finding(s), ${orNR(t.resolved)} no longer reported, ${orNR(t.persisting)} still present; ${reopened}.${t.notComparable ? ` ${t.notComparable} current finding(s) have no detector location, so they cannot be matched one by one and are counted as neither new nor resolved.` : ''} "No longer reported" means absent from the newer assessment — it is not a verified fix.`, { bold: true })
     T(`Documents: ${docs.join('; ')}.`, { size: 9, color: MUTED_HEX })
   }
   ;(cmp.notes || []).forEach((note) => T(note, { size: 9, color: MUTED_HEX }))
@@ -638,7 +651,7 @@ function estateComparisonBlocks(cmp, { factsFiles, mode, atLeast, T, blocks }) {
     k: 'table',
     headers: ['Document', 'Since previous assessment', 'Previous assessment'],
     caption: 'Documents that changed, or could not be compared',
-    rows: shown.map((f) => [f.file, rowComparisonText(f.comparison),
+    rows: shown.map((f) => [docCell(f.file, scanId), rowComparisonText(f.comparison),
       f.comparison?.baseline ? `${orNR(f.comparison.baseline.scanId)} · ${orNR(f.comparison.baseline.generatedAt)}` : NR]),
   })
   if (shown.length < moved.length) T(`Showing ${shown.length} of ${moved.length} documents that changed or could not be compared; every one is in the Full evidence report.`, { bold: true })

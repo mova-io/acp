@@ -207,7 +207,7 @@ describe('C4 — the scan report renders the REAL estate comparison', () => {
   it('lists the documents that changed or could not be compared, with their own status', () => {
     const m = scanModel('reviewer')
     const table = m.blocks.find((b) => b.caption === 'Documents that changed, or could not be compared')
-    const byFile = Object.fromEntries(table.rows.map((r) => [r[0], r[1]]))
+    const byFile = Object.fromEntries(table.rows.map((r) => [r[0]?.text ?? r[0], r[1]]))
     expect(byFile['policies/analyser-failed.docx']).toMatch(/^Earlier assessment not usable/)
     expect(byFile['policies/renamed.docx']).toMatch(/renamed \(was policies\/was-called-this\.docx\)/)
     expect(byFile['policies/language-not-set.docx']).toBeUndefined()   // nothing moved there
@@ -220,8 +220,15 @@ describe('S2 — the master index comes from the server index', () => {
     const t = m.blocks.find((b) => b.id === 'appendix-documents')
     expect(t.source).toBe('server-index')
     expect(t.complete).toBe(true)
-    expect(t.rows.map((r) => r[0]).sort()).toEqual(allRows.map((r) => r.file).sort())
-    const lang = t.rows.find((r) => r[0] === 'policies/language-not-set.docx')
+    const name = (cell) => cell?.text ?? cell
+    expect(t.rows.map((r) => name(r[0])).sort()).toEqual(allRows.map((r) => r.file).sort())
+    // Every document name opens THAT document's evidence view in ACP — the scan id and the exact
+    // file, and no finding id (the scan report cannot name one it did not read).
+    for (const [cell] of t.rows) {
+      const q = new URLSearchParams(cell.href.slice(1))
+      expect(Object.fromEntries(q)).toEqual({ view: 'evidence', scan: real.scanPages[0].identity.scanId, file: cell.text })
+    }
+    const lang = t.rows.find((r) => name(r[0]) === 'policies/language-not-set.docx')
     expect(lang[7]).toMatch(/0 new, 0 no longer reported, 1 still present, 1 not matchable/)
   })
   it('a partial index says so where the reader decides, and in the table', () => {
@@ -239,5 +246,27 @@ describe('S2 — the master index comes from the server index', () => {
   it('without the caller’s verdict, a short index is still never called complete', () => {
     expect(factsIndexState({ ...real.scanPages[0] }).partial).toBe(true)
     expect(factsIndexState(scanFacts).partial).toBe(false)
+  })
+})
+
+describe('the scan report links documents and keeps its comparison headline on the one-page Summary', () => {
+  it('the comparison headline is bold, the only text the Summary keeps under page pressure', () => {
+    // report_render.summary_blocks drops plain text at trim >= 2 and keeps bold. The PDF QA found
+    // the scan Summary printing no "since the previous assessment" line at all because of it.
+    const m = scanModel('summary')
+    const head = m.blocks.find((b) => b.k === 'text' && /^(Across the documents compared|Change since the previous assessment)/.test(b.text))
+    expect(head).toBeTruthy()
+    expect(head.o.bold).toBe(true)
+  })
+  it('a downloaded HTML master index links each document through a trusted origin, and prints text without one', () => {
+    const m = scanModel('full')
+    const html = reportHtmlFromModel(m, { origin: 'https://acp.example.com' })
+    const sid = real.scanPages[0].identity.scanId
+    const href = `https://acp.example.com/?${new URLSearchParams({ view: 'evidence', scan: sid, file: 'policies/language-not-set.docx' })}`
+    expect(html).toContain(`<a href="${href.replace(/&/g, '&amp;')}">policies/language-not-set.docx</a>`)
+    const plain = reportHtmlFromModel(m, { origin: null })
+    expect(plain).not.toContain('view=evidence')
+    expect(plain).not.toContain('[object Object]')
+    expect(plain).toContain('policies/language-not-set.docx')
   })
 })
