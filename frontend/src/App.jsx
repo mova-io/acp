@@ -47,7 +47,7 @@ const AdminLiveTraffic = lazy(() => import('./AdminLiveTraffic.jsx'))
 const LiveOperationsNotifier = lazy(() => import('./LiveOperationsNotifier.jsx'))
 import SignIn from './SignIn.jsx'
 import FindingEvidenceViewer from './FindingEvidenceViewer.jsx'
-import { captureEvidenceTarget, forgetEvidenceTarget, withoutEvidenceParams } from './evidenceLink.js'
+import { captureEvidenceTarget, forgetEvidenceTarget, parseEvidenceHref, withoutEvidenceParams } from './evidenceLink.js'
 import Settings from './Settings.jsx'
 import MyDataDialog from './MyDataDialog.jsx'
 import Monitor from './Monitor.jsx'
@@ -316,6 +316,19 @@ export default function App() {
     try { window.history.replaceState(window.history.state, '', withoutEvidenceParams(window.location.href)) } catch { /* address bar only */ }
     setEvidenceTarget(null)
   }
+  // From one evidence view to another (a document's list → one of its records, and back): the URL
+  // moves with the view, so the address bar always names what is on screen and Back returns to it.
+  const openEvidence = (href) => {
+    const next = parseEvidenceHref(href)
+    if (!next) return
+    try { window.history.pushState(window.history.state, '', href) } catch { /* address bar only */ }
+    setEvidenceTarget(next)
+  }
+  useEffect(() => {
+    const onPop = () => setEvidenceTarget(parseEvidenceHref(window.location.search || ''))
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
   const [userTimezone, setUserTimezone] = useState('America/Chicago')
   // Why the user is looking at the sign-in screen. null on a first visit; set when a 401
   // bounced them out mid-session, so SignIn can say so rather than appear for no reason.
@@ -1226,7 +1239,7 @@ export default function App() {
   if (!me) return <SignIn onSignedIn={signIn} notice={signedOutReason} />   // SignIn's own BuildStamp shows the full CalVer
   // After sign-in, never before: the viewer's facts request is owner-scoped, and there are no
   // hooks below this line, so this early return cannot change the hook count.
-  if (evidenceTarget) return <FindingEvidenceViewer target={evidenceTarget} onClose={closeEvidence} />
+  if (evidenceTarget) return <FindingEvidenceViewer target={evidenceTarget} onClose={closeEvidence} onOpen={openEvidence} />
 
   const switchScan = async (id) => {
     if (id === scan?.run?.id) return

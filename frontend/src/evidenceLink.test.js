@@ -7,7 +7,7 @@
  * is a link to a different document.
  */
 import { describe, it, expect } from 'vitest'
-import { evidenceHref, parseEvidenceHref, absoluteAppHref, attachEvidenceLinks, trustedAppOrigin } from './evidenceLink.js'
+import { evidenceHref, parseEvidenceHref, absoluteAppHref, attachEvidenceLinks, trustedAppOrigin, fileEvidenceHref, isFileTarget, targetHref, captureEvidenceTarget } from './evidenceLink.js'
 import { isSafeHref } from './reportEvidence.js'
 
 const SHA = 'ab'.repeat(32)
@@ -77,6 +77,53 @@ describe('evidenceHref / parseEvidenceHref round trip', () => {
       '?view=evidence&scan=s&file=d&finding=f&finding=g',           // which finding?
       '?view=evidence&scan=s&file=d%0Ax&finding=f',                 // control character in a name
     ]) expect(parseEvidenceHref(bad)).toBeNull()
+  })
+})
+
+describe('fileEvidenceHref — a link to one whole document (R-C2)', () => {
+  it.each(HARD_NAMES)('round-trips %s as a document-level target', (file) => {
+    const href = fileEvidenceHref({ scanId: 'scan/1 #x', file, sha256: SHA, version: 'corrected' })
+    expect(href.startsWith('/?view=evidence&scan=')).toBe(true)
+    expect(href).not.toMatch(/[\s#<>"']|finding=|change=/)
+    expect(isSafeHref(href)).toBe(true)
+    const t = parseEvidenceHref(href)
+    expect(t).toEqual({ scanId: 'scan/1 #x', file, findingId: null, changeId: null, sha256: SHA, version: 'corrected' })
+    expect(isFileTarget(t)).toBe(true)
+    expect(targetHref(t)).toBe(href)
+  })
+
+  it('is null without a scan or a file, and never stands in for a record link', () => {
+    expect(fileEvidenceHref({ file: 'd.pdf' })).toBeNull()
+    expect(fileEvidenceHref({ scanId: 's' })).toBeNull()
+    expect(fileEvidenceHref({ scanId: 's', file: '' })).toBeNull()
+    expect(fileEvidenceHref()).toBeNull()
+    // evidenceHref without a record id is still null — a record link is never degraded to this
+    expect(evidenceHref({ scanId: 's', file: 'd.pdf' })).toBeNull()
+    expect(isFileTarget(parseEvidenceHref(evidenceHref({ scanId: 's', file: 'd.pdf', findingId: 'f' })))).toBe(false)
+  })
+
+  it('a record id that is present but unusable is refused, not read as "the whole document"', () => {
+    for (const bad of ['?view=evidence&scan=s&file=d&finding=', '?view=evidence&scan=s&file=d&change=',
+      '?view=evidence&scan=s&file=d&finding=a%0Ab', '?view=evidence&scan=s&file=d&change=a%0Ab']) {
+      expect(parseEvidenceHref(bad)).toBeNull()
+    }
+  })
+
+  it('survives sign-in like a record link does', () => {
+    const store = new Map()
+    const storage = { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, v), removeItem: (k) => store.delete(k) }
+    const href = fileEvidenceHref({ scanId: 's', file: 'a/b #c.docx' })
+    expect(captureEvidenceTarget({ search: href.slice(1), storage, now: 1000 }).target).toMatchObject({ file: 'a/b #c.docx', findingId: null, changeId: null })
+    const back = captureEvidenceTarget({ search: '', storage, now: 2000 })
+    expect(back.restoredHref).toBe(href)
+    expect(isFileTarget(back.target)).toBe(true)
+  })
+
+  it('lights up the packet index "Open in ACP" column with the REAL module (rf-C appLinkFor)', async () => {
+    const { appLinkFor } = await import('./reportPacketLive.js')
+    const out = appLinkFor('s-packets', 'Board/a #1.pdf', { origin: 'https://acp.example.com' })
+    expect(out).toEqual({ href: 'https://acp.example.com/?view=evidence&scan=s-packets&file=Board%2Fa+%231.pdf', note: null })
+    expect(parseEvidenceHref(new URL(out.href).search)).toMatchObject({ scanId: 's-packets', file: 'Board/a #1.pdf', findingId: null, changeId: null })
   })
 })
 

@@ -191,7 +191,7 @@ describe('per-file packets over the recorded real-store responses', () => {
   it('the "Open in ACP" column links only when a document-level evidence route exists', () => {
     const none = appLinkFor(SID, 'a.pdf', { origin: 'https://acp.example.com', links: { ...evidenceLink, fileEvidenceHref: undefined } })
     expect(none.href).toBeNull()
-    expect(none.note).toMatch(/no direct document link/)
+    expect(none.note).toMatch(/no document link could be built/)
     const withRoute = appLinkFor(SID, 'Board/a #1.pdf', {
       origin: 'https://acp.example.com',
       links: { ...evidenceLink, fileEvidenceHref: ({ scanId, file }) => `/?${new URLSearchParams({ view: 'evidence', scan: scanId, file })}` },

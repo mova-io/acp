@@ -31,7 +31,7 @@ const scOfWcag = (v) => ((v || '').replace(/^SC_/, '').replace(/_/g, '.').match(
 export function appLinkFor(scanId, file, { origin = typeof window !== 'undefined' ? window.location?.origin : null, links = evidenceLink } = {}) {
   const trusted = typeof links.trustedAppOrigin === 'function' ? links.trustedAppOrigin(origin) : null
   if (!trusted) return { href: null, note: 'not linked: this export was made without a trusted ACP web address' }
-  if (typeof links.fileEvidenceHref !== 'function') return { href: null, note: `open scan ${scanId} in ACP and select this document (ACP has no direct document link yet)` }
+  if (typeof links.fileEvidenceHref !== 'function') return { href: null, note: `open scan ${scanId} in ACP and select this document (no document link could be built)` }
   const rel = links.fileEvidenceHref({ scanId, file })
   const href = rel ? links.absoluteAppHref(rel, { origin }) : null
   return href ? { href, note: null } : { href: null, note: 'not linked: no document link could be built for this name' }
