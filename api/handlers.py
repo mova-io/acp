@@ -901,10 +901,21 @@ def _propose_media_captions(scan_id: str, filename: str, drive_file_id: str,
 REMEDIATION_SOURCES = ("drive", "local", "sharepoint")
 
 
+import contextvars as _contextvars
+
+# The exact artifact the running publish_file job was admitted for (its payload digest). A
+# failure is recorded AGAINST that version: when it lands on a still-delivered receipt, the
+# store logs it as 'release.publish_attempt_failed' and release_publication attaches it only to
+# that version. `record` is the file's CURRENT record, which may already be a newer copy, so it
+# cannot answer "which bytes was this attempt for".
+_ATTEMPTED_ARTIFACT = _contextvars.ContextVar("release_attempted_artifact", default=None)
+
+
 def _release_failure(release_id: str, owner: str, filename: str, record: dict,
                      category: str, explanation: str) -> None:
     """Persist one safe Release failure; provider exception text never crosses the API."""
     core.store.record_release_document(release_id, owner, {
+        "attempted_artifact_digest": _ATTEMPTED_ARTIFACT.get(),
         "file": filename,
         "source_document_id": record.get("drive_file_id") or filename,
         "original_relative_path": (record.get("source_relative_path")
@@ -938,6 +949,14 @@ def _publish_file(payload: dict, job: dict) -> None:
 
 
 def _publish_file_guarded(payload: dict, job: dict) -> None:
+    token = _ATTEMPTED_ARTIFACT.set(payload.get("artifact_digest"))
+    try:
+        return _publish_file_attempt(payload, job)
+    finally:
+        _ATTEMPTED_ARTIFACT.reset(token)
+
+
+def _publish_file_attempt(payload: dict, job: dict) -> None:
     """Durably publish one approved corrected copy to its source provider.
 
     Tokens are resolved from the short-lived Redis token store at execution time and are never

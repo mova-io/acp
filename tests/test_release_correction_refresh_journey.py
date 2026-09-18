@@ -315,12 +315,12 @@ def test_correction_after_publication_is_out_of_date_until_one_action_republishe
     assert missing_confirmation.value.status_code == 409
     assert http_code(missing_confirmation) == 'remaining_issues_confirmation_required'
     with pytest.raises(HTTPException) as stale_digest:
-        republish({'expected_artifacts': {FILE: sha(V1)}, 'allow_remaining_issues': True})
+        republish({'expected_artifacts': {FILE: sha(V1)}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
     assert stale_digest.value.status_code == 409
     assert http_code(stale_digest) == 'artifact_changed'
     assert len(jobs(store, 'publish_file')) == before, 'a refused republish must not queue work'
 
-    accepted = republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True})
+    accepted = republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
     queued = [row for row in jobs(store, 'publish_file') if row['status'] == 'queued']
     assert [row['payload'].get('artifact_digest') for row in queued] == [tag(V2)], (accepted, queued)
     audit = [row for row in store.list_decisions(SID) if row['action'] == 'release.republish_authorized']
@@ -337,7 +337,7 @@ def test_correction_after_publication_is_out_of_date_until_one_action_republishe
     # authorization. (A DIFFERENT digest while this one publishes is the 409 — see the race test.)
     assert (get_release().get('publication') or {}).get('state') == 'publishing'
     in_flight = len(jobs(store, 'publish_file'))
-    republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True})
+    republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
     assert len(jobs(store, 'publish_file')) == in_flight, 'same-digest resubmission must not queue again'
     assert len([row for row in store.list_decisions(SID)
                 if row['action'] == 'release.republish_authorized']) == 1
@@ -371,7 +371,7 @@ def test_correction_after_publication_is_out_of_date_until_one_action_republishe
 
     # (e) Repeating the same republish is idempotent: already current, no new work.
     before = len(jobs(store, 'publish_file'))
-    again = republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True})
+    again = republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
     assert again.get('already_current') is True, again
     assert len(jobs(store, 'publish_file')) == before
     assert j.graph.delivered() == [V1, V2]
@@ -390,13 +390,13 @@ def test_correction_during_republish_is_not_published_and_not_claimed_current(jo
     store = j.store
     publish_v1(j)
     j.save_version(V2)
-    republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True})
+    republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
     j.save_version(V3)
     # V3 is the saved copy now, but V2's job is still queued: a request for a DIFFERENT digest
     # while one is publishing is refused (never two concurrent publications of one document).
     queued = len(jobs(store, 'publish_file'))
     with pytest.raises(HTTPException) as busy:
-        republish({'expected_artifacts': {FILE: sha(V3)}, 'allow_remaining_issues': True})
+        republish({'expected_artifacts': {FILE: sha(V3)}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
     assert busy.value.status_code == 409 and http_code(busy) == 'republish_blocked'
     assert len(jobs(store, 'publish_file')) == queued
 
@@ -418,7 +418,7 @@ def test_correction_during_republish_is_not_published_and_not_claimed_current(jo
     assert (reports.get('out_of_date_files') or [{}])[0].get('current_artifact_digest') == tag(V3), reports
     # The stale V2 authorization cannot be replayed against V3.
     with pytest.raises(HTTPException) as stale:
-        republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True})
+        republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
     assert http_code(stale) == 'artifact_changed'
 
 
@@ -463,7 +463,7 @@ def test_another_owner_cannot_read_or_republish(journey):
     j.save_version(V2)
     before = len(jobs(j.store, 'publish_file'))
     for call in (lambda: get_release(OTHER), lambda: get_reports(OTHER),
-                 lambda: republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True}, OTHER)):
+                 lambda: republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]}, OTHER)):
         with pytest.raises(HTTPException) as refused:
             call()
         assert refused.value.status_code == 404
@@ -500,7 +500,7 @@ def test_legacy_receipt_without_digest_is_identity_unknown_never_current(journey
     assert reports.get('currency') not in (None, 'current'), reports
     before = len(jobs(store, 'publish_file'))
     with pytest.raises(HTTPException) as refused:
-        republish({'expected_artifacts': {FILE: sha(V1)}, 'allow_remaining_issues': True})
+        republish({'expected_artifacts': {FILE: sha(V1)}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
     assert refused.value.status_code == 409 and http_code(refused) == 'republish_blocked'
     assert len(jobs(store, 'publish_file')) == before
     assert not [r for r in store.list_decisions(SID) if r['action'] == 'release.republish_authorized']
@@ -526,7 +526,7 @@ def test_republish_is_blocked_while_approved_values_are_unapplied(journey):
     assert publication.get('republish_blocked_reason'), publication
     before = len(jobs(store, 'publish_file'))
     with pytest.raises(HTTPException) as blocked:
-        republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True})
+        republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
     assert blocked.value.status_code == 409 and http_code(blocked) == 'republish_blocked'
     assert len(jobs(store, 'publish_file')) == before
     assert j.graph.delivered() == [V1]
@@ -572,7 +572,7 @@ def test_republish_refused_before_any_work_leaves_no_authorization_in_the_audit_
     publish_v1(j)
     j.save_version(V2)
     with pytest.raises(HTTPException) as refused:
-        republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True}, headers={})
+        republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]}, headers={})
     assert refused.value.status_code == 403
     assert [row for row in jobs(store, 'publish_file') if row['status'] == 'queued'] == []
     audit = [row['action'] for row in store.list_decisions(SID)
@@ -614,7 +614,7 @@ def test_failed_republish_settles_as_out_of_date_with_the_failure_readable(journ
     store = j.store
     publish_v1(j)
     j.save_version(V2)
-    republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True})
+    republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
 
     def refuse(token, **kwargs):
         raise IOError('Graph 500 while writing the corrected copy')
@@ -641,3 +641,257 @@ def test_failed_republish_settles_as_out_of_date_with_the_failure_readable(journ
     attempts = [r for r in store.list_decisions(SID) if r['action'] == 'release.publish_attempt_failed']
     assert len(attempts) == 1 and attempts[0]['file'] == FILE
     assert get_reports().get('currency') == 'out_of_date'
+
+
+# ── re-review of 2816a356 / 330fc96c (Agent C, p5) ───────────────────────────────────────────
+
+def release_row(store):
+    with store._db.cursor() as cur:
+        store._db.execute(cur, 'SELECT d.* FROM release_documents d JOIN release_executions e ON e.id=d.release_id '
+                               'WHERE e.scan_id=%s AND e.owner_email=%s AND d.file=%s', (SID, OWNER, FILE))
+        return dict(store._db.fetchone(cur))
+
+
+def test_failed_republish_restores_every_fingerprinted_column_after_the_queued_write(journey, monkeypatch):
+    """GUARD: V1 row → republish writes 'queued' over it → the attempt fails → the restore. Every
+    release_documents column (all are hashed by the report fingerprint) must equal the V1 row, so
+    the V1 bundle's identity is intact again once nothing was delivered."""
+    import release_report_delivery as delivery
+    import scanner
+    j = journey
+    store = j.store
+    v1_bundle = publish_v1(j)['bundle_id']
+    before = release_row(store)
+    j.save_version(V2)
+    republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
+    assert release_row(store)['status'] == 'queued'
+    monkeypatch.setattr(scanner, '_sp_write', lambda token, **kw: (_ for _ in ()).throw(IOError('Graph 500')))
+    with store._db.cursor() as cur:
+        store._db.execute(cur, "UPDATE jobs SET max_attempts=1 WHERE type='publish_file' AND status='queued'")
+    assert run_job(store, 'publish_file')['status'] == 'dead'
+    assert release_row(store) == before
+    release = store.release_for_scan(SID, OWNER)
+    assert delivery._fingerprint(release['id'], release)[:24] == v1_bundle
+
+
+def test_legacy_attempted_digest_row_is_never_restored_as_a_delivered_copy(journey):
+    """A row written by the code on main today: V1 was published, then publishing V2 was refused
+    by the release assessment, and handlers._release_failure stamped the ATTEMPTED digest (V2) over
+    the row — status 'failed', artifact_digest V2, published_at still V1's. release_publication
+    rightly reads that as identity_unknown (held_copy ignores attempted digests on unsettled rows).
+
+    But store.record_release_document's restore only asks "published_at + an exact sha256 tag?",
+    so the NEXT refused attempt of any kind restores that row as status 'published' with the
+    never-delivered V2 digest. The projection then says V2 is published and CURRENT, and the
+    handler's no-op would skip a real V2 delivery as 'already delivered'."""
+    from routes import scans
+    j = journey
+    store = j.store
+    publish_v1(j)
+    j.save_version(V2)
+    release = store.release_for_scan(SID, OWNER)
+    with store._db.cursor() as cur:   # exactly what main's _release_failure leaves behind
+        store._db.execute(cur, "UPDATE release_documents SET status='failed', failure_category='release_assessment_remaining', "
+                               "explanation='The corrected copy still has findings.', artifact_digest=%s "
+                               "WHERE release_id=%s AND file=%s", (tag(V2), release['id'], FILE))
+    assert document(get_release()).get('publication_state') == 'identity_unknown'
+
+    refused = scans.publish_files(SID, request(), {'files': [FILE]})   # no confirmation → not_approved
+    assert [row['status'] for row in refused['published']] == ['failed']
+    doc = document(get_release())
+    assert j.graph.delivered() == [V1], 'V2 was never delivered'
+    assert doc.get('publication_state') != 'current', (
+        'a never-delivered attempted digest was restored as the delivered, current copy', doc['status'], doc['artifact_digest'])
+    assert not (doc['status'] == 'published' and doc['artifact_digest'] == tag(V2)), doc
+
+
+def test_failure_of_an_earlier_version_is_not_attributed_to_the_current_copy(journey):
+    """The V2 republish is queued, V3 is saved, and the V2 job is refused ('The corrected artifact
+    changed after this release was requested.'). last_attempt_failures keeps any failure logged at
+    or after the current copy's save time, and this refusal was logged AFTER V3 was saved — so it
+    is attached to the V3 out_of_date entry. Its attempted_artifact_digest is empty for this
+    category, and ReleaseCorrectionNotice then renders 'The last attempt to publish version
+    <V3> did not complete' — V3 was never attempted. The failure must either name V2 or not be
+    attached to V3."""
+    j = journey
+    store = j.store
+    publish_v1(j)
+    j.save_version(V2)
+    republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
+    j.save_version(V3)
+    assert run_job(store, 'publish_file')['status'] == 'dead'
+    entry = get_release()['publication']['out_of_date'][0]
+    assert entry['current_artifact_digest'] == tag(V3)
+    # Contract v3: a failure attaches only when its attempted digest IS the current digest.
+    assert entry.get('last_attempt_failure') is None, (
+        'a failure of the V2 attempt is presented as an attempt to publish V3', entry.get('last_attempt_failure'))
+    attempts = [json.loads(r['detail']) for r in store.list_decisions(SID) if r['action'] == 'release.publish_attempt_failed']
+    assert [a.get('attempted_artifact_digest') for a in attempts] == [tag(V2)], (
+        'the refusal must record the job payload digest it attempted', attempts)
+
+
+ANNEX = 'annex.pdf'
+ANNEX_V1, ANNEX_V2, ANNEX_V3 = b'annex V1', b'annex V2', b'annex V3'
+
+
+def add_annex(j, monkeypatch, *, compliant):
+    """A second document in the same scan, with its own saved bytes, published beside FILE as V1."""
+    import blob
+    import publish
+    from routes import scans
+    store = j.store
+    annex = {'bytes': ANNEX_V1}
+    store.save_file_result(SID, {
+        'file': ANNEX, 'engine': 'pdf', 'status': 'analysed', 'score': 100 if compliant else 60,
+        'compliant': 1 if compliant else 0, 'skipped_rules': 0, 'errors': [],
+        'issues': [] if compliant else [{'ruleId': 'PDF-ALT-001', 'wcag': '1.1.1', 'severity': 'CRITICAL'}],
+    }, '2026-09-18T00:00:00Z')
+    reader = lambda owner, sid, name: annex['bytes'] if name == ANNEX else j.state['bytes']
+    monkeypatch.setattr(blob, 'download_remediated', reader)
+    monkeypatch.setattr(publish._blob, 'download_remediated', reader)
+
+    def save_annex(data):
+        annex['bytes'] = data
+        return store.record_remediation(SID, ANNEX, blob_url='blob://annex', corrected_sha256=sha(data))
+    save_annex(ANNEX_V1)
+    response = scans.publish_files(SID, request(), {
+        'files': [FILE, ANNEX], 'allow_remaining_issues': True,
+        'expected_artifacts': {FILE: sha(V1), ANNEX: sha(ANNEX_V1)}})
+    assert response['queued'] == 2, response
+    assert run_job(store, 'publish_file')['status'] == 'done'
+    assert run_job(store, 'publish_file')['status'] == 'done'
+    assert {d['file']: d['publication_state'] for d in get_release()['documents']} == {FILE: 'current', ANNEX: 'current'}
+    return save_annex
+
+
+def queued_payloads(store):
+    return [row['payload'] for row in jobs(store, 'publish_file') if row['status'] == 'queued']
+
+
+def decisions(store, action, file):
+    return [r for r in store.list_decisions(SID) if r['action'] == action and r['file'] == file]
+
+
+def test_republish_is_refused_while_another_document_of_the_release_is_publishing(journey, monkeypatch):
+    """Two documents. A's republish is queued (the release stage is active). B then goes out of
+    date and is republished on its own — the UI already blocks this (can_republish is false while
+    anything publishes); the API must too, UP FRONT. Before contract v3 the request reached
+    publish_files, which wrote B's row 'queued' and logged release.remaining_issues_authorized for B,
+    and only then hit the release stage's single-flight fence (409 stage_execution_active): nothing
+    admitted, a queued receipt with no job, and an authorization in the immutable log."""
+    j = journey
+    store = j.store
+    save_annex = add_annex(j, monkeypatch, compliant=False)
+    j.save_version(V2)
+    republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
+    save_annex(ANNEX_V2)
+    annex_log_before = [r for r in store.list_decisions(SID) if r['file'] == ANNEX]
+    queued_before = queued_payloads(store)
+    with pytest.raises(HTTPException) as blocked:
+        republish({'expected_artifacts': {ANNEX: sha(ANNEX_V2)}, 'allow_remaining_issues': True,
+                   'remaining_issue_files': [ANNEX]})
+    assert blocked.value.status_code == 409 and http_code(blocked) == 'republish_blocked', blocked.value.detail
+    doc = next(d for d in get_release()['documents'] if d['file'] == ANNEX)
+    leaked = [r['action'] for r in store.list_decisions(SID) if r['file'] == ANNEX and r not in annex_log_before]
+    assert (doc['status'], leaked) == ('published', []), (
+        'a refused request left a queued receipt with no job and/or an authorization in the audit log',
+        doc['status'], leaked)
+    assert queued_payloads(store) == queued_before
+
+
+# ── parent reproductions, inverted into regressions (contract v3) ────────────────────────────
+
+def test_artifact_changing_after_validation_is_a_refusal_not_a_successful_republish(journey, monkeypatch):
+    """Parent repro /tmp/test_acp_parent_republish_race.py. V3 is saved after the route's up-front
+    digest check but before publish_files' provider loop (hooked at ensure_release_execution, which
+    runs between them). publish_files then refuses the file per document ('artifact_changed') and
+    queues nothing — and the route used to answer 200 result='republished' with an empty
+    republished list, which the UI read as "publishing started" and polled for. Zero admitted work
+    must be a 409 naming the file, with no job and no republish authorization."""
+    j = journey
+    store = j.store
+    publish_v1(j)
+    j.save_version(V2)
+    real = store.ensure_release_execution
+
+    def correction_lands(*args, **kwargs):
+        result = real(*args, **kwargs)
+        if j.state['bytes'] == V2:
+            j.save_version(V3)
+        return result
+    monkeypatch.setattr(store, 'ensure_release_execution', correction_lands)
+    queued_before = queued_payloads(store)
+    with pytest.raises(HTTPException) as refused:
+        republish({'expected_artifacts': {FILE: sha(V2)}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
+    assert refused.value.status_code == 409 and http_code(refused) == 'artifact_changed', refused.value.detail
+    detail = refused.value.detail
+    assert [r.get('file') for r in detail.get('results') or []] == [FILE], detail
+    assert detail['results'][0].get('failure_category') == 'artifact_changed', detail
+    assert queued_payloads(store) == queued_before, 'no publish_file job for a refused request'
+    assert decisions(store, 'release.republish_authorized', FILE) == []
+    assert j.graph.delivered() == [V1]
+    publication = get_release()['publication']
+    assert publication['state'] == 'out_of_date', publication
+    assert publication['out_of_date'][0]['current_artifact_digest'] == tag(V3)
+
+
+def test_partially_admitted_republish_names_what_was_refused(journey, monkeypatch):
+    """Two out-of-date documents; only the annex changes again mid-request. The unchanged document
+    is admitted and queued; the changed one is refused per document. The answer is a 200 that says
+    exactly that — republished=[admitted], refused=[{file, failure_category, …}] — with one job
+    and a republish authorization only for the admitted document."""
+    j = journey
+    store = j.store
+    save_annex = add_annex(j, monkeypatch, compliant=False)
+    j.save_version(V2)
+    save_annex(ANNEX_V2)
+    real = store.ensure_release_execution
+
+    def annex_moves(*args, **kwargs):
+        result = real(*args, **kwargs)
+        save_annex(ANNEX_V3)
+        return result
+    monkeypatch.setattr(store, 'ensure_release_execution', annex_moves)
+    queued_before = queued_payloads(store)
+    result = republish({'expected_artifacts': {FILE: sha(V2), ANNEX: sha(ANNEX_V2)},
+                        'allow_remaining_issues': True, 'remaining_issue_files': [FILE, ANNEX]})
+    assert result.get('republished') == [FILE], result
+    refused = result.get('refused') or []
+    assert [r.get('file') for r in refused] == [ANNEX], result
+    assert refused[0].get('failure_category') == 'artifact_changed', refused
+    new_jobs = [p for p in queued_payloads(store) if p not in queued_before]
+    assert [(p['file'], p['artifact_digest']) for p in new_jobs] == [(FILE, tag(V2))], new_jobs
+    assert len(decisions(store, 'release.republish_authorized', FILE)) == 1
+    assert decisions(store, 'release.republish_authorized', ANNEX) == []
+
+
+@pytest.mark.parametrize('remaining_issue_files', [[FILE], None], ids=['only-A-listed', 'list-omitted'])
+def test_confirmation_for_one_document_never_authorizes_another(journey, monkeypatch, remaining_issue_files):
+    """Parent repro /tmp/test_acp_parent_republish_consent.py. When the page loaded, only FILE (A)
+    needed the remaining-issues confirmation; the annex (B) was compliant, so the user ticked only
+    A. B is then rescored non-compliant at the SAME V2 digest before the POST. A request-wide
+    allow_remaining_issues=true used to authorize B too (its job carried allow_remaining_issues).
+    Listing only A — or omitting the list, which confirms NOTHING on this route — must be a 409
+    naming B, with no job and no remaining-issues authorization for B."""
+    j = journey
+    store = j.store
+    save_annex = add_annex(j, monkeypatch, compliant=True)
+    j.save_version(V2)
+    save_annex(ANNEX_V2)
+    viewed = {row['file']: row for row in get_release()['publication']['out_of_date']}
+    assert viewed[FILE]['requires_remaining_issue_confirmation'] is True
+    assert viewed[ANNEX]['requires_remaining_issue_confirmation'] is False
+    with store._db.cursor() as cur:   # rescored after the page loaded; the digest is unchanged
+        store._db.execute(cur, 'UPDATE file_records SET compliant=0 WHERE scan_id=%s AND file=%s', (SID, ANNEX))
+    annex_authorizations = decisions(store, 'release.remaining_issues_authorized', ANNEX)
+    queued_before = queued_payloads(store)
+    body = {'expected_artifacts': {FILE: sha(V2), ANNEX: sha(ANNEX_V2)}, 'allow_remaining_issues': True}
+    if remaining_issue_files is not None:
+        body['remaining_issue_files'] = remaining_issue_files
+    with pytest.raises(HTTPException) as refused:
+        republish(body)
+    assert refused.value.status_code == 409, refused.value.detail
+    assert http_code(refused) == 'remaining_issues_confirmation_required', refused.value.detail
+    assert ANNEX in (refused.value.detail.get('files') or []), refused.value.detail
+    assert queued_payloads(store) == queued_before
+    assert decisions(store, 'release.remaining_issues_authorized', ANNEX) == annex_authorizations

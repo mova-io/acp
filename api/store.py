@@ -10448,20 +10448,33 @@ class Store:
                 "UPDATE release_executions SET id=id WHERE id=%s AND owner_email=%s",
                 (release_id, owner))
             refused_attempt = None
-            if result.get("status") == "failed":
+            forget_undelivered_digest = False
+            if result.get("status") != "published":
                 self._db.execute(cur,
                     "SELECT d.*,e.scan_id AS release_scan_id FROM release_documents d JOIN release_executions e "
                     "ON e.id=d.release_id WHERE d.release_id=%s AND d.file=%s AND e.owner_email=%s",
                     (release_id, result["file"], owner))
                 held = self._db.fetchone(cur)
-                if (held and held.get("published_at")
-                        and re.fullmatch(r"sha256:[0-9a-f]{64}", str(held.get("artifact_digest") or ""))):
+                # DELIVERED means what release_publication.held_copy calls held: an exact digest the
+                # provider actually received. Three failure categories stamp the ATTEMPTED digest
+                # instead, and such a row must never be restored as a delivered copy.
+                from release_publication import held_copy
+                evidence, delivered_hex = held_copy(held) if held else (False, None)
+                delivered = bool(evidence and delivered_hex and held.get("published_at"))
+                # Nor may an undelivered digest ride along (COALESCE) under a new status or category,
+                # where it would then read as delivered bytes.
+                forget_undelivered_digest = bool(held and not delivered and held.get("artifact_digest"))
+                if result.get("status") == "failed" and delivered:
+                    forget_undelivered_digest = False
                     refused_attempt = {
                         "scan_id": held["release_scan_id"], "file": result["file"],
                         "detail": {"release_id": release_id,
                                    "failure_category": result.get("failure_category"),
                                    "explanation": result.get("explanation"),
-                                   "attempted_artifact_digest": result.get("artifact_digest"),
+                                   # The bytes the refused attempt was FOR (a job's payload digest), so
+                                   # release_publication attributes it to that version and no other.
+                                   "attempted_artifact_digest": (result.get("attempted_artifact_digest")
+                                                                 or result.get("artifact_digest")),
                                    "published_artifact_digest": held["artifact_digest"]}}
                     # Restore the delivered row exactly (see the docstring): its own failure
                     # fields, created flag and every location/identity column as they stood.
@@ -10508,6 +10521,10 @@ class Store:
                  result.get("failure_category"), result.get("explanation"),
                  int(bool(result.get("created"))), result.get("published_at"), result.get("artifact_digest"),
                  release_id, owner))
+            if forget_undelivered_digest:
+                self._db.execute(cur,
+                    "UPDATE release_documents SET artifact_digest=%s WHERE release_id=%s AND file=%s",
+                    (result.get("artifact_digest"), release_id, result["file"]))
             self._db.execute(cur,
                 "SELECT e.status,e.documents_total,"
                 "SUM(CASE WHEN d.status='published' THEN 1 ELSE 0 END) AS published,"

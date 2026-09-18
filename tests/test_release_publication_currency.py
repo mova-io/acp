@@ -157,10 +157,13 @@ def test_durable_release_status_column_settles_with_every_receipt(world):
 
 
 @pytest.mark.parametrize('failure', [
-    dict(failure_category='provider_write_failed', explanation='The provider refused the write.'),
+    # handlers._release_failure records the job's payload digest as the attempted version.
+    dict(failure_category='provider_write_failed', explanation='The provider refused the write.',
+         attempted_artifact_digest=tag(V2)),
     # This category stamps the ATTEMPTED digest; it must not become the delivered identity.
     dict(failure_category='release_assessment_remaining', explanation='Remaining issues.', artifact_digest=tag(V2)),
-    dict(failure_category='release_evidence_changed', explanation='The corrected artifact changed.'),
+    dict(failure_category='release_evidence_changed', explanation='The corrected artifact changed.',
+         attempted_artifact_digest=tag(V2)),
 ])
 def test_a_failed_attempt_never_erases_the_delivered_receipt(world, failure):
     store, rid = world.store, world.release_id
@@ -362,7 +365,7 @@ def test_legacy_identity_cannot_be_republished(routes, world):
     assert status['documents'][0]['publication_state'] == 'identity_unknown'
     assert status['publication']['identity_unknown'] == [FILE]
     assert status['publication']['can_republish'] is False
-    error = conflict(routes, {'expected_artifacts': {FILE: V2}, 'allow_remaining_issues': True})
+    error = conflict(routes, {'expected_artifacts': {FILE: V2}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
     assert error.detail['code'] == 'republish_blocked' and 'Reconcile' in error.detail['message']
     assert jobs(store) == []
 
@@ -372,7 +375,7 @@ def test_republish_refusals(routes, world, monkeypatch):
     correct_to(store, V2)
     before = len(jobs(store))
     # Stale confirmation: the user confirmed a copy that is no longer the current one.
-    error = conflict(routes, {'expected_artifacts': {FILE: V1}, 'allow_remaining_issues': True})
+    error = conflict(routes, {'expected_artifacts': {FILE: V1}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
     assert error.status_code == 409 and error.detail['code'] == 'artifact_changed'
     # V2 still has remaining issues; the V1 authorization is never reused.
     error = conflict(routes, {'expected_artifacts': {FILE: V2}})
@@ -381,21 +384,22 @@ def test_republish_refusals(routes, world, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr(store, 'count_unapplied_approved_values', lambda sid, file: 2)
         assert routes.get_release_status(SID, request())['publication']['can_republish'] is False
-        error = conflict(routes, {'expected_artifacts': {FILE: V2}, 'allow_remaining_issues': True})
+        error = conflict(routes, {'expected_artifacts': {FILE: V2}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
     assert error.status_code == 409 and error.detail['code'] == 'republish_blocked'
     assert 'still being saved' in error.detail['message']
     # A corrected document that was never part of this release is not "out of date" here.
     with store._db.cursor() as cur:
         store._db.execute(cur, "INSERT INTO file_records(scan_id,file,engine,status,compliant,corrected_sha256,remediated_at) "
                           "VALUES(%s,'other.pdf','pdf','analysed',1,%s,'t')", (SID, V2))
-    error = conflict(routes, {'expected_artifacts': {'other.pdf': V2}, 'allow_remaining_issues': True})
+    error = conflict(routes, {'expected_artifacts': {'other.pdf': V2}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
     assert error.status_code == 409 and error.detail['code'] == 'republish_blocked'
     assert error.detail['files'] == ['other.pdf']
     with pytest.raises(HTTPException) as exc:
         republish(routes, {'expected_artifacts': {}})
     assert exc.value.status_code == 422
     with pytest.raises(HTTPException) as exc:
-        republish(routes, {'expected_artifacts': {FILE: V2}, 'allow_remaining_issues': True}, owner=FOREIGN)
+        republish(routes, {'expected_artifacts': {FILE: V2}, 'allow_remaining_issues': True,
+                           'remaining_issue_files': [FILE]}, owner=FOREIGN)
     assert exc.value.status_code == 404
     assert len(jobs(store)) == before
     assert decisions(store, 'release.republish_authorized') == []
@@ -404,7 +408,7 @@ def test_republish_refusals(routes, world, monkeypatch):
 def test_republish_authorizes_exact_digest_and_is_idempotent(routes, world):
     store, rid = world.store, world.release_id
     correct_to(store, V2)
-    result = republish(routes, {'expected_artifacts': {FILE: V2}, 'allow_remaining_issues': True})
+    result = republish(routes, {'expected_artifacts': {FILE: V2}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
     assert result['republished'] == [FILE] and result['already_current'] is False
     queued = [job for job in jobs(store) if job.get('release_id') == rid]
     assert [(job['file'], job['artifact_digest']) for job in queued] == [(FILE, tag(V2))]
@@ -420,12 +424,12 @@ def test_republish_authorizes_exact_digest_and_is_idempotent(routes, world):
     remaining = [json.loads(row['detail']) for row in decisions(store, 'release.remaining_issues_authorized')]
     assert [row['artifact_digest'] for row in remaining] == [tag(V2)]
     # A retry of the same click while it is still publishing starts nothing new.
-    again = republish(routes, {'expected_artifacts': {FILE: V2}, 'allow_remaining_issues': True})
+    again = republish(routes, {'expected_artifacts': {FILE: V2}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
     assert again['republished'] == [] and again['result'] == 'already_publishing'
     assert len([job for job in jobs(store) if job.get('release_id') == rid]) == 1
     # A DIFFERENT copy cannot be started while V2 is still being delivered.
     correct_to(store, '3' * 64)
-    error = conflict(routes, {'expected_artifacts': {FILE: '3' * 64}, 'allow_remaining_issues': True})
+    error = conflict(routes, {'expected_artifacts': {FILE: '3' * 64}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
     assert error.detail['code'] == 'republish_blocked'
     correct_to(store, V2)
     # The worker delivers V2.
@@ -434,7 +438,7 @@ def test_republish_authorizes_exact_digest_and_is_idempotent(routes, world):
     assert column_status(store, rid)['status'] == 'completed'
     status = routes.get_release_status(SID, request())
     assert status['publication']['state'] == 'current'
-    done = republish(routes, {'expected_artifacts': {FILE: V2}, 'allow_remaining_issues': True})
+    done = republish(routes, {'expected_artifacts': {FILE: V2}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
     assert done['already_current'] is True and done['result'] == 'already_current' and done['republished'] == []
     assert len([job for job in jobs(store) if job.get('release_id') == rid]) == 1
     assert len(decisions(store, 'release.republish_authorized')) == 1
@@ -454,7 +458,7 @@ def test_mixed_republish_authorizes_remaining_issues_only_where_needed(routes, w
     correct_to(store, V2)  # doc.pdf: compliant=0, so it needs the confirmation
     stale = routes.get_release_status(SID, request())['publication']['out_of_date']
     assert {row['file']: row['requires_remaining_issue_confirmation'] for row in stale} == {FILE: True, 'two.pdf': False}
-    result = republish(routes, {'expected_artifacts': {FILE: V2, 'two.pdf': w2}, 'allow_remaining_issues': True})
+    result = republish(routes, {'expected_artifacts': {FILE: V2, 'two.pdf': w2}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
     assert sorted(result['republished']) == [FILE, 'two.pdf']
     authorized = [(row['file'], json.loads(row['detail'])['artifact_digest'])
                   for row in decisions(store, 'release.remaining_issues_authorized')]
@@ -468,7 +472,7 @@ def test_mixed_republish_authorizes_remaining_issues_only_where_needed(routes, w
     assert 'allow_remaining_issues' not in queued['two.pdf'] and 'release_review' not in queued['two.pdf']
     assert queued[FILE]['artifact_digest'] == tag(V2) and queued['two.pdf']['artifact_digest'] == tag(w2)
     # The identical request dedupes onto the batch in flight: no second batch, no new decisions.
-    again = republish(routes, {'expected_artifacts': {FILE: V2, 'two.pdf': w2}, 'allow_remaining_issues': True})
+    again = republish(routes, {'expected_artifacts': {FILE: V2, 'two.pdf': w2}, 'allow_remaining_issues': True, 'remaining_issue_files': [FILE]})
     assert again['result'] == 'already_publishing'
     assert len([job for job in jobs(store) if job.get('release_id') == rid]) == 2
     assert len(decisions(store, 'release.remaining_issues_authorized')) == 1
@@ -528,16 +532,50 @@ def test_confirmation_list_never_authorizes_an_unticked_file(routes, world):
     assert sorted(ok['republished']) == [FILE, 'two.pdf']
 
 
-def test_a_refusal_older_than_the_current_copy_is_not_reported_as_its_failure(routes, world):
-    """last_attempt_failure describes an attempt to publish the CURRENT copy. A refusal recorded
-    before that copy was saved is about a different copy and must not be attached to it."""
+def test_a_failure_is_attributed_only_to_the_version_it_was_for(routes, world):
+    """last_attempt_failure describes an attempt to publish exactly the CURRENT copy. A refusal of
+    another version — even one logged after the current copy was saved (a V2 job refused once V3
+    exists) — must never be presented as the current version failing; nor may an attempt whose
+    version is unknown."""
     store, rid = world.store, world.release_id
+    v3 = '3' * 64
+    correct_to(store, v3)
+    store.record_release_document(rid, OWNER, dict(file=FILE, status='failed', failure_category='provider_write_failed',
+                                                    explanation='The provider refused the write.',
+                                                    attempted_artifact_digest=tag(V2)))
     store.record_release_document(rid, OWNER, dict(file=FILE, status='failed', failure_category='not_approved',
                                                     explanation='Only approved corrected copies can be released.'))
-    assert len(decisions(store, 'release.publish_attempt_failed')) == 1
-    correct_to(store, V2, at='2999-01-01T00:00:00+00:00')
+    assert len(decisions(store, 'release.publish_attempt_failed')) == 2
     [row] = routes.get_release_status(SID, request())['publication']['out_of_date']
-    assert row['last_attempt_failure'] is None
-    correct_to(store, V2, at='2000-01-01T00:00:00+00:00')
+    assert row['current_artifact_digest'] == tag(v3) and row['last_attempt_failure'] is None
+    store.record_release_document(rid, OWNER, dict(file=FILE, status='failed', failure_category='provider_write_failed',
+                                                    explanation='The provider refused the write.',
+                                                    attempted_artifact_digest=tag(v3)))
     [row] = routes.get_release_status(SID, request())['publication']['out_of_date']
-    assert row['last_attempt_failure']['failure_category'] == 'not_approved'
+    assert row['last_attempt_failure']['attempted_artifact_digest'] == tag(v3)
+
+
+def test_an_attempted_digest_is_never_restored_as_delivered(world):
+    """A refused assessment stamps the ATTEMPTED digest over a row that still holds V1 at the
+    provider (status failed, category release_assessment_remaining, V1's published_at). A later
+    refusal of any kind must not 'restore' that row as published V2, and the attempted digest must
+    not ride along under a new category where it would read as delivered bytes."""
+    import release_publication
+    store, rid = world.store, world.release_id
+    correct_to(store, V2)
+    # The row as main's _release_failure leaves it today (this branch restores instead, so the
+    # legacy state is written directly).
+    with store._db.cursor() as cur:
+        store._db.execute(cur, "UPDATE release_documents SET status='failed', failure_category='release_assessment_remaining', "
+                          "explanation='Remaining issues.', artifact_digest=%s WHERE release_id=%s AND file=%s",
+                          (tag(V2), rid, FILE))
+    row = store.get_release_document(rid, FILE, OWNER)
+    assert release_publication.document_state(row, {'corrected_sha256': V2})['publication_state'] == 'identity_unknown'
+    store.record_release_document(rid, OWNER, dict(file=FILE, status='failed', failure_category='not_approved',
+                                                    explanation='Only approved corrected copies can be released.'))
+    row = store.get_release_document(rid, FILE, OWNER)
+    assert row['status'] == 'failed' and row['artifact_digest'] is None
+    state = release_publication.document_state(row, {'corrected_sha256': V2})
+    assert state['publication_state'] == 'identity_unknown'
+    store.record_release_document(rid, OWNER, dict(file=FILE, status='queued'))
+    assert store.get_release_document(rid, FILE, OWNER)['artifact_digest'] is None

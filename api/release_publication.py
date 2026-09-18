@@ -115,7 +115,7 @@ def project(store, scan_id: str, owner: str, release: dict | None) -> dict:
             unknown.append(document["file"])
     if out_of_date:
         failures = last_attempt_failures(store, scan_id, (release or {}).get("id"),
-                                         {row["file"]: row["current_remediated_at"] for row in out_of_date})
+                                         {row["file"]: row["current_artifact_digest"] for row in out_of_date})
         for row in out_of_date:
             row["last_attempt_failure"] = failures.get(row["file"])
     states = [row["publication_state"] for row in projected]
@@ -152,27 +152,21 @@ def active_publish_digests(store, scan_id: str, owner: str, release_id: str) -> 
     return active
 
 
-def _instant(value):
-    from datetime import datetime, timezone
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
-
-
-def last_attempt_failures(store, scan_id: str, release_id: str | None, saved_at: dict) -> dict:
-    """file -> the latest refused/failed publish attempt made since the current copy was saved.
+def last_attempt_failures(store, scan_id: str, release_id: str | None, current: dict) -> dict:
+    """file -> the latest refused/failed attempt to publish exactly its CURRENT copy.
 
     store.record_release_document keeps a delivered receipt exact and appends the refusal to the
     immutable decision_log instead ('release.publish_attempt_failed'), so a failed republish is
-    readable without re-identifying the delivered reports. Only attempts at or after the current
-    copy's save time are returned: an older refusal is about a different copy. The caller has
-    already proven ownership of ``scan_id``; rows are also bound to this ``release_id``.
+    readable without re-identifying the delivered reports. ``current`` maps file -> the current
+    artifact tag, and a failure is attached only when the attempt was FOR that tag. Time cannot
+    decide this: a V2 job refused after V3 was saved is logged after V3's save, and attaching it
+    would tell the user V3 was attempted and failed. An attempt with no recorded digest is never
+    attributed. The caller has already proven ownership of ``scan_id``; rows are also bound to
+    this ``release_id``.
     """
-    if not release_id or not saved_at or not hasattr(store, "_db"):
+    if not release_id or not current or not hasattr(store, "_db"):
         return {}
-    files = sorted(saved_at)
+    files = sorted(current)
     with store._db.cursor() as cur:
         store._db.execute(cur,
             "SELECT ts,file,detail FROM decision_log WHERE scan_id=%s AND action=%s AND file IN ("
@@ -190,8 +184,8 @@ def last_attempt_failures(store, scan_id: str, release_id: str | None, saved_at:
             continue
         if not isinstance(detail, dict) or detail.get("release_id") != release_id:
             continue
-        at, saved = _instant(row.get("ts")), _instant(saved_at.get(file))
-        if at is None or (saved is not None and at < saved):
+        attempted = exact_digest(detail.get("attempted_artifact_digest"))
+        if not attempted or artifact_tag(attempted) != current.get(file):
             continue
         latest[file] = {"failure_category": detail.get("failure_category"),
                         "explanation": detail.get("explanation"),

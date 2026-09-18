@@ -4396,9 +4396,10 @@ class ReleaseRepublishRequest(BaseModel):
     # file -> the exact 64-hex corrected digest the user confirmed publishing again.
     expected_artifacts: dict[str, str]
     allow_remaining_issues: StrictBool = False
-    # The exact files whose remaining-issues confirmation the user ticked. When given, a file the
-    # server finds needs confirmation but that is NOT listed is refused — so a file rescored as
-    # non-compliant after the page loaded is never authorized by another file's checkbox.
+    # The exact files whose remaining-issues confirmation the user ticked. A file the server finds
+    # needs confirmation but that is NOT listed is refused, and an omitted list confirms nothing,
+    # so a file rescored as non-compliant after the page loaded is never authorized by another
+    # file's checkbox or by the request-wide flag.
     remaining_issue_files: list[str] | None = None
 
 
@@ -4447,6 +4448,13 @@ def republish_release(sid: str, body: ReleaseRepublishRequest, request: Request)
     already_current = [f for f in files if state[f] == "current"
                        and by_file[f]["published_artifact_digest"] == artifact_tag(expected[f])]
     publishing = [f for f in files if state[f] == "publishing"]
+    # ANY document of this release in flight blocks a new request: the release stage admits one
+    # batch at a time, and publish_files would only discover that fence after writing queued rows
+    # and authorization decisions for files it then cannot enqueue.
+    elsewhere = sorted(row["file"] for row in currency["documents"]
+                       if row["publication_state"] == "publishing" and row["file"] not in expected)
+    if elsewhere:
+        raise _republish_blocked(elsewhere, release_publication.REPUBLISH_IN_FLIGHT)
     if publishing:
         active = release_publication.active_publish_digests(core.store, sid, owner, release["id"])
         if (set(publishing) | set(already_current) == set(files)
@@ -4476,8 +4484,9 @@ def republish_release(sid: str, body: ReleaseRepublishRequest, request: Request)
         raise _republish_blocked(unapplied, release_publication.REPUBLISH_UNAPPLIED)
     stale = {row["file"]: row for row in currency["publication"]["out_of_date"]}
     needs_confirmation = [f for f in targets if stale[f]["requires_remaining_issue_confirmation"]]
-    confirmed = (set(needs_confirmation) if body.remaining_issue_files is None
-                 else set(body.remaining_issue_files)) if body.allow_remaining_issues else set()
+    # Consent is per file and never inferred: an omitted list confirms NOTHING. A request-wide
+    # boolean must not expand into the server's current idea of which files need confirmation.
+    confirmed = set(body.remaining_issue_files or ()) if body.allow_remaining_issues else set()
     unconfirmed = [f for f in needs_confirmation if f not in confirmed]
     if unconfirmed:
         raise HTTPException(409, detail={
@@ -4498,9 +4507,22 @@ def republish_release(sid: str, body: ReleaseRepublishRequest, request: Request)
         "expected_destination": {"folder_id": release.get("parent_folder_id")},
     }, remaining_issue_files=set(needs_confirmation))
     results = published.get("published", [])
+    admitted = {row["file"] for row in results if row.get("status") in {"queued", "published"}}
+    refused = [{"file": row["file"], "status": row.get("status"),
+                "failure_category": row.get("failure_category"), "explanation": row.get("explanation")}
+               for row in results if row.get("file") in targets and row["file"] not in admitted]
+    if not admitted:
+        # Nothing was started — e.g. the copy changed between the check above and the provider
+        # loop. That is a refusal, not a success the page should start following.
+        changed_late = [row["file"] for row in refused if row["failure_category"] == "artifact_changed"]
+        raise HTTPException(409, detail={
+            "code": "artifact_changed" if changed_late else "republish_refused",
+            "files": changed_late or [row["file"] for row in refused],
+            "results": refused,
+            "message": ("The corrected copy changed while publishing was starting. Review the current copy and confirm again."
+                        if changed_late else "The updated copy could not be published.")})
     # Audit what was actually admitted, after the fact: a request refused inside publish_files
     # must not leave "authorized to replace V1" in the immutable log.
-    admitted = {row["file"] for row in results if row.get("status") in {"queued", "published"}}
     for f in targets:
         if f not in admitted:
             continue
@@ -4515,7 +4537,7 @@ def republish_release(sid: str, body: ReleaseRepublishRequest, request: Request)
             "allow_remaining_issues": f in needs_confirmation,
         }))
     return {"result": "republished", "already_current": False, "already_publishing": False,
-            "republished": [row["file"] for row in results if row.get("status") in {"queued", "published"}],
+            "republished": sorted(admitted), "refused": refused,
             "results": results, "batch_id": published.get("batch_id"),
             "release": _release_status_payload(sid, owner)}
 
