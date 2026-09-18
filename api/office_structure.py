@@ -62,7 +62,9 @@ from __future__ import annotations
 import io
 import re
 import zipfile
+from bisect import bisect_left
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from swallowed import swallowed
 
@@ -113,12 +115,14 @@ _REL_ATTR = re.compile(r'\s([\w:]+)="([^"]*)"')
 # The predicate is SHARED with the remediator (api/remediate_office.py imports it) so the
 # fix promotes exactly what this flags and the re-scan verifiably clears. Deliberately
 # conservative — gated on a clearly-larger font (≥14pt), since the fix auto-applies and a
-# false positive would restyle real body text as a heading.
+# false positive would restyle real body text as a heading. For docx, both sides now read the
+# full candidate list from docx_heading_candidates (below), which adds body-size SECTION LABELS
+# ("ACTIVITY:", "BATHING:") on stricter evidence rather than by lowering this floor.
 PSEUDO_HEADING_MIN_HALF_PT = 28       # 14pt (half-points); body text is ~22 (11pt)
-_PSEUDO_HEADING_MAX_WORDS = 12
+PSEUDO_HEADING_MAX_WORDS = 12         # longer than this reads as a sentence, not a heading
+_PSEUDO_HEADING_MAX_WORDS = PSEUDO_HEADING_MAX_WORDS   # private alias kept for older importers
 _HEADING_ANY = re.compile(r'<w:pStyle\s+w:val="Heading\d"')
 _W_SZ = re.compile(r'<w:sz\s+w:val="(\d+)"')
-_W_BOLD = re.compile(r'<w:b(?:\s*/>|\s+w:val="(?:1|true|on)"\s*/>)')
 _HAS_LETTER = re.compile(r"[^\W\d_]", re.UNICODE)
 
 # ── Large text that is NOT a heading ──────────────────────────────────────────
@@ -166,6 +170,14 @@ _MAX_CAPS_FRAGMENT = 4          # "ACME", "FY26" — a wordmark or label, not a 
 
 from assessment_selection import criteria, enabled as sc_enabled
 
+
+def _is_caps_fragment(t: str) -> bool:
+    compact = "".join(c for c in t if c.isalnum())
+    # `t != t.lower()` keeps the rule to scripts that HAVE case: in an uncased script every
+    # string is trivially its own upper-case, and a 2-character CJK heading is no wordmark.
+    return t != t.lower() and t == t.upper() and len(compact) <= _MAX_CAPS_FRAGMENT
+
+
 def looks_like_heading_furniture(text: str) -> bool:
     """True when text set like a heading is really page furniture: a bare figure, a pull
     quote, a short all-caps wordmark, a byline. Text-only, so every caller can use it —
@@ -177,10 +189,7 @@ def looks_like_heading_furniture(text: str) -> bool:
         return True
     if t[0] in _QUOTE_OPEN and (t.rstrip(" .,;:!?") or " ")[-1] in _QUOTE_CLOSE:
         return True                                     # “We grew faster than the market.”
-    compact = "".join(c for c in t if c.isalnum())
-    # `t != t.lower()` keeps the rule to scripts that HAVE case: in an uncased script every
-    # string is trivially its own upper-case, and a 2-character CJK heading is no wordmark.
-    if t != t.lower() and t == t.upper() and len(compact) <= _MAX_CAPS_FRAGMENT:
+    if _is_caps_fragment(t):
         return True                                     # cover-page wordmark / stray label
     byline = _BYLINE.match(t)
     if byline:
@@ -321,6 +330,595 @@ def heading_signal(text: str, *, bold: bool, max_half_pt: int, body_half_pt: int
     if bold and over >= STRONG_BOLD_MARGIN_HALF_PT:
         return "strong"
     return "weak"
+
+
+# ── Section labels: headings marked by emphasis and repetition, not by size ─────────────────────
+#
+# Clinical and instruction sheets mark their sections with a short bold (often underlined,
+# UPPERCASE) label at body size — "ACTIVITY:", "BATHING:", "DIET:" — each followed by the
+# instructions for that section. Size-based detection cannot see them: they are not larger than
+# the body, and lowering the size floor would make every emphasised sentence a heading. What
+# identifies them is the SHAPE of the paragraph plus the fact that the document repeats it.
+#
+# So the evidence is layered, and each layer is conservative on its own:
+#   * the paragraph is short, entirely bold, carries a label cue (a trailing colon, all caps or
+#     underline), does not end like a sentence, is not a list item, table cell, caption, contact
+#     line or inline "Name: value" label, and is followed by ordinary content;
+#   * it is AUTO-promoted only when at least SECTION_LABEL_MIN_PEERS paragraphs in the body share
+#     its exact formatting (bold/underline/caps/size) — the document visibly uses this as its
+#     section convention. A lone one could as easily be emphasis, so it is flagged for review.
+SECTION_LABEL_MAX_WORDS = 6           # "WHEN TO CALL YOUR DOCTOR:" is 5; a longer bold line is a sentence
+# Two is the smallest number that is a CONVENTION rather than a one-off. It is safe that low only
+# because every other gate above must also hold for each peer, and peers must match exactly.
+SECTION_LABEL_MIN_PEERS = 2
+# A ≤4-character all-caps line is normally a wordmark (see _MAX_CAPS_FRAGMENT). With a trailing
+# colon it is a label introducing what follows ("DIET:", "PAIN:") — wordmarks do not end in a
+# colon — so the section-label path lets it through when it has at least this many letters.
+SECTION_LABEL_MIN_LETTERS = 3
+# Digits as a share of the letters+digits: phone numbers, dates, addresses and reference codes are
+# digit-heavy; "STEP 1:" (1 of 5) is not.
+SECTION_LABEL_MAX_DIGIT_SHARE = 0.3
+# Ending with any of these means the paragraph is a sentence or a fragment of one, not a label. A
+# trailing colon is deliberately absent: it is the strongest single sign of a label.
+SECTION_LABEL_SENTENCE_END = ".!?…;,"
+# First words that make a short bold line furniture of a form, letter or caption rather than a
+# section: "Phone:", "Email:", "Figure 1", "Table 2", "Dear Patient,", "Re: your visit".
+SECTION_LABEL_NOT_A_SECTION = frozenset({
+    "figure", "fig", "table", "chart", "exhibit", "photo", "image", "source", "tel", "telephone",
+    "phone", "ph", "fax", "mobile", "cell", "email", "e-mail", "mail", "web", "website", "url",
+    "address", "addr", "date", "dob", "time", "mrn", "page", "re", "subject", "attn", "cc", "to",
+    "from", "dear", "signed", "signature",
+})
+# Word's built-in paragraph styles that already say what a paragraph is. A bold "Caption" or
+# "Subtitle" is doing that style's job, not acting as an unmarked section heading.
+_NON_SECTION_STYLE_NAMES = frozenset({
+    "subtitle", "caption", "quote", "intense quote", "header", "footer", "footnote text",
+    "endnote text", "toc heading", "table of figures", "list paragraph",
+})
+HEADING_MAX_LEVEL = 6                 # WCAG / HTML define h1–h6; deeper collapses onto 6
+
+_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_WQ = "{" + _W_NS + "}"
+_W_VAL = _WQ + "val"
+_HEADING_STYLE_REF = re.compile(r"heading\s?([1-9])", re.IGNORECASE)
+
+# Review reasons are fixed strings (no per-paragraph values) so the promoter can group deferrals
+# by reason and the catalog can explain each one.
+REASON_SIZE_WEAK = ("set at the size of this document's body text, so it may be emphasis rather "
+                    "than a section heading")
+REASON_LABEL_LONE = ("no other paragraph in the document shares its formatting, so it may be "
+                     "emphasis rather than the document's section convention")
+REASON_LABEL_NO_PARENT = ("no heading comes before it to nest under, and no Title-styled paragraph "
+                          "before it can serve as the level-1 heading without competing with one "
+                          "the document already has")
+REASON_LABEL_PARA_STYLE = ("its emphasis comes from its paragraph style, which a heading style "
+                           "would replace — promoting it would change how it looks")
+REASON_LABEL_UNSTABLE = ("promoting it would force the heading outline around it to be renumbered")
+
+
+@dataclass(frozen=True)
+class HeadingCandidate:
+    """One body paragraph that reads as a heading but is not in the outline.
+
+    paragraph_index — 1-based over EVERY w:p in word/document.xml in document order (lxml
+                      root.iter), the same numbering the promoter's `word:p:N` locators use.
+    signal          — "strong": safe to auto-promote; "review": flag, never auto-promote.
+    basis           — "size" (larger than body) or "section-label" (emphasis + repetition).
+    level           — the Heading level the promoter writes (strong only; None for review).
+    anchor_index    — a Title paragraph the promoter must give outline level 1 for this level
+                      to hold (None when the label sits under an existing heading).
+    """
+    paragraph_index: int
+    locator: str
+    text: str
+    signal: str
+    basis: str
+    level: int | None
+    reason: str
+    formatting: str = ""
+    peers: int = 0
+    # Set when this label's level-1 parent is a Title-styled paragraph the promoter must mark
+    # with a direct w:outlineLvl 0 (see "Title anchor"). The same anchor on every label it serves.
+    anchor_index: int | None = None
+    anchor_locator: str | None = None
+
+
+def _on(val: str | None) -> bool:
+    """OOXML on/off: an absent w:val means ON; 0/false/off (and none) mean OFF."""
+    return val is None or val.strip().lower() not in ("0", "false", "off", "none")
+
+
+_PREFIX_USE = re.compile(r"</?([A-Za-z_][\w.-]*):[A-Za-z_]|\s([A-Za-z_][\w.-]*):[A-Za-z_][\w.-]*\s*=")
+_PREFIX_DECL = re.compile(r"xmlns:([A-Za-z_][\w.-]*)\s*=")
+
+
+def _parse_ooxml(xml):
+    """lxml root for an OOXML part, or None. Hand-built parts in this repo's fixtures (and some
+    producers) omit the namespace declarations; the prefixes are then bound here — `w` to the
+    real WordprocessingML namespace — so element order, and so paragraph numbering, is unchanged."""
+    if not xml:
+        return None
+    from lxml import etree
+    data = xml if isinstance(xml, bytes) else xml.encode("utf-8")
+    parser = etree.XMLParser(resolve_entities=False, no_network=True, huge_tree=True)
+    try:
+        return etree.fromstring(data, parser)
+    except etree.XMLSyntaxError:
+        pass
+    text = data.decode("utf-8", "replace")
+    missing = ({a or b for a, b in _PREFIX_USE.findall(text)} - {"xml", "xmlns"}
+               - set(_PREFIX_DECL.findall(text)))
+    first = re.search(r"<(?![?!])[^\s>/]+", text)
+    if not missing or not first:
+        return None
+    decls = "".join(f' xmlns:{p}="{_W_NS if p == "w" else "urn:acp:undeclared:" + p}"'
+                    for p in sorted(missing))
+    text = re.sub(r"^\s*<\?xml[^>]*\?>", "", text[:first.end()]) + decls + text[first.end():]
+    try:
+        return etree.fromstring(text.encode("utf-8"), parser)
+    except etree.XMLSyntaxError:
+        return None
+
+
+class _DocxStyles:
+    """word/styles.xml as the inheritance chains Word resolves formatting through."""
+
+    def __init__(self, styles_xml):
+        self.by_id: dict = {}
+        self.default_para: str | None = None
+        self.dd_rpr = None
+        root = _parse_ooxml(styles_xml)
+        if root is None:
+            return
+        for st in root.iter(_WQ + "style"):
+            sid = st.get(_WQ + "styleId")
+            if not sid:
+                continue
+            self.by_id.setdefault(sid, st)
+            if (self.default_para is None and st.get(_WQ + "type") == "paragraph"
+                    and st.get(_WQ + "default") is not None and _on(st.get(_WQ + "default"))):
+                self.default_para = sid
+        if self.default_para is None and "Normal" in self.by_id:
+            self.default_para = "Normal"
+        self.dd_rpr = root.find(f"{_WQ}docDefaults/{_WQ}rPrDefault/{_WQ}rPr")
+
+    def chain(self, sid: str | None) -> list:
+        """The style and its basedOn ancestors, most-derived first. Cycle- and depth-guarded."""
+        out, seen = [], set()
+        while sid and sid in self.by_id and sid not in seen and len(out) < 20:
+            seen.add(sid)
+            st = self.by_id[sid]
+            out.append(st)
+            based = st.find(_WQ + "basedOn")
+            sid = based.get(_W_VAL) if based is not None else None
+        return out
+
+    def para_chain(self, sid: str | None) -> list:
+        # An unknown pStyle falls back to the default paragraph style, as Word does.
+        return self.chain(sid if sid in self.by_id else self.default_para)
+
+    @staticmethod
+    def name(st) -> str:
+        el = st.find(_WQ + "name")
+        return ((el.get(_W_VAL) if el is not None else "") or "").strip().casefold()
+
+
+def _rpr_apply(rpr, props: dict) -> None:
+    """Overlay one rPr level onto `props` (b / caps / vanish / u / sz). A later call is a higher
+    precedence level. Toggle properties are treated as plain overrides — see the limits note."""
+    if rpr is None:
+        return
+    for tag in ("b", "caps", "vanish"):
+        el = rpr.find(_WQ + tag)
+        if el is not None:
+            props[tag] = _on(el.get(_W_VAL))
+    u = rpr.find(_WQ + "u")
+    if u is not None:
+        props["u"] = (u.get(_W_VAL) or "single").strip().lower() != "none"
+    sz = rpr.find(_WQ + "sz")
+    if sz is not None:
+        try:
+            props["sz"] = int(sz.get(_W_VAL) or 0)
+        except (TypeError, ValueError):
+            pass
+
+
+def _outline_kind(p, styles: _DocxStyles):
+    """("heading", level) | ("title", None) | None — is this paragraph ALREADY structure?
+
+    Direct w:outlineLvl first (0-8 → level 1-9; 9 is explicitly body text), then the pStyle id
+    in either spelling ("Heading1" / "Heading 1"), then the style chain by id, by the
+    locale-invariant w:name ("heading 2" — the id is localised, the name is not) and by the
+    chain's own outlineLvl. A custom style based on a heading style is therefore a heading.
+    Title is structure too, just not an outline level."""
+    pPr = p.find(_WQ + "pPr")
+    ol = pPr.find(_WQ + "outlineLvl") if pPr is not None else None
+    if ol is not None and (ol.get(_W_VAL) or "").isdigit():
+        v = int(ol.get(_W_VAL))
+        if v <= 8:
+            return ("heading", v + 1)
+        if v == 9:
+            return None
+    ps = pPr.find(_WQ + "pStyle") if pPr is not None else None
+    sid = (ps.get(_W_VAL) or "").strip() if ps is not None else None
+    for st_key in ([sid] if sid else []):
+        m = _HEADING_STYLE_REF.fullmatch(st_key)
+        if m:
+            return ("heading", int(m.group(1)))
+        if st_key.casefold() == "title":
+            return ("title", None)
+    for st in styles.para_chain(sid):
+        for key in (styles.name(st), (st.get(_WQ + "styleId") or "").strip()):
+            m = _HEADING_STYLE_REF.fullmatch(key)
+            if m:
+                return ("heading", int(m.group(1)))
+            if key.casefold() == "title":
+                return ("title", None)
+        sol = st.find(f"{_WQ}pPr/{_WQ}outlineLvl")
+        if sol is not None and (sol.get(_W_VAL) or "").isdigit():
+            v = int(sol.get(_W_VAL))
+            if v <= 8:
+                return ("heading", v + 1)
+            if v == 9:
+                return None
+    return None
+
+
+def _normaliser_level(p) -> int | None:
+    """The level remediate_office's outline normaliser sees for a paragraph — an exact mirror of
+    its `heading_level` (direct outlineLvl, else a Heading1-6 pStyle id). Used to predict what
+    that pass will do, so a section label is only auto-promoted where it will not be renumbered."""
+    pPr = p.find(_WQ + "pPr")
+    if pPr is None:
+        return None
+    ol = pPr.find(_WQ + "outlineLvl")
+    explicit = ol.get(_W_VAL) if ol is not None else None
+    if explicit is not None and explicit.isdigit() and 0 <= int(explicit) <= 8:
+        return int(explicit) + 1
+    ps = pPr.find(_WQ + "pStyle")
+    m = re.fullmatch(r"heading ?([1-6])", ((ps.get(_W_VAL) or "") if ps is not None else "").casefold())
+    return int(m.group(1)) if m else None
+
+
+def _simulate_outline(entries: list[tuple[int, int]]) -> dict[int, int]:
+    """What remediate_office's outline pass does to [(paragraph_index, level)] in document order:
+    exactly one H1 (promote the first heading when there is none, demote extra H1s to H2), then
+    close every skip to prev+1."""
+    levels = [lvl for _i, lvl in entries]
+    if levels:
+        if 1 not in levels:
+            levels[0] = 1
+        elif levels.count(1) > 1:
+            first = levels.index(1)
+            levels = [2 if (lvl == 1 and k != first) else lvl for k, lvl in enumerate(levels)]
+        prev = 0
+        for k, lvl in enumerate(levels):
+            if prev > 0 and lvl > prev + 1:
+                levels[k] = lvl = prev + 1
+            prev = lvl
+    return {i: lvl for (i, _l), lvl in zip(entries, levels)}
+
+
+def _num_ids(numbering_xml) -> set[str] | None:
+    root = _parse_ooxml(numbering_xml)
+    if root is None:
+        return None
+    return {n.get(_WQ + "numId") for n in root.iter(_WQ + "num") if n.get(_WQ + "numId")}
+
+
+def _is_list_item(p, chain: list, num_ids: set[str] | None) -> bool:
+    """Numbered/bulleted directly or through its paragraph style. numId 0 means "no numbering";
+    a numId the numbering part does not define renders nothing, so it is not a list either."""
+    pPr = p.find(_WQ + "pPr")
+    holders = ([pPr] if pPr is not None else []) + [st.find(_WQ + "pPr") for st in chain]
+    for holder in holders:
+        num = holder.find(_WQ + "numPr") if holder is not None else None
+        if num is None:
+            continue
+        nid = num.find(_WQ + "numId")
+        if nid is None:
+            continue                       # an ilvl-only override: the numId comes from the style
+        val = (nid.get(_W_VAL) or "").strip()
+        return val not in ("", "0") and (num_ids is None or val in num_ids)
+    return False
+
+
+def _looks_like_form_furniture(t: str) -> bool:
+    """Contact lines, captions, letter furniture and digit-heavy lines (phone, date, address)."""
+    low = t.casefold()
+    if "@" in t or "://" in low or low.startswith("www."):
+        return True
+    first = re.split(r"[\s:.#]+", low.strip(" \t\"'“”‘’([{"), maxsplit=1)[0]
+    if first in SECTION_LABEL_NOT_A_SECTION:
+        return True
+    digits = sum(c.isdigit() for c in t)
+    alnum = sum(c.isalnum() for c in t)
+    return bool(alnum) and digits / alnum > SECTION_LABEL_MAX_DIGIT_SHARE
+
+
+def _formatting_phrase(bold, underline, caps, half_pt) -> str:
+    parts = [w for w, on in (("bold", bold), ("underlined", underline), ("all caps", caps)) if on]
+    if half_pt:
+        parts.append(f"{half_pt / 2:g}pt")
+    return ", ".join(parts)
+
+
+def docx_heading_candidates(document_xml, styles_xml=None, numbering_xml=None) -> list[HeadingCandidate]:
+    """Every body paragraph in word/document.xml that reads as a heading but is not one — the ONE
+    list both DOCX_PSEUDO_HEADING (docx_checks) and the promoter (remediate_office) work from, so
+    what is flagged, what is promoted and what the re-scan clears cannot drift apart.
+
+    Two bases:
+      "size"          — the existing path: heading_signal against this document's body baseline,
+                        on sizes the author set on the TEXT (direct run formatting or a character
+                        style). "weak" there is signal "review".
+      "section-label" — short, fully-bold, cue-carrying labels at body size (see the block
+                        comment above), strong only when the document repeats the formatting.
+
+    Formatting is resolved the way Word resolves it: docDefaults → paragraph style chain (the
+    default paragraph style when there is no pStyle) → character style chain → direct run
+    properties. A paragraph mark's own rPr (w:pPr/w:rPr) formats only the pilcrow, so it is not
+    applied to the text. Never raises: an unreadable part yields []."""
+    try:
+        return _docx_heading_candidates(document_xml, styles_xml, numbering_xml)
+    except Exception:
+        swallowed("office_structure.docx_heading_candidates: reading heading candidates failed")
+        return []
+
+
+def _docx_heading_candidates(document_xml, styles_xml, numbering_xml) -> list[HeadingCandidate]:
+    root = _parse_ooxml(document_xml)
+    if root is None:
+        return []
+    styles = _DocxStyles(styles_xml)
+    num_ids = _num_ids(numbering_xml)
+    default_hp = default_run_half_pt(styles_xml)
+    P, TBL = _WQ + "p", _WQ + "tbl"
+
+    paras: list[dict] = []
+    for idx, p in enumerate(root.iter(P), start=1):
+        anc = {a.tag for a in p.iterancestors()}
+        pPr = p.find(_WQ + "pPr")
+        ps = pPr.find(_WQ + "pStyle") if pPr is not None else None
+        sid = (ps.get(_W_VAL) or "").strip() if ps is not None else None
+        chain = styles.para_chain(sid)
+        runs = []                          # (text, full props, text-level props) per visible run
+        own_bold, own_max = False, 0
+        for r in p.iter(_WQ + "r"):
+            if next(r.iterancestors(P), None) is not p:
+                continue                   # a run of a nested (text-box) paragraph
+            full: dict = {}
+            own: dict = {}
+            _rpr_apply(styles.dd_rpr, full)
+            for st in reversed(chain):
+                _rpr_apply(st.find(_WQ + "rPr"), full)
+            rpr = r.find(_WQ + "rPr")
+            rs = rpr.find(_WQ + "rStyle") if rpr is not None else None
+            for st in reversed(styles.chain(rs.get(_W_VAL) if rs is not None else None)):
+                _rpr_apply(st.find(_WQ + "rPr"), full)
+                _rpr_apply(st.find(_WQ + "rPr"), own)
+            _rpr_apply(rpr, full)
+            _rpr_apply(rpr, own)
+            # The size path reads what the author set on the TEXT — direct formatting or a
+            # character style — never a paragraph style or the document default. A large-print
+            # document's 14pt default would otherwise make every short line a size candidate.
+            own_bold = own_bold or bool(own.get("b"))
+            own_max = max(own_max, own.get("sz") or 0)
+            if full.get("vanish"):
+                continue
+            text = "".join((c.text or "") if c.tag == _WQ + "t" else " "
+                           for c in r if c.tag in (_WQ + "t", _WQ + "tab"))
+            runs.append((text, full, own))
+        text = " ".join("".join(t for t, _f, _o in runs).split())
+        paras.append({
+            "idx": idx, "p": p, "text": text, "runs": [x for x in runs if x[0].strip()],
+            "kind": _outline_kind(p, styles), "vis": _normaliser_level(p),
+            "table": TBL in anc, "nested": P in anc, "chain": chain,
+            "style_names": {styles.name(st) for st in chain} | ({sid.casefold()} if sid else set()),
+            "bold": own_bold, "max_hp": own_max,
+        })
+
+    # ── size path — unchanged judgement, one baseline for detector and promoter ──
+    sizes = [(d["max_hp"] or default_hp) for d in paras if d["text"] and d["kind"] is None]
+    body_hp = body_baseline_half_pt(sizes)
+    size_sig: dict[int, str] = {}
+    for d in paras:
+        sig = heading_signal(d["text"], bold=d["bold"], max_half_pt=d["max_hp"],
+                             body_half_pt=body_hp, styled_heading=d["kind"] is not None)
+        if sig:
+            size_sig[d["idx"]] = sig
+
+    # ── section-label shape ──
+    def label_shape(d) -> dict | None:
+        t = d["text"]
+        if (not t or d["kind"] is not None or d["idx"] in size_sig or d["table"] or d["nested"]
+                or not d["runs"] or not _HAS_LETTER.search(t)
+                or len(t.split()) > SECTION_LABEL_MAX_WORDS
+                or d["style_names"] & _NON_SECTION_STYLE_NAMES
+                or any(n.startswith("toc ") for n in d["style_names"])):
+            return None
+        if not all(f.get("b") for _t, f, _o in d["runs"]):
+            return None                    # an inline "Phone:" label followed by plain text
+        underline = all(f.get("u") for _t, f, _o in d["runs"])
+        caps = (all(f.get("caps") for _t, f, _o in d["runs"])
+                or (t != t.lower() and t == t.upper()))
+        colon = t.endswith(":")
+        if not (colon or caps or underline):
+            return None                    # plain bold is everyday emphasis, not a label
+        if t[-1] in SECTION_LABEL_SENTENCE_END:
+            return None
+        core = t.rstrip(": ").strip()
+        if looks_like_heading_furniture(t) and not (
+                colon and _is_caps_fragment(core) and not _NUMERIC_HEADING.match(core)
+                and sum(c.isalpha() for c in core) >= SECTION_LABEL_MIN_LETTERS):
+            return None
+        if _looks_like_form_furniture(t):
+            return None
+        if _is_list_item(d["p"], d["chain"], num_ids):
+            return None
+        half_pt = max((f.get("sz") or default_hp) for _t, f, _o in d["runs"])
+        # Did the emphasis come from the paragraph style? Promotion replaces that style, so the
+        # look would change — such a label can be flagged but not auto-fixed.
+        from_para_style = any(
+            (f.get("b") and not o.get("b")) or (underline and not o.get("u"))
+            or (f.get("caps") and not o.get("caps") and t != t.upper())
+            for _t, f, o in d["runs"])
+        return {"sig": (underline, caps, half_pt), "colon": colon,
+                "from_para_style": from_para_style,
+                "formatting": _formatting_phrase(True, underline, caps, half_pt)}
+
+    # Body flow: top-level paragraphs and tables in order. A label must be followed by content —
+    # the next non-empty paragraph that is not itself heading- or label-shaped, or a table.
+    flow = []
+    by_elem = {d["p"]: d for d in paras}
+    for el in root.iter(P, TBL):
+        anc = {a.tag for a in el.iterancestors()}
+        if P in anc or TBL in anc:
+            continue
+        flow.append(by_elem.get(el) if el.tag == P else "table")
+    shapes: dict[int, dict] = {}
+    for k, item in enumerate(flow):
+        if item == "table" or item is None:
+            continue
+        shape = label_shape(item)
+        if shape is None:
+            continue
+        nxt = next((f for f in flow[k + 1:] if f == "table" or (f is not None and f["text"])), None)
+        if nxt is None:
+            continue                       # nothing follows it: a closing line, not a section
+        # A short all-bold line after it (a letterhead or contact block line, even one the shape
+        # test rejects, like "TEL: 555-0100") means this is one line of a bold block, not a
+        # section introducing its body.
+        if nxt != "table" and (nxt["kind"] is not None or nxt["idx"] in size_sig
+                               or label_shape(nxt) is not None
+                               or (nxt["runs"] and len(nxt["text"].split()) <= SECTION_LABEL_MAX_WORDS
+                                   and all(f.get("b") for _t, f, _o in nxt["runs"]))):
+            continue
+        shapes[item["idx"]] = shape
+    peers = Counter(s["sig"] for s in shapes.values())
+
+    # ── levels ──
+    heading_seq = None
+    try:
+        from proposals import heading_level_sequence as heading_seq
+    except Exception:
+        heading_seq = None
+    strong_size = [d for d in paras if size_sig.get(d["idx"]) == "strong"]
+    seq = (heading_seq([d["max_hp"] for d in strong_size]) if heading_seq
+           else [1] * len(strong_size))
+    size_level = {d["idx"]: lvl for d, lvl in zip(strong_size, seq)}
+    visible = sorted([(d["idx"], d["vis"]) for d in paras if d["vis"] is not None]
+                     + list(size_level.items()))
+    settled = _simulate_outline(visible)
+    # Semantic headings the normaliser does not see (a custom style based on Heading 2) still
+    # parent a label, at their own level.
+    parents = dict(settled)
+    for d in paras:
+        if d["kind"] and d["kind"][0] == "heading" and d["idx"] not in parents:
+            parents[d["idx"]] = d["kind"][1]
+    def place(parents: dict[int, int], visible: list) -> tuple[dict, dict]:
+        """Level each label one below the nearest heading before it, then keep only those the
+        outline pass will leave alone — otherwise peers would come out at different levels.
+        Iterates: dropping one label can settle another."""
+        order = sorted(parents)
+        level: dict[int, int] = {}
+        why: dict[int, str] = {}
+        for idx, s in shapes.items():
+            if peers[s["sig"]] < SECTION_LABEL_MIN_PEERS:
+                why[idx] = REASON_LABEL_LONE
+            elif s["from_para_style"]:
+                why[idx] = REASON_LABEL_PARA_STYLE
+            else:
+                at = bisect_left(order, idx)             # nearest heading BEFORE this label
+                if not at:
+                    why[idx] = REASON_LABEL_NO_PARENT
+                else:
+                    level[idx] = min(parents[order[at - 1]] + 1, HEADING_MAX_LEVEL)
+        for _ in range(len(level) + 1):
+            sim = _simulate_outline(sorted(visible + list(level.items())))
+            moved = [i for i, lvl in level.items() if sim.get(i) != lvl]
+            if not moved:
+                break
+            for i in moved:
+                level.pop(i)
+                why[i] = REASON_LABEL_UNSTABLE
+        return level, why
+
+    label_level, label_reason = place(parents, visible)
+
+    # ── Title anchor ──
+    # The commonest layout for these sheets: a first paragraph in Word's Title style, then the
+    # labels, and no Heading 1 anywhere. Title is not an outline level, so the labels have no
+    # parent, and neither H1 nor H2 survives the outline pass with the peers equal. The Title IS
+    # the document's top level, though — so it is made the level-1 anchor by a DIRECT
+    # w:outlineLvl 0 on its paragraph. Its pStyle, runs and look are untouched; only the outline
+    # learns what the page already shows. Taken only when it is needed (labels that qualified
+    # except for a parent), only for a Title before the first of them, and only when the document
+    # has no level-1 heading of its own — real, custom-style or size-promoted — to compete with.
+    anchor: int | None = None
+    orphans = sorted(i for i, why in label_reason.items() if why == REASON_LABEL_NO_PARENT)
+    has_h1 = 1 in parents.values() or any(lvl == 1 for _i, lvl in visible)
+    if orphans and not has_h1:
+        anchor = next((d["idx"] for d in paras if d["kind"] == ("title", None)
+                       and d["idx"] < orphans[0]), None)
+    if anchor is not None:
+        with_anchor = sorted(visible + [(anchor, 1)])
+        level2, why2 = place({**parents, anchor: 1}, with_anchor)
+        if any(i in level2 for i in orphans):
+            label_level, label_reason, visible = level2, why2, with_anchor
+        else:
+            anchor = None                      # it would anchor nothing — leave the Title alone
+    # The labels whose nearest parent IS the anchor (a real heading after the Title parents its own).
+    anchored = ({i for i in label_level
+                 if max(j for j in [*parents, anchor] if j < i) == anchor}
+                if anchor is not None else set())
+    anchor_loc = f"word:p:{anchor}" if anchor is not None else None
+
+    out: list[HeadingCandidate] = []
+    for d in paras:
+        idx = d["idx"]
+        loc = f"word:p:{idx}"
+        if idx in size_sig:
+            strong = size_sig[idx] == "strong"
+            reason = (f"set at {d['max_hp'] / 2:g}pt, clearly larger than this document's "
+                      f"{body_hp / 2:g}pt body text" if strong and body_hp and d["max_hp"]
+                      else "set clearly larger than body text" if strong else REASON_SIZE_WEAK)
+            out.append(HeadingCandidate(
+                idx, loc, d["text"], "strong" if strong else "review", "size",
+                size_level.get(idx) if strong else None, reason,
+                _formatting_phrase(d["bold"], False, False, d["max_hp"])))
+        elif idx in shapes:
+            s = shapes[idx]
+            n = peers[s["sig"]]
+            if idx in label_level:
+                reason = (f"a short bold label followed by content, formatted the same way as "
+                          f"{n - 1} other section label(s) in this document")
+                out.append(HeadingCandidate(
+                    idx, loc, d["text"], "strong", "section-label", label_level[idx], reason,
+                    s["formatting"], n,
+                    anchor_index=anchor if idx in anchored else None,
+                    anchor_locator=anchor_loc if idx in anchored else None))
+            else:
+                out.append(HeadingCandidate(idx, loc, d["text"], "review", "section-label",
+                                            None, label_reason[idx], s["formatting"], n))
+    return out
+
+
+def pseudo_heading_detail(c: HeadingCandidate) -> str:
+    """The DOCX_PSEUDO_HEADING `detail` for one candidate: the paragraph's number and text, its
+    formatting, and — the part a reviewer needs — whether ACP will fix it or why it will not."""
+    shown = c.text if len(c.text) <= 60 else c.text[:57] + "…"
+    fmt = f" ({c.formatting})" if c.formatting else ""
+    if c.signal == "strong":
+        anchor = (f"; the Title paragraph {c.anchor_index} is used as the document's level-1 "
+                  f"heading (outline level only — its Title style and look are unchanged)"
+                  if c.anchor_index else "")
+        return (f"Paragraph {c.paragraph_index} “{shown}”{fmt} is formatted as a heading but is "
+                f"body text, so it is missing from the heading outline — {c.reason}. "
+                f"Auto-fix: mark it as Heading {c.level}{anchor}")
+    return (f"Paragraph {c.paragraph_index} “{shown}”{fmt} may be a heading that is not marked as "
+            f"one — left for review because {c.reason}")
+
 
 # Content control (structured document tag) blocks and their title/label.
 # w:sdt wraps a LOT of non-form Word content too (TOC blocks, citations,
@@ -591,18 +1189,28 @@ def docx_checks(path: Path) -> list[dict]:
                           "nothing to announce, so the section cannot be identified or skipped")
                     findings.append(f)
 
-            # 1.3.1 — a paragraph visually styled as a heading (large/bold) but left in a
-            # body style, so it isn't in the heading outline AT navigates by. One per doc.
+            # 1.3.1 — a paragraph visually styled as a heading (large, or a repeated bold section
+            # label) but left in a body style, so it isn't in the heading outline AT navigates by.
+            # One finding PER paragraph, from the same candidate list the promoter works from, so
+            # each promotion clears exactly its own finding on re-scan and each paragraph ACP
+            # declines to restyle stays visible as its own review item.
             if sc_enabled("1.3.1"):
-                for p in _PARA.findall(doc):
-                    text = "".join(_WT.findall(p)).strip()
-                    szs = [int(s) for s in _W_SZ.findall(p)]
-                    if looks_like_pseudo_heading(
-                            text, bold=bool(_W_BOLD.search(p)),
-                            max_half_pt=max(szs) if szs else 0,
-                            styled_heading=bool(_HEADING_ANY.search(p))):
-                        findings.append(_finding("DOCX_PSEUDO_HEADING", "1.3.1 Info and Relationships", "MODERATE"))
-                        break
+                # `location` is the promoter's own `word:p:N` locator, so a finding and the fix
+                # that clears it name the same paragraph and no two findings are identical. Review
+                # candidates are Review-Recommended (ADR 0023): ACP will not restyle them, so they
+                # must not score as a defect ACP could have fixed.
+                for cand in docx_heading_candidates(doc, _read(zf, "word/styles.xml"),
+                                                    _read(zf, "word/numbering.xml")):
+                    if cand.signal == "strong":
+                        f = _finding("DOCX_PSEUDO_HEADING", "1.3.1 Info and Relationships", "MODERATE")
+                        f["detail"] = pseudo_heading_detail(cand)
+                    else:
+                        f = _review_finding("DOCX_PSEUDO_HEADING", "1.3.1 Info and Relationships",
+                                            pseudo_heading_detail(cand))
+                    f["location"] = cand.locator
+                    f["signal"] = cand.signal
+                    f["basis"] = cand.basis
+                    findings.append(f)
 
             # 2.4.4 — link text that conveys nothing about its destination, and 2.4.9 — display
             # text reused for a different destination. The partner engine's DOCX-LINK-001 is

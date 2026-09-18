@@ -1004,6 +1004,59 @@ def _remediate_xlsx_contrast(entries: dict, diffs=None) -> list[str]:
     return [f"Recoloured {changed} low-contrast cell style(s) to reach AA/AAA · 1.4.3 / 1.4.6"]
 
 
+def _ensure_heading_styles(entries: dict, levels) -> None:
+    """Make every `HeadingN` style the promoter just referenced actually exist in styles.xml.
+
+    Word writes only the styles a document uses, so a document with no headings usually has no
+    Heading2 definition — and a w:pStyle naming an undefined style falls back to the default
+    paragraph style, which is NOT in the outline. The promotion would read as done in the XML and
+    do nothing in Word. The definition added here is deliberately minimal: based on the default
+    paragraph style with only an outline level, so the promoted text keeps exactly the look it had.
+    A style that already exists is left alone. No styles part means nothing to add to."""
+    from lxml import etree
+    raw = entries.get("word/styles.xml")
+    if not raw or not levels:
+        return
+    W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    try:
+        root = etree.fromstring(raw)
+    except Exception:
+        swallowed("remediate_office._ensure_heading_styles: styles.xml did not parse")
+        return
+    styles = list(root.iter(f"{{{W}}}style"))
+    ids = {s.get(f"{{{W}}}styleId") for s in styles}
+    names = set()
+    default_para = None
+    for s in styles:
+        nm = s.find(f"{{{W}}}name")
+        if nm is not None:
+            names.add((nm.get(f"{{{W}}}val") or "").casefold())
+        if (default_para is None and s.get(f"{{{W}}}type") == "paragraph"
+                and (s.get(f"{{{W}}}default") or "").lower() in ("1", "true", "on")):
+            default_para = s.get(f"{{{W}}}styleId")
+    default_para = default_para or ("Normal" if "Normal" in ids else None)
+    added = False
+    for lvl in sorted(set(levels)):
+        sid = f"Heading{lvl}"
+        if sid in ids:
+            continue
+        name = f"heading {lvl}" if f"heading {lvl}" not in names else f"Heading {lvl} (ACP)"
+        st = etree.SubElement(root, f"{{{W}}}style", {f"{{{W}}}type": "paragraph",
+                                                      f"{{{W}}}styleId": sid})
+        etree.SubElement(st, f"{{{W}}}name", {f"{{{W}}}val": name})
+        if default_para:
+            etree.SubElement(st, f"{{{W}}}basedOn", {f"{{{W}}}val": default_para})
+            etree.SubElement(st, f"{{{W}}}next", {f"{{{W}}}val": default_para})
+        etree.SubElement(st, f"{{{W}}}uiPriority", {f"{{{W}}}val": "9"})
+        etree.SubElement(st, f"{{{W}}}qFormat")
+        ppr = etree.SubElement(st, f"{{{W}}}pPr")
+        etree.SubElement(ppr, f"{{{W}}}outlineLvl", {f"{{{W}}}val": str(lvl - 1)})
+        added = True
+    if added:
+        entries["word/styles.xml"] = etree.tostring(root, xml_declaration=True, encoding="UTF-8",
+                                                    standalone=True)
+
+
 def _remediate_docx_structure(entries: dict, diffs=None, skipped=None, in_scope=None) -> list[str]:
     """Deterministic docx structural fixes that clear the analyser (WCAG 1.3.1):
     mark the first row of every multi-row table as a header row (w:tblHeader), and ensure
@@ -1042,81 +1095,33 @@ def _remediate_docx_structure(entries: dict, diffs=None, skipped=None, in_scope=
         return run_tokens.get(run)
 
     # Pseudo-heading promotion (1.3.1 / 2.4.6): a body-styled paragraph that is visually a
-    # heading (large/bold) becomes a real Heading N so assistive tech can navigate to it.
-    # Uses the SAME predicate the detector flags (office_structure.looks_like_pseudo_heading),
-    # so the fix clears the re-scan — and that predicate now also rejects large text that is
-    # really page furniture (a pull figure, a quote, a wordmark, a byline), so neither side
-    # treats it as a heading. The level comes from the font hierarchy in document order and
-    # the outline normalisation below then guarantees one H1 and closes any skip. Runs first
-    # so promoted paragraphs are counted by the heading-collection that follows.
+    # heading (large, or a repeated bold section label) becomes a real Heading N so assistive
+    # tech can navigate to it. Large text that is really page furniture (a pull figure, a
+    # quote, a wordmark, a byline) is rejected on both sides. The outline normalisation below
+    # then guarantees one H1 and closes any skip. Runs first so promoted paragraphs are counted
+    # by the heading-collection that follows.
+    #
+    # The candidate list is office_structure.docx_heading_candidates — the SAME call the
+    # detector makes over the same bytes, numbering paragraphs the same way (root.iter), so
+    # the paragraphs promoted here are exactly the DOCX_PSEUDO_HEADING findings marked strong
+    # and each one's finding clears on re-scan. Levels come from that function: size-based
+    # ones from the font hierarchy in document order (proposals.heading_level_sequence — rank
+    # by absolute size let a pull figure take Heading 1), section labels one below the heading
+    # they sit under and only at a level the outline pass below will not renumber.
     import office_structure as _osx
-    import proposals as _prop
-    pseudo: list = []                      # (pPr_or_None, p, max_half_pt) — STRONG, auto-promote
-    ambiguous: list = []                   # heading-like but not distinguished from body
-    scanned: list = []                     # (pPr, p, max_hp, text, bold, styled)
-    # One vote per BODY paragraph, at its effective size — the explicit run size when it has
-    # one, otherwise the style default. Paragraphs already styled as headings are excluded:
-    # the question is what this document's BODY is set at, and counting the headings toward it
-    # is what would make them stop looking distinguished from it.
-    default_hp = _osx.default_run_half_pt(entries.get("word/styles.xml"))
-    para_sizes: list[int] = []
-    for p in root.iter(f"{{{W}}}p"):
-        pPr = p.find(f"{{{W}}}pPr")
-        st = pPr.find(f"{{{W}}}pStyle") if pPr is not None else None
-        styled = st is not None and (st.get(val_attr) or "").startswith("Heading")
-        text = "".join(t.text or "" for t in p.iter(f"{{{W}}}t")).strip()
-        bold, max_hp = False, 0
-        for r in p.iter(f"{{{W}}}r"):
-            rPr = r.find(f"{{{W}}}rPr")
-            if rPr is None:
-                continue
-            bel = rPr.find(f"{{{W}}}b")
-            if bel is not None and (bel.get(val_attr) or "1") not in ("0", "false", "off"):
-                bold = True
-            szel = rPr.find(f"{{{W}}}sz")
-            if szel is not None:
-                try:
-                    sz = int(szel.get(val_attr) or 0)
-                except (TypeError, ValueError):
-                    sz = 0
-                if sz:
-                    max_hp = max(max_hp, sz)
-        scanned.append((pPr, p, max_hp, text, bold, styled))
-        if text and not styled:
-            eff = max_hp or default_hp
-            if eff:
-                para_sizes.append(eff)
-
-    # The baseline is measured across the WHOLE document, so it has to be complete before any
-    # paragraph is judged — hence the two passes. `looks_like_pseudo_heading` asks the absolute
-    # question ("does this read as a heading"); `heading_signal` adds the relative one ("is it
-    # distinguished from the body around it") and only the STRONG answers are stamped.
-    body_hp = _osx.body_baseline_half_pt(para_sizes)
-    for pPr, p, max_hp, text, bold, styled in scanned:
-        # max_hp RAW, not defaulted — heading_signal's first question is the detector's own
-        # predicate, and the scanner reads raw run sizes. Substituting the style default here
-        # would make a size-less body paragraph clear the 14pt floor in a large-print document
-        # and become a candidate the scanner never flagged, breaking the lock-step this gate
-        # depends on. The default belongs to the BASELINE only.
-        sig = _osx.heading_signal(text, bold=bold, max_half_pt=max_hp,
-                                  body_half_pt=body_hp, styled_heading=styled)
-        if sig == "strong":
-            pseudo.append((pPr, p, max_hp, text))
-        elif sig == "weak":
-            ambiguous.append(text)
+    candidates = _osx.docx_heading_candidates(entries[name], entries.get("word/styles.xml"),
+                                              entries.get("word/numbering.xml"))
+    by_number = {index: p for p, index in paragraph_numbers.items()}
+    pseudo = [c for c in candidates
+              if c.signal == "strong" and c.level and c.paragraph_index in by_number]
+    promoted_headings = False
+    review = [c for c in candidates if c.signal != "strong"]
     if pseudo and _sc_ok(in_scope, "1.3.1"):
-        # Levels come from the font hierarchy IN DOCUMENT ORDER, not from absolute size rank
-        # across the whole document. Rank gave Heading 1 to the largest paragraph whatever it
-        # was — a pull quote or a headline figure took the document title's level and pushed
-        # every real section down one — and collapsed the sections onto Heading 6 as soon as
-        # the document used more than six distinct sizes. This path writes w:pStyle
-        # unattended, so nobody sees that happen. Ordered nesting is also what makes the two
-        # normalisation passes below land correctly: the first pseudo-heading is Heading 1, so
-        # a document that already styled its own Heading 1 keeps it (the promoted one comes
-        # later in document order and is the one demoted to Heading 2), and peer sections
-        # share a level instead of arriving as gaps for the skip pass to close.
-        _levels = _prop.heading_level_sequence([hp for _, _, hp, _ in pseudo])
-        for (pPr, p, _hp, text), lvl in zip(pseudo, _levels):
+        for c in pseudo:
+            p = by_number[c.paragraph_index]
+            # w:pStyle ONLY. Runs, text, numbering and the rest of pPr are untouched, so direct
+            # formatting (bold, underline, size, caps) still renders as before.
+            pPr = p.find(f"{{{W}}}pPr")
             if pPr is None:
                 pPr = p.makeelement(f"{{{W}}}pPr", {})
                 p.insert(0, pPr)
@@ -1124,24 +1129,66 @@ def _remediate_docx_structure(entries: dict, diffs=None, skipped=None, in_scope=
             if st is None:
                 st = pPr.makeelement(f"{{{W}}}pStyle", {})
                 pPr.insert(0, st)
-            st.set(val_attr, f"Heading{lvl}")
-            _rec(diffs, "1.3.1", f'paragraph “{text[:40]}” was body text styled to look like a heading',
-                 f"promoted to Heading {lvl} style",
-                 located("so it joins the heading outline assistive tech navigates by", paragraph_token(p)),
-                 locator=paragraph_token(p))
+            st.set(val_attr, f"Heading{c.level}")
+            what = ("a bold section label" if c.basis == "section-label"
+                    else "body text styled to look like a heading")
+            _rec(diffs, "1.3.1", f'paragraph “{c.text[:40]}” was {what}',
+                 f"promoted to Heading {c.level} style",
+                 located("so it joins the heading outline assistive tech navigates by", c.locator),
+                 locator=c.locator)
+        # A Title-styled anchor (office_structure "Title anchor"): the labels' level 2 holds only
+        # if the Title is the outline's level 1. A DIRECT w:outlineLvl 0 says so without touching
+        # its pStyle, so the Title keeps its style and look; the outline pass below reads a direct
+        # outlineLvl as an explicit level and so keeps it as the one H1.
+        for anchor in dict.fromkeys(c.anchor_index for c in pseudo if c.anchor_index):
+            p = by_number.get(anchor)
+            if p is None:
+                continue
+            pPr = p.find(f"{{{W}}}pPr")
+            if pPr is None:
+                pPr = p.makeelement(f"{{{W}}}pPr", {})
+                p.insert(0, pPr)
+            ol = pPr.find(f"{{{W}}}outlineLvl")
+            if ol is None:
+                ol = pPr.makeelement(f"{{{W}}}outlineLvl", {})
+                # CT_PPr is a sequence: outlineLvl precedes divId/cnfStyle/rPr/sectPr/pPrChange,
+                # and Word rejects a pPr whose children are out of order.
+                after = next((el for el in pPr if el.tag in {
+                    f"{{{W}}}{t}" for t in ("divId", "cnfStyle", "rPr", "sectPr", "pPrChange")}), None)
+                if after is None:
+                    pPr.append(ol)
+                else:
+                    after.addprevious(ol)
+            ol.set(val_attr, "0")
+            _rec(diffs, "1.3.1",
+                 "the Title paragraph was not in the heading outline, so the section labels under "
+                 "it had no top level", "Title given outline level 1 (Title style unchanged)",
+                 located("so the section headings nest under the document's title",
+                         f"word:p:{anchor}"),
+                 locator=f"word:p:{anchor}")
+        promoted_headings = True
         applied.append(f"Promoted {len(pseudo)} visually-styled pseudo-heading(s) to real headings · 1.3.1")
 
-    # Ambiguous candidates are DEFERRED, not dropped. The finding still stands — the scanner
-    # flagged these and this function declined to guess — so it has to be visible, or a
+    # Review candidates are DEFERRED, not dropped. Their findings still stand — the scanner
+    # flagged them and this function declined to guess — so they have to be visible, or a
     # large-print document reads as "nothing to fix here" when the truth is "we could not tell
-    # which of these are sections". Reported whether or not anything was promoted, and outside
-    # the `pseudo` branch for exactly that reason: the all-weak document is the case this exists
-    # for, and it is the one where `pseudo` is empty.
-    if ambiguous and skipped is not None and _sc_ok(in_scope, "1.3.1"):
-        skipped.append(
-            f"{len(ambiguous)} paragraph(s) look like headings but are not larger than this "
-            f"document's body text — left unchanged for review rather than restyled "
-            f"(e.g. “{ambiguous[0][:40]}”)")
+    # which of these are sections". Reported whether or not anything was promoted, grouped by
+    # the reason ACP declined, each with the paragraph locators it covers.
+    if review and skipped is not None and _sc_ok(in_scope, "1.3.1"):
+        groups: dict[tuple[str, str], list] = {}
+        for c in review:
+            groups.setdefault((c.basis, c.reason), []).append(c)
+        for (basis, reason), cs in groups.items():
+            where = ", ".join(c.locator for c in cs[:10]) + (" …" if len(cs) > 10 else "")
+            if basis == "size":
+                skipped.append(
+                    f"{len(cs)} paragraph(s) look like headings but are not larger than this "
+                    f"document's body text — left unchanged for review rather than restyled "
+                    f"(e.g. “{cs[0].text[:40]}”) [{where}]")
+            else:
+                skipped.append(
+                    f"{len(cs)} bold label paragraph(s) may be section headings — left unchanged "
+                    f"for review because {reason} (e.g. “{cs[0].text[:40]}”) [{where}]")
 
     # Table headers (1.3.1): the first row of every multi-row table gets w:tblHeader,
     # which is exactly what the analyser's HasHeaderRow() checks for.
@@ -1315,6 +1362,11 @@ def _remediate_docx_structure(entries: dict, diffs=None, skipped=None, in_scope=
         skipped.append(f"{bare} form field(s) have no adjacent label text to borrow — "
                        "needs a human/AI-supplied label (routed to review)")
 
+    if promoted_headings:
+        # After the outline pass, so the levels it settled on are the ones that must exist.
+        _ensure_heading_styles(entries, {
+            int(m.group(1)) for st in root.iter(f"{{{W}}}pStyle")
+            if (m := re.fullmatch(r"Heading([1-9])", st.get(val_attr) or ""))})
     if applied:
         entries[name] = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
     return applied
