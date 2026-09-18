@@ -9,7 +9,7 @@ import { createTestRoot, unmountAll } from './testRoots.js'
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 afterEach(unmountAll)
 const applied = autoFixRows(Array.from({ length: 2000 }, (_, i) => ({ file: `doc-${i % 177}.pptx`, rule_id: '2.4.6', after: 'Applied title' })))
-const pending = Array.from({ length: 299 }, (_, i) => ({ id: `pending-${i}`, file: `doc-${i % 177}.pptx`, hasProposal: true, after: 'Proposed title', proposals: [{ proposed_value: 'Proposed title' }], _raw: { corrected_artifact: 'none', decision_version: 0, proposal_snapshot_ids: [`snapshot-${i}`], source_revision: 'source' } }))
+const pending = Array.from({ length: 299 }, (_, i) => ({ id: `pending-${i}`, file: `doc-${i % 177}.pptx`, hasProposal: true, after: 'Proposed title', proposals: [{ proposed_value: 'Proposed title' }], _raw: { corrected_artifact: 'none', proposal_digest: 'digest-test', decision_version: 0, proposal_snapshot_ids: [`snapshot-${i}`], source_revision: 'source' } }))
 const manual = Array.from({ length: 47 }, (_, i) => ({ id: `manual-${i}`, file: `doc-${i}.pptx`, title: 'Manual work' }))
 const rows = [...pending, ...manual, ...applied]
 it('counts 299 eligible approvals and 47 manual items across 177 documents, excluding 2000 inspection rows', async () => {

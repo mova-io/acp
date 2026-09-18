@@ -15,10 +15,12 @@ const FILE = 'synthetic-bell.docx'
 const STALE = 'This suggestion or its document changed after you opened it. Review the current version, then approve again.'
 const SHA_A = 'a'.repeat(64)   // the corrected copy on screen
 const SHA_C = 'c'.repeat(64)   // the corrected copy after another approved write
+const DIG_A = 'digest-A'        // opaque server digest of version A's reviewable content
+const DIG_B = 'digest-B'
 const rowA = { id: 'bell-a', scan_id: 'scan-bell', file: FILE, rule_id: '2.4.4', rule_name: 'Link purpose', status: 'pending',
-  decision_version: 5, source_revision: 'rev-A', proposal_snapshot_ids: ['snap-A1'], finding_count: 1, corrected_artifact: SHA_A,
+  decision_version: 5, source_revision: 'rev-A', proposal_snapshot_ids: ['snap-A1'], finding_count: 1, corrected_artifact: SHA_A, proposal_digest: DIG_A,
   proposals: [{ locator: 'docx:link:1', before: 'click here', proposed_value: 'Read the synthetic summary', source: 'AI' }] }
-const rowB = { ...rowA, source_revision: 'rev-B', proposal_snapshot_ids: ['snap-B1'],
+const rowB = { ...rowA, source_revision: 'rev-B', proposal_snapshot_ids: ['snap-B1'], proposal_digest: DIG_B,
   proposals: [{ locator: 'docx:link:1', before: 'click here', proposed_value: 'Open the synthetic quarterly summary', source: 'AI' }] }
 
 function server(current) {
@@ -31,13 +33,16 @@ function server(current) {
       s.puts.push({ url: u, method: opts.method, body })
       if (s.fail) return s.fail(json)
       if (body.status === 'approved' && (body.expected_source_revision == null || body.expected_proposal_snapshot_ids == null
-          || body.expected_corrected_sha256 == null))
+          || body.expected_corrected_sha256 == null || body.expected_proposal_digest == null))
         return json({ code: 'viewed_version_required', message: 'Refresh this suggestion before approving it.' }, 409)
       if (body.expected_source_revision != null && (body.expected_source_revision !== s.current.source_revision
           || JSON.stringify(body.expected_proposal_snapshot_ids) !== JSON.stringify(s.current.proposal_snapshot_ids)
-          || (body.expected_corrected_sha256 != null && body.expected_corrected_sha256 !== s.current.corrected_artifact)))
+          || (body.expected_corrected_sha256 != null && body.expected_corrected_sha256 !== s.current.corrected_artifact)
+          || (body.expected_proposal_digest != null && body.expected_proposal_digest !== s.current.proposal_digest)))
         return json({ code: 'stale_viewed_version', message: STALE }, 409)
-      return json({ ...s.current, status: body.status })
+      // Recorded: the row moves on; a held approval is re-bound, so it is no longer flagged.
+      s.current = { ...s.current, status: body.status, approval_recheck_required: false }
+      return json(s.current)
     }
     if (/\/hitl\/queue(\?|$)/.test(u) && (!opts.method || opts.method === 'GET')) { s.lists += 1; return json([s.current]) }
     return json([])
@@ -72,7 +77,21 @@ describe('HitlBell — approvals carry the VIEWED version', () => {
     expect(srv.puts[0].method).toBe('PUT')
     expect(srv.puts[0].url).toMatch(/\/hitl\/queue\/bell-a$/)
     expect(srv.puts[0].body).toMatchObject({ status: 'approved', approval_scope: 'single', expected_version: 5,
-      expected_source_revision: 'rev-A', expected_proposal_snapshot_ids: ['snap-A1'], expected_corrected_sha256: SHA_A })
+      expected_source_revision: 'rev-A', expected_proposal_snapshot_ids: ['snap-A1'], expected_corrected_sha256: SHA_A,
+      expected_proposal_digest: DIG_A })
+  })
+
+  it('F5: the proposal was refreshed in place after the queue loaded: the VIEWED digest is sent, the 409 stated, no retry', async () => {
+    const srv = server(rowA)
+    await openCard(srv)
+    srv.current = { ...rowA, proposal_digest: DIG_B }
+    await click(approveButton())
+    await settle(150)
+    expect(srv.puts).toHaveLength(1)
+    expect(srv.puts[0].body).toMatchObject({ approval_scope: 'single', expected_proposal_digest: DIG_A })
+    expect(document.querySelector('.hitlbell-viewed-version[role="alert"]')?.textContent).toContain(STALE)
+    await settle(300)
+    expect(srv.puts).toHaveLength(1)
   })
 
   it('another approved write changed the corrected copy after the queue loaded: the VIEWED sha is sent, the 409 stated, no retry', async () => {
@@ -98,7 +117,8 @@ describe('HitlBell — approvals carry the VIEWED version', () => {
     // The bell counts it as needing a decision, and its dropdown says why.
     await act(async () => { document.querySelector('.hitlbell-btn').click() })
     expect(document.querySelector('.hitlbell-badge')?.textContent).toBe('1')
-    expect(document.querySelector('.hitlbell-item-why')?.textContent).toMatch(/Approved earlier, changed since · review and approve again/)
+    expect(document.querySelector('.hitlbell-item-why')?.textContent).toBe('Approved earlier · version needs confirmation · review and approve again')
+    expect(document.body.textContent).not.toMatch(/changed since|then changed/)
     await act(async () => { window.dispatchEvent(new Event('acp:open-inbox')) })
     await settle()
     const header = [...document.querySelectorAll('.rc-item button')].find(b => b.textContent.includes(FILE))
@@ -111,6 +131,31 @@ describe('HitlBell — approvals carry the VIEWED version', () => {
     expect(srv.puts[0].body).toMatchObject({ status: 'approved', approval_scope: 'single', expected_version: 5,
       expected_source_revision: 'rev-A', expected_proposal_snapshot_ids: ['snap-A1'], expected_corrected_sha256: SHA_A })
     await settle(300)
+    expect(srv.puts).toHaveLength(1)
+  })
+
+  it('F5: in the Review Center a HELD row\'s action reads "Review and approve again"; one click sends ONE single PUT with the full binding and the recorded values, the flag clears, and the row leaves the queue', async () => {
+    const held = { ...rowA, status: 'approved', applied: null, approval_recheck_required: true, approved_value: 'Edited earlier text',
+      proposals: [{ ...rowA.proposals[0], approved_value: 'Edited earlier text' }] }
+    const srv = server(held)
+    await openCard(srv)
+    const block = document.querySelector('.rc-reapprove')
+    expect(block, document.body.textContent.slice(0, 400)).toBeTruthy()
+    expect(block.textContent).toContain('Approved earlier · version needs confirmation')
+    expect(block.textContent).toContain('Approves: “Edited earlier text”')
+    expect(document.querySelector('.rc-item-reason').textContent).toContain('Approved earlier · version needs confirmation')
+    const again = [...block.querySelectorAll('button')].find(b => b.textContent === 'Review and approve again')
+    await click(again)
+    await settle(150)
+    expect(srv.puts).toHaveLength(1)
+    expect(srv.puts[0].body).toMatchObject({ status: 'approved', approval_scope: 'single', expected_version: 5,
+      expected_source_revision: 'rev-A', expected_proposal_snapshot_ids: ['snap-A1'], expected_corrected_sha256: SHA_A,
+      expected_proposal_digest: DIG_A, approved_value: 'Edited earlier text', approved_values: ['Edited earlier text'], resolution: null })
+    expect(srv.current.approval_recheck_required).toBe(false)
+    // Re-read: no longer held, no longer pending — nothing left to click, nothing re-sent.
+    await settle(300)
+    expect(document.querySelector('.rc-reapprove')).toBeNull()
+    expect(document.querySelector('.hitlbell-badge')).toBeNull()
     expect(srv.puts).toHaveLength(1)
   })
 

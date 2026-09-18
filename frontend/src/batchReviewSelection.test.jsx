@@ -7,7 +7,7 @@ import { batchDecision, exclusionReason, snapshotFinding, selectionProblem } fro
 afterEach(unmountAll)
 const finding = (id, overrides = {}) => ({ id, file: `${String(id).padStart(3, '0')}.docx`, scanId: 'scan', ruleId: '1.1.1', hasProposal: true,
   after: `draft ${id}`, proposals: [{ proposed_value: `draft ${id}`, before: 'old' }],
-  _raw: { decision_version: 2, proposal_snapshot_ids: [`snapshot-${id}`], source_revision: 'source-1', corrected_artifact: 'none' }, ...overrides })
+  _raw: { decision_version: 2, proposal_snapshot_ids: [`snapshot-${id}`], source_revision: 'source-1', corrected_artifact: 'none', proposal_digest: 'digest-test' }, ...overrides })
 const click = async el => act(async () => el.dispatchEvent(new MouseEvent('click', { bubbles: true })))
 async function mount(props) {
   const { container, root } = createTestRoot()
@@ -167,7 +167,7 @@ it('explains a target-replaced exclusion when it is the reason nothing can be ap
 // D -> F phase 5: a frozen selection names the corrected copy it was made against.
 describe('the frozen selection binds the corrected artifact', () => {
   const sha = (c) => c.repeat(64)
-  const withArtifact = (artifact) => finding(7, { _raw: { decision_version: 2, proposal_snapshot_ids: ['snapshot-7'], source_revision: 'source-1', corrected_artifact: artifact } })
+  const withArtifact = (artifact, digest = 'dig-1') => finding(7, { _raw: { decision_version: 2, proposal_snapshot_ids: ['snapshot-7'], source_revision: 'source-1', corrected_artifact: artifact, proposal_digest: digest } })
   it('freezes it into the decision verbatim (a hash, or "none")', () => {
     expect(batchDecision(snapshotFinding(withArtifact(sha('a')))).expectedCorrectedSha256).toBe(sha('a'))
     expect(batchDecision(snapshotFinding(withArtifact('none'))).expectedCorrectedSha256).toBe('none')
@@ -176,6 +176,14 @@ describe('the frozen selection binds the corrected artifact', () => {
     const entry = snapshotFinding(withArtifact(sha('a')))
     expect(selectionProblem(entry, [withArtifact(sha('a'))], {}, {})).toBeNull()
     expect(selectionProblem(entry, [withArtifact(sha('c'))], {}, {})).toBe('Proposal or source changed — select again')
+  })
+  it('freezes the proposal digest too: a refreshed proposal invalidates the entry, and a row without it is never batched', () => {
+    const entry = snapshotFinding(withArtifact(sha('a'), 'dig-1'))
+    expect(batchDecision(entry).expectedProposalDigest).toBe('dig-1')
+    expect(selectionProblem(entry, [withArtifact(sha('a'), 'dig-2')], {}, {})).toBe('Proposal or source changed — select again')
+    const noDigest = withArtifact(sha('a'), null)
+    expect(exclusionReason(noDigest)).toBe('Version unavailable — review individually')
+    expect(() => batchDecision(snapshotFinding(noDigest))).toThrow(/Version unavailable/)
   })
   it('a row without it is never offered for, or sent in, a batch', () => {
     const { corrected_artifact, ...raw } = withArtifact(sha('a'))._raw // eslint-disable-line no-unused-vars

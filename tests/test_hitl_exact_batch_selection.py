@@ -24,7 +24,8 @@ def expectations(st, item_id):
                 request_id="frozen-batch-1", expected_version=row.get("decision_version") or 0,
                 expected_proposal_snapshot_ids=row["proposal_snapshot_ids"],
                 expected_source_revision=st.stage_snapshot_id(row["scan_id"]),
-                expected_corrected_sha256=st.corrected_artifact_token(row["scan_id"], row["file"]))
+                expected_corrected_sha256=st.corrected_artifact_token(row["scan_id"], row["file"]),
+                expected_proposal_digest=st.proposal_digest(row))
 
 
 @pytest.mark.parametrize("change", ["snapshot", "source", "value", "locator", "missing_slot"])
@@ -115,6 +116,37 @@ def test_an_unchanged_frozen_batch_binds_its_copy_and_replays_idempotently(decis
     assert update(item_id, body, request) == first
     assert len(st.list_decisions("s1")) == 1
     assert st.approved_write_hold(st.get_hitl_item(item_id)) is None
+
+
+def test_a_frozen_batch_is_refused_when_the_rows_content_changed_under_the_same_snapshots(decision):
+    """The viewed-content binding covers batches too. Snapshot ids are unchanged and the change is
+    to a field outside the snapshot content keys (the picture shown), so only the proposal digest
+    can see it. Nothing is recorded."""
+    import json
+    st, item_id, update, Body, request = decision
+    frozen = expectations(st, item_id)
+    row = st.get_hitl_item(item_id)
+    row["proposals"][0]["thumb"] = "data:image/png;base64,c3ludGhldGljLW90aGVyLWltYWdl"
+    with st._db.cursor() as cur:
+        st._db.execute(cur, "UPDATE hitl_queue SET proposals=%s WHERE id=%s",
+                       (json.dumps(row["proposals"]), item_id))
+    assert st.get_hitl_item(item_id)["proposal_snapshot_ids"] == frozen["expected_proposal_snapshot_ids"]
+    with pytest.raises(Exception) as exc:
+        update(item_id, Body(**frozen), request)
+    assert getattr(exc.value, "status_code", None) == 409
+    assert st.get_hitl_item(item_id)["status"] == "pending"
+    assert st.list_decisions("s1") == []
+    assert all(j["type"] != "apply_approved_values" for j in st.list_jobs())
+
+
+def test_a_frozen_batch_without_the_content_digest_it_saw_records_nothing(decision):
+    import json
+    st, item_id, update, Body, request = decision
+    frozen = {**expectations(st, item_id), "expected_proposal_digest": None}
+    response = update(item_id, Body(**frozen), request)
+    assert response.status_code == 409
+    assert json.loads(response.body)["code"] == "viewed_version_required"
+    assert st.list_decisions("s1") == []
 
 
 def test_frozen_batch_cannot_cross_owner_boundary(decision):

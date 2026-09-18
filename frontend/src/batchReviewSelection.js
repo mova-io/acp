@@ -26,7 +26,9 @@ export function exclusionReason(f, decisions = {}, drafts = {}) {
     || f._raw.proposal_snapshot_ids.some(id => !id) || f._raw?.source_revision == null || f._raw?.decision_version == null
     // The corrected copy the selection was made against (a sha256, or "none"): frozen with the rest, and
     // required — a batch that cannot name it is not sent (D -> F, phase 5).
-    || typeof f._raw?.corrected_artifact !== 'string' || !f._raw.corrected_artifact.trim())
+    || typeof f._raw?.corrected_artifact !== 'string' || !f._raw.corrected_artifact.trim()
+    // …and the reviewable content it was made against (D -> F phase 6).
+    || typeof f._raw?.proposal_digest !== 'string' || !f._raw.proposal_digest.trim())
     return 'Version unavailable — review individually'
   return null
 }
@@ -34,7 +36,7 @@ export function exclusionReason(f, decisions = {}, drafts = {}) {
 export function selectionFingerprint(f) {
   return JSON.stringify([f.id, f.scanId, f.file, f.ruleId || f.rule_id,
     f.before, f.after, f.proposals || f._raw?.proposals,
-    f._raw?.decision_version, f._raw?.proposal_snapshot_ids, f._raw?.source_revision, f._raw?.corrected_artifact])
+    f._raw?.decision_version, f._raw?.proposal_snapshot_ids, f._raw?.source_revision, f._raw?.corrected_artifact, f._raw?.proposal_digest])
 }
 export function snapshotFinding(f) {
   return { finding: JSON.parse(JSON.stringify(f)), fingerprint: selectionFingerprint(f),
@@ -56,12 +58,14 @@ export function batchDecision(entry) {
       { status: 409, changes: 'none' })
   }
   // Never send a batch approval that cannot name the corrected copy it was frozen against.
-  if (typeof f._raw?.corrected_artifact !== 'string' || !f._raw.corrected_artifact.trim()) {
+  if (typeof f._raw?.corrected_artifact !== 'string' || !f._raw.corrected_artifact.trim()
+      || typeof f._raw?.proposal_digest !== 'string' || !f._raw.proposal_digest.trim()) {
     throw Object.assign(new Error('Version unavailable — review individually'), { status: 409, changes: 'none' })
   }
   return { state: 'accepted', value: proposalValues(f)[0], approvedValues: proposalValues(f),
     requestId: entry.requestId, expectedVersion: f._raw.decision_version,
     expectedProposalSnapshotIds: [...f._raw.proposal_snapshot_ids], expectedSourceRevision: f._raw.source_revision,
     expectedCorrectedSha256: f._raw.corrected_artifact,
+    expectedProposalDigest: f._raw.proposal_digest,
     selectionFingerprint: entry.fingerprint }
 }

@@ -13,6 +13,9 @@
 //   decision_version       — the row's decision counter
 //   corrected_artifact     — the file's current corrected-copy sha256, or the literal "none" when there is
 //                            no corrected copy yet; the server always fills it (D -> F, phase 5)
+//   proposal_digest        — an OPAQUE server digest of the row's reviewable content (every proposal and
+//                            evidence entry except the reviewer-owned approved_value); echoed, never
+//                            recomputed (D -> F, phase 6)
 // Remediate's inbox rows carry the server row as `_raw`; FileDrawer/HitlBell hold server rows as is.
 
 // `target_removed` is the same shape of refusal from the reviewer's side: the row they were looking at
@@ -50,6 +53,8 @@ export function viewedApprovalBinding(row) {
   if (typeof revision !== 'string' || !revision.trim()) return null
   const artifact = raw.corrected_artifact
   if (typeof artifact !== 'string' || !artifact.trim()) return null
+  const digest = raw.proposal_digest
+  if (typeof digest !== 'string' || !digest.trim()) return null
   const snapshots = raw.proposal_snapshot_ids
   if (snapshots != null && !Array.isArray(snapshots)) return null
   return {
@@ -57,6 +62,7 @@ export function viewedApprovalBinding(row) {
     expectedSourceRevision: revision,
     expectedProposalSnapshotIds: Array.isArray(snapshots) ? [...snapshots] : [],
     expectedCorrectedSha256: artifact,
+    expectedProposalDigest: digest,
   }
 }
 
@@ -65,8 +71,8 @@ export function viewedApprovalBinding(row) {
 export function viewedBindingKey(row) {
   const raw = serverRow(row) || {}
   return JSON.stringify([raw.id ?? null, raw.decision_version ?? null, raw.source_revision ?? null,
-    raw.proposal_snapshot_ids ?? null, raw.corrected_artifact ?? null, raw.status ?? null,
-    raw.approval_recheck_required ?? null,
+    raw.proposal_snapshot_ids ?? null, raw.corrected_artifact ?? null, raw.proposal_digest ?? null, raw.status ?? null,
+    raw.approval_recheck_required ?? null, raw.approval_recheck_reason ?? null,
     (Array.isArray(raw.proposals) ? raw.proposals : []).map((p) => [p?.locator ?? null, p?.proposed_value ?? null])])
 }
 
@@ -129,15 +135,66 @@ export const LEGACY_STALE_MESSAGE =
   'This item changed after you opened or selected it — its document, corrected copy or suggestion moved on — so '
   + 'nothing was recorded. Review the current version, then decide again.'
 
-// An approval on record that the writer is HOLDING (listed with approval_recheck_required): it was given
-// against a version this document or suggestion has since moved on from, so nothing was written from it.
+// An approval on record that the writer is HOLDING (listed with approval_recheck_required). The flag says
+// only that ACP cannot confirm the approval still matches the current version — for every legacy approval
+// recorded before bindings existed (binding_missing) nothing changed at all — so a CHANGE is stated only
+// when the server's `approval_recheck_reason` names one (heldExplanation).
 // One 'single' re-approval of the CURRENT row re-binds it on the server.
 export const needsReapproval = (row) => {
   const raw = serverRow(row) || {}
   return raw.approval_recheck_required === true && String(raw.status || '').toLowerCase() === 'approved'
 }
+export const HELD_LABEL = 'Approved earlier · version needs confirmation'
 export const REAPPROVE_ACTION = 'Review and approve again'
 export const REAPPROVE_EXPLANATION =
-  'Approved earlier, then changed: the document, its corrected copy or this suggestion has moved on since that approval, '
-  + 'so ACP is holding it and has written nothing from it. Review the current version, then approve it again — '
+  'An approval for this is on record, but ACP cannot confirm it still matches the current version of this document and '
+  + 'suggestion, so it is holding it and has written nothing from it. Review the current version, then approve it again — '
   + 'your new approval replaces the held one.'
+
+// Why a held approval is held, in words — a change is claimed ONLY for a server reason that means one
+// (D -> F phase 6). binding_missing, an unknown reason and no reason at all get the generic sentence.
+const HELD_CAUSE = {
+  binding_missing: 'The version this approval was given for was not recorded, so ACP cannot confirm it matches the current one.',
+  source_moved: 'The document’s assessed source has changed since this approval was given.',
+  artifact_moved: 'The saved corrected copy of this document has changed since this approval was given.',
+  values_changed: 'The values on record no longer match the ones that were approved.',
+  proposals_superseded: 'This suggestion has been replaced since it was approved.',
+}
+export function heldExplanation(row) {
+  const reason = (serverRow(row) || {}).approval_recheck_reason
+  const cause = Object.prototype.hasOwnProperty.call(HELD_CAUSE, reason) ? HELD_CAUSE[reason] : null
+  if (!cause) return REAPPROVE_EXPLANATION
+  return `${cause} ACP is holding the approval and has written nothing from it. Review the current version, then `
+    + 'approve it again — your new approval replaces the held one.'
+}
+
+// The values a re-approval of a held row approves: exactly what the writer would write for it — each
+// instance's recorded approved value, else (for a proposal row that is not a described-image obligation)
+// its current draft. Mirrors the server's value digest (api/store.py _approved_value_digest), so the new
+// approval's digest is the one the writer will check, and re-approving cannot itself cause a value hold.
+export function reapprovalValues(row) {
+  const raw = serverRow(row) || {}
+  const proposals = Array.isArray(raw.proposals) ? raw.proposals : []
+  const instances = proposals.length ? proposals : (Array.isArray(raw.evidence) ? raw.evidence : [])
+  const draftFallback = (raw.resolution || null) !== 'described_not_replaced'
+  return instances.filter((i) => i && typeof i === 'object').map((i) => {
+    const approved = String(i.approved_value || '').trim()
+    return approved || (proposals.length && draftFallback ? String(i.proposed_value || '').trim() : '')
+  })
+}
+
+// The whole request for re-approving a held row, or null when the row cannot name its version (the
+// caller then refuses and refreshes, as for any unbound approval).
+export function reapprovalRequest(row) {
+  const raw = serverRow(row) || {}
+  const bound = viewedDecisionOptions(row, 'approved')
+  if (!raw.id || !bound) return null
+  const values = reapprovalValues(row)
+  const resolution = raw.resolution || null
+  return {
+    id: raw.id,
+    approvedValue: values.find(Boolean) || raw.approved_value || null,
+    options: { ...bound, approvedValues: values.length ? values : null, resolution },
+    values,
+  }
+}

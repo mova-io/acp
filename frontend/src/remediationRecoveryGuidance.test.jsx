@@ -19,7 +19,7 @@ it('does not offer another recovery action for admitted or verified work', () =>
   expect(remediationRecoveryGuidance({ ...row, validated: true })).toBeNull()
 })
 it('shows the saved human decision reason before generic lineage guidance', () => {
-  const result = remediationRecoveryGuidance({ ...row, _raw: { proposal_snapshot_ids: ['snapshot'], source_revision: 1, decision_version: 1, corrected_artifact: 'none' }, automaticDisposition: { responsibility: 'human', reason: 'The saved policy requires review of this criterion.' } })
+  const result = remediationRecoveryGuidance({ ...row, _raw: { proposal_snapshot_ids: ['snapshot'], source_revision: 1, decision_version: 1, corrected_artifact: 'none', proposal_digest: 'digest-test' }, automaticDisposition: { responsibility: 'human', reason: 'The saved policy requires review of this criterion.' } })
   expect(result.reason).toBe('The saved policy requires review of this criterion.')
 })
 it('opens the real remediation plan from the selected item', async () => {

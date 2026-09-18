@@ -41,7 +41,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true
 // The live-activity canvas (mounted once a run snapshot exists) measures itself; jsdom has no observer.
 globalThis.ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} }
 
-const base = { scan_id: SCAN, file: FILE, decision_version: 1, source_revision: 'src', corrected_artifact: 'none' }
+const base = { scan_id: SCAN, file: FILE, decision_version: 1, source_revision: 'src', corrected_artifact: 'none', proposal_digest: 'digest-test' }
 // 1.4.3 — verified, automatic policy on, and NO admission marker (the row that got the banner).
 const contrast = { ...base, id: 'item-143', rule_id: '1.4.3', rule_name: 'Text contrast', status: 'approved', applied: 1, validated: true,
   approved_value: '#595959', proposals: [{ locator: 'docx:run:4', before: '#9A9A9A', proposed_value: '#595959', approved_value: '#595959', source: 'deterministic' }] }

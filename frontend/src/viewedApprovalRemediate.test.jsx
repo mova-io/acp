@@ -25,13 +25,15 @@ const FILE = 'synthetic-viewed.docx'
 const STALE = 'This suggestion or its document changed after you opened it. Review the current version, then approve again.'
 const SHA_A = 'a'.repeat(64)   // the corrected copy on screen
 const SHA_C = 'c'.repeat(64)   // the corrected copy after another approved write
+const DIG_A = 'digest-A'        // opaque server digest of version A's reviewable content
+const DIG_B = 'digest-B'
 
 // One pending link-text row. Version A is what the page loads; version B is what a re-assessment
 // produces while the reviewer is looking at A.
 const rowA = { id: 'item-a', scan_id: SCAN, file: FILE, rule_id: '2.4.4', rule_name: 'Link purpose', status: 'pending',
-  decision_version: 3, source_revision: 'rev-A', proposal_snapshot_ids: ['snap-A1'], finding_count: 1, corrected_artifact: SHA_A,
+  decision_version: 3, source_revision: 'rev-A', proposal_snapshot_ids: ['snap-A1'], finding_count: 1, corrected_artifact: SHA_A, proposal_digest: DIG_A,
   proposals: [{ locator: 'docx:link:1', before: 'click here', proposed_value: 'Read the synthetic summary', source: 'AI' }] }
-const rowB = { ...rowA, source_revision: 'rev-B', proposal_snapshot_ids: ['snap-B1'],
+const rowB = { ...rowA, source_revision: 'rev-B', proposal_snapshot_ids: ['snap-B1'], proposal_digest: DIG_B,
   proposals: [{ locator: 'docx:link:1', before: 'click here', proposed_value: 'Open the synthetic quarterly summary', source: 'AI' }] }
 
 // A synthetic server. `current` is the row the server holds now; `nested` answers the 409 the way a
@@ -46,11 +48,12 @@ function server({ current, nested = false }) {
       s.puts.push({ url: u, method: opts.method, body })
       const refuse = (code, message) => json(nested ? { detail: { code, message } } : { code, message, detail: code }, 409)
       if (body.status === 'approved' && (body.expected_source_revision == null || body.expected_proposal_snapshot_ids == null
-          || body.expected_corrected_sha256 == null))
+          || body.expected_corrected_sha256 == null || body.expected_proposal_digest == null))
         return refuse('viewed_version_required', 'Refresh this suggestion before approving it.')
       if (body.expected_source_revision != null && (body.expected_source_revision !== s.current.source_revision
           || JSON.stringify(body.expected_proposal_snapshot_ids) !== JSON.stringify(s.current.proposal_snapshot_ids)
-          || (body.expected_corrected_sha256 != null && body.expected_corrected_sha256 !== s.current.corrected_artifact))) {
+          || (body.expected_corrected_sha256 != null && body.expected_corrected_sha256 !== s.current.corrected_artifact)
+          || (body.expected_proposal_digest != null && body.expected_proposal_digest !== s.current.proposal_digest))) {
         // D's contract: a frozen batch (no approval_scope) keeps the legacy HTTPException detail string.
         if (body.approval_scope !== 'single') return json({ detail: 'stale source revision' }, 409)
         return refuse('stale_viewed_version', STALE)
@@ -103,7 +106,60 @@ describe('Remediate — single approvals carry the VIEWED version', () => {
     expect(put.method).toBe('PUT')
     expect(put.url).toMatch(/\/hitl\/queue\/item-a$/)
     expect(put.body).toMatchObject({ status: 'approved', approval_scope: 'single', expected_version: 3,
+      expected_source_revision: 'rev-A', expected_proposal_snapshot_ids: ['snap-A1'], expected_corrected_sha256: SHA_A,
+      expected_proposal_digest: DIG_A })
+  })
+
+  it('F5: the proposal was refreshed in place between view and click: the body carries the VIEWED digest, the 409 is shown, no retry', async () => {
+    const srv = server({ current: rowA })
+    const c = await mount(srv)
+    await open(c, 'item-a')
+    // Same revision, snapshots and corrected copy — only the reviewable content (and so its digest) moved.
+    srv.current = { ...rowA, proposal_digest: DIG_B,
+      proposals: [{ ...rowA.proposals[0], proposed_value: 'Open the synthetic quarterly summary' }] }
+    await click(button(pane(c), 'Apply this fix'))
+    await settle(150)
+    expect(srv.puts).toHaveLength(1)
+    expect(srv.puts[0].body).toMatchObject({ approval_scope: 'single', expected_proposal_digest: DIG_A,
       expected_source_revision: 'rev-A', expected_proposal_snapshot_ids: ['snap-A1'], expected_corrected_sha256: SHA_A })
+    expect(c.textContent).toContain(STALE)
+    expect(pane(c).textContent).toContain('Open the synthetic quarterly summary')
+    await settle(300)
+    expect(srv.puts).toHaveLength(1)
+    await click(button(pane(c), 'Apply this fix'))
+    await settle()
+    expect(srv.puts).toHaveLength(2)
+    expect(srv.puts[1].body).toMatchObject({ approval_scope: 'single', expected_proposal_digest: DIG_B })
+  })
+
+  it('F5: a stale frozen batch after a proposal refresh is refused honestly (legacy "stale proposal selection"), nothing recorded, no retry', async () => {
+    const srv = server({ current: rowA })
+    const c = await mount(srv)
+    srv.current = { ...rowA, proposal_digest: DIG_B }
+    const all = [...c.querySelectorAll('button')].find(b => /^Approve all ready/.test(b.textContent.trim()))
+    await click(all)
+    await settle()
+    const confirm = [...c.querySelectorAll('button')].find(b => /^Confirm approval of/.test(b.textContent.trim()))
+    if (confirm) { await click(confirm) }
+    await settle(150)
+    expect(srv.puts).toHaveLength(1)
+    expect(srv.puts[0].body).toMatchObject({ status: 'approved', approval_scope: null, expected_proposal_digest: DIG_A })
+    expect(srv.current.status).toBe('pending')
+    expect(c.textContent).toContain('so nothing was recorded')
+    expect(c.textContent).not.toContain('stale proposal selection')
+    await settle(300)
+    expect(srv.puts).toHaveLength(1)
+  })
+
+  it('F5: a held approval whose corrected copy moved says so (server reason artifact_moved), and only then', async () => {
+    const held = { ...rowA, status: 'approved', applied: null, validated: false, approval_recheck_required: true,
+      approval_recheck_reason: 'artifact_moved', approved_value: 'Read the synthetic summary', decision_version: 4 }
+    const srv = server({ current: held })
+    const c = await mount(srv)
+    await open(c, 'item-a')
+    const recovery = pane(c).querySelector('[aria-label="What this item needs"]')
+    expect(recovery.textContent).toContain('Approved earlier · version needs confirmation')
+    expect(recovery.textContent).toContain('The saved corrected copy of this document has changed since this approval was given.')
   })
 
   it('another approved write changed the corrected copy: the body carries the VIEWED sha, the 409 is shown, and nothing retries', async () => {
@@ -204,7 +260,7 @@ describe('Remediate — single approvals carry the VIEWED version', () => {
     expect(srv.puts).toHaveLength(1)
     expect(srv.puts[0].body).toMatchObject({ status: 'approved', approval_scope: null, expected_version: 3,
       expected_source_revision: 'rev-A', expected_proposal_snapshot_ids: ['snap-A1'], expected_corrected_sha256: SHA_A,
-      approved_values: ['Read the synthetic summary'] })
+      expected_proposal_digest: DIG_A, approved_values: ['Read the synthetic summary'] })
   })
 
   it('a stale frozen batch (another approved write changed the corrected copy) is refused honestly: nothing recorded, the selection refreshes, no retry', async () => {
@@ -241,26 +297,37 @@ describe('Remediate — single approvals carry the VIEWED version', () => {
     expect(srv.puts).toHaveLength(0)
   })
 
-  it('a HELD approval (approval_recheck_required) offers "Review and approve again": one PUT with the full current binding, then the control is spent', async () => {
+  // F5: the flag proves only that the version needs confirmation (every legacy approval is held with
+  // binding_missing), so the copy never claims a change — and the action sits in the recovery section,
+  // beside the sentence that asks for it.
+  it.each([
+    ['a legacy held approval, drafts accepted', {}, ['Read the synthetic summary']],
+    ['a held approval whose value was edited earlier', { proposals: [{ ...rowA.proposals[0], approved_value: 'Edited earlier text' }] }, ['Edited earlier text']],
+  ])('HELD (%s, binding_missing): "Review and approve again" in the recovery section sends ONE single PUT with the full current binding and exactly what the writer would write; the flag clears; no loop', async (_label, extra, values) => {
     const held = { ...rowA, status: 'approved', applied: null, validated: false, approval_recheck_required: true,
-      approved_value: 'Read the synthetic summary', approved_source_revision: 'rev-0', decision_version: 4 }
+      approval_recheck_reason: 'binding_missing', approved_value: values[0], decision_version: 4, ...extra }
     const srv = server({ current: held })
     const c = await mount(srv)
     await open(c, 'item-a')
-    const again = button(pane(c), 'Review and approve again')
-    expect(again, pane(c).textContent.slice(0, 400)).toBeTruthy()
-    expect(pane(c).textContent).toMatch(/Approved earlier, then changed/)
+    const recovery = pane(c).querySelector('[aria-label="What this item needs"]')
+    expect(recovery, pane(c).textContent.slice(0, 400)).toBeTruthy()
+    expect(recovery.textContent).toContain('Approved earlier · version needs confirmation')
+    expect(recovery.textContent).toContain(`Approves: “${values[0]}”`)
+    // Truthful: nothing claims the document or copy changed.
+    expect(pane(c).textContent).not.toMatch(/changed since|then changed|has moved on/)
+    const again = button(recovery, 'Review and approve again')
+    expect(again).toBeTruthy()
     await click(again)
-    await settle(120)
+    await settle(150)
     expect(srv.puts).toHaveLength(1)
     expect(srv.puts[0].body).toMatchObject({ status: 'approved', approval_scope: 'single', expected_version: 4,
       expected_source_revision: 'rev-A', expected_proposal_snapshot_ids: ['snap-A1'], expected_corrected_sha256: SHA_A,
-      approved_value: 'Read the synthetic summary', resolution: null })
-    // Re-bound on the server; the page does not offer (or send) it again.
+      expected_proposal_digest: DIG_A, approved_value: values[0], approved_values: values, resolution: null })
+    // The server cleared the flag; the queue re-read shows it, and the control is gone — nothing to repeat.
+    expect(srv.current.approval_recheck_required).toBe(false)
     await settle(300)
+    expect(button(pane(c) || c, 'Review and approve again')).toBeFalsy()
     expect(srv.puts).toHaveLength(1)
-    const still = button(pane(c) || c, 'Review and approve again')
-    expect(!still || still.disabled).toBe(true)
   })
 
   it('the retry-write refusal for a moved corrected copy is shown verbatim', async () => {

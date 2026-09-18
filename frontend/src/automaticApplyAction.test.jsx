@@ -6,8 +6,8 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true
 beforeEach(() => { localStorage.clear(); sessionStorage.clear() })
 afterEach(async () => { await unmountAll() })
 const policy={enabled:true,supported:true,run_id:'run',source_revision:'source'}
-const proposal={id:'proposal',file:'a.docx',status:'pending',hasProposal:true,after:'Alternative text',proposals:[{proposed_value:'Alternative text',source:'AI',model:'vision',model_call_id:'call'}],_raw:{corrected_artifact:'none',finding_count:1,proposal_snapshot_ids:['snapshot'],source_revision:'source',decision_version:0}}
-const admitted=state=>({...proposal,_raw:{corrected_artifact:'none',...proposal._raw,automatic_approval:{run_id:'run',source_revision:'source',state}}})
+const proposal={id:'proposal',file:'a.docx',status:'pending',hasProposal:true,after:'Alternative text',proposals:[{proposed_value:'Alternative text',source:'AI',model:'vision',model_call_id:'call'}],_raw:{corrected_artifact:'none',proposal_digest:'digest-test',finding_count:1,proposal_snapshot_ids:['snapshot'],source_revision:'source',decision_version:0}}
+const admitted=state=>({...proposal,_raw:{corrected_artifact:'none',proposal_digest:'digest-test',...proposal._raw,automatic_approval:{run_id:'run',source_revision:'source',state}}})
 async function mount(row,overrides={}) {
  const {container,root}=createTestRoot(),onDecide=vi.fn(async()=>{})
  const render=async next=>act(async()=>root.render(<RemediationInbox queue={[next]} initialTab="all" autoApprove automaticApprovalPolicy={policy} onDecide={onDecide} {...overrides}/>))

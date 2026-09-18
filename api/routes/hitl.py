@@ -49,6 +49,9 @@ class HitlUpdate(BaseModel):
     # The corrected ARTIFACT the reviewer saw: the row's `corrected_artifact` exactly as GET
     # /hitl/queue lists it — the saved copy's sha256, or "none" before any corrected copy exists.
     expected_corrected_sha256: str | None = None
+    # The reviewable CONTENT the reviewer saw: the row's `proposal_digest` exactly as GET
+    # /hitl/queue serves it (Store.proposal_digest — opaque; echoed, never recomputed).
+    expected_proposal_digest: str | None = None
     # "single" — one reviewer's decision on the row on screen: the viewed binding is compared
     # under the row lock and edited values are allowed. Absent (or "batch") with a binding keeps
     # the frozen-batch guard: unedited drafts with complete, current proposal lineage only.
@@ -216,6 +219,9 @@ def hitl_list(request: Request, status: str | None = None, scan_id: str | None =
     owner = getattr(request.state, "user_email", None)
     rows = core.store.list_hitl_queue(status=status, scan_id=scan_id, owner=owner,
                                       include_superseded=include_superseded)
+    # The viewed-content digest, from the STORED row — before serialization shapes it for the
+    # client — so it is exactly what complete_hitl_decision recomputes under the row lock.
+    digests = {row.get("id"): Store.proposal_digest(row) for row in rows}
     # Match the sealed assessment input used by remediation; legacy runs use the scan hash.
     from review_item_kind import serialize_review_item
     rows = [serialize_review_item(row) for row in rows]
@@ -235,6 +241,7 @@ def hitl_list(request: Request, status: str | None = None, scan_id: str | None =
         # a truthiness check on a sha-named field would read it as one.
         row["corrected_artifact"] = ((artifacts.get(sid) or {}).get(row.get("file"))
                                    or core.store.NO_CORRECTED_ARTIFACT)
+        row["proposal_digest"] = digests.get(row.get("id"))
     return rows
 
 
@@ -286,7 +293,8 @@ def hitl_update(item_id: str, body: HitlUpdate, request: Request = None):
     if body.status == "approved" and (
             body.expected_version is None or body.expected_proposal_snapshot_ids is None
             or not str(body.expected_source_revision or "").strip()
-            or not str(body.expected_corrected_sha256 or "").strip()):
+            or not str(body.expected_corrected_sha256 or "").strip()
+            or not str(body.expected_proposal_digest or "").strip()):
         return _approval_conflict(VIEWED_VERSION_REQUIRED)
     viewed = body.approval_scope == "single"
     # ADR 0055: describe-instead-of-replace is the one resolution that is incomplete without
@@ -395,7 +403,8 @@ def hitl_update(item_id: str, body: HitlUpdate, request: Request = None):
             expected_version=body.expected_version,
             expected_proposal_snapshot_ids=body.expected_proposal_snapshot_ids,
             expected_source_revision=body.expected_source_revision,
-            viewed=viewed, expected_corrected_sha256=body.expected_corrected_sha256)
+            viewed=viewed, expected_corrected_sha256=body.expected_corrected_sha256,
+            expected_proposal_digest=body.expected_proposal_digest)
     except ValueError as exc:
         if str(exc) == "viewed version required":
             return _approval_conflict(VIEWED_VERSION_REQUIRED)

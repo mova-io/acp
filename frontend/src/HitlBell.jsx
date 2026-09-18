@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { listAllHitl, updateHitlItem } from './api.js'
 import { SIM } from './sim.js'
-import { REAPPROVE_ACTION, needsReapproval, requestReviewQueueRefresh, viewedDecisionOptions, viewedVersionConflict, viewedVersionMissingError } from './viewedApprovalBinding.js'
+import { HELD_LABEL, REAPPROVE_ACTION, needsReapproval, requestReviewQueueRefresh, viewedDecisionOptions, viewedVersionConflict, viewedVersionMissingError } from './viewedApprovalBinding.js'
 import { metaFor, SEV, sevOf, reasonOf, priorityScore, bellSeverity } from './hitlMeta.js'
 import ReviewCenter from './ReviewCenter.jsx'
 
@@ -155,7 +155,7 @@ export default function HitlBell() {
                   <span className="hitlbell-item-main">
                     <span className="hitlbell-item-file">{it.file || 'document'}</span>
                     <span className="hitlbell-item-rule">{it.rule_name || it.rule_id}</span>
-                    <span className="hitlbell-item-why">{it.reapprove ? `Approved earlier, changed since · ${REAPPROVE_ACTION.toLowerCase()}` : reasonOf(it)}</span>
+                    <span className="hitlbell-item-why">{it.reapprove ? `${HELD_LABEL} · ${REAPPROVE_ACTION.toLowerCase()}` : reasonOf(it)}</span>
                   </span>
                 </button>
               )

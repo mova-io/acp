@@ -1,4 +1,5 @@
 import QualityReviewEvidence, { savedChangeOf } from './QualityReviewEvidence.jsx'
+import { HELD_LABEL, REAPPROVE_ACTION, heldExplanation, needsReapproval, reapprovalValues } from './viewedApprovalBinding.js'
 import { matchesAutomaticReview, automaticReviewResponsibility } from './automaticReviewResponsibility.js'
 import { isPdfStructuralRow, pdfStructuralSummary, proposalsFor, requiresPdfSourceEditing } from './pdfStructuralProposal.js'
 import { automaticReviewQueue } from './automaticReviewQueue.js'
@@ -353,6 +354,9 @@ function targetReplacedCopy(f) {
 function taskLineOf(f, lane, automaticMode = false, decisions = {}) {
   // First, because it is the one state where "your approval is recorded and will not be asked for
   // again" — the sentence every branch below is built on — is not true.
+  // A HELD approval (server flag approval_recheck_required) proves only that ACP cannot confirm the approval
+  // still matches the current version — not that anything changed (legacy approvals carry no binding at all).
+  if (needsReapproval(f)) return `${heldExplanation(f)} Use “${REAPPROVE_ACTION}” in the section above.`
   if (approvalSuperseded(f, decisions)) return 'An approval for this is on record, but the document or the suggestion has changed since it was given, so ACP will not write it into the current version. Review the current suggestion and decide again — this one may need a fresh approval.'
   // Stated before the applied/automatic branches because it is the narrower fact: the approval is
   // recorded AND nothing was written. Saying "already applied" here would claim a write that the
@@ -388,7 +392,27 @@ function taskLineOf(f, lane, automaticMode = false, decisions = {}) {
   }
 }
 
-function DetailPane({ f, decisions, readOnly = false, automaticMode = false, preparingProposals = false, onDecide, onOpenWord, onRecheck, onOpenPlan, onVerifySaved, onRetryApproved, matchingFindings = [], matchingReadyCount = 0, legacyApprovalControls = false, onApplyToMatching, cluster = null, draft = null, onDraftChange, saving = false, error = null, headingRef = null, detailExtra = null, emptyState = null }) {
+// "Review and approve again" for a HELD approval. One click sends one approval; while it is in flight and
+// after it is recorded the control is spent, and the server clears the flag, so the row stops being held
+// and the control disappears on the next queue read — it cannot loop. It shows exactly what it approves.
+function ReapproveHeld({ f, onReapprove, disabled = false }) {
+  const [state, setState] = useState(null)   // null | { busy } | { done } | { error }
+  const values = reapprovalValues(f).filter(Boolean)
+  const run = async () => {
+    setState({ busy: true })
+    try { await onReapprove(f); setState({ done: true }) }
+    catch (e) { setState({ error: e?.message || String(e) }) }
+  }
+  return <div className="reapprove-held">
+    {values.length > 0 && <p className="muted">Approves: {values.map((v) => `“${v}”`).join(' · ')}</p>}
+    <button type="button" className="primary" disabled={disabled || !!state?.busy || !!state?.done} onClick={run}>
+      {state?.busy ? 'Recording approval…' : REAPPROVE_ACTION}</button>
+    {state?.done && <p role="status">Approved again against the current version. Writing and verification remain separate steps.</p>}
+    {state?.error && <p role="alert" className="error">Not approved: {state.error}</p>}
+  </div>
+}
+
+function DetailPane({ f, decisions, readOnly = false, automaticMode = false, preparingProposals = false, onDecide, onOpenWord, onRecheck, onOpenPlan, onVerifySaved, onRetryApproved, onReapprove, matchingFindings = [], matchingReadyCount = 0, legacyApprovalControls = false, onApplyToMatching, cluster = null, draft = null, onDraftChange, saving = false, error = null, headingRef = null, detailExtra = null, emptyState = null }) {
   const [matchingPreviewOpen, setMatchingPreviewOpen] = useState(false)
   const [copiedValue, setCopiedValue] = useState('')
   const draftRef = useRef(null)
@@ -434,6 +458,8 @@ function DetailPane({ f, decisions, readOnly = false, automaticMode = false, pre
   // the same "status says approved" row, told apart by whether the approval still describes what
   // the document holds. Every surface below that promises the reviewer silence has to check it.
   const staleApproval = approvalSuperseded(f, decisions)
+  // Held by the server (approval_recheck_required): worded as "needs confirmation", never as a change.
+  const heldApproval = needsReapproval(f)
   // The recorded RESULT, when the row has one (null while work remains). Presentation reads it so a
   // verified or saved row is never worded like a pending proposal.
   const resultKind = resultKindOf(f, decisions)
@@ -444,7 +470,7 @@ function DetailPane({ f, decisions, readOnly = false, automaticMode = false, pre
   const supersededRow = targetReplaced || f.superseded === true || f._raw?.superseded === true
   // A SAVED change: its values are the Original and the Corrected one, never Current / Proposed.
   const { saved: savedChange, savedValue } = savedChangeOf(f)
-  const eyebrow = targetReplaced ? 'Result · replaced by a verified fix' : supersededRow ? 'Superseded · no action available' : staleApproval ? 'Approved earlier · changed since' : writeUnconfirmed ? 'Approved · write not confirmed' : resultKind === 'verified' ? 'Result · verified on the corrected copy' : resultKind === 'saved-unverified' ? 'Saved · awaiting verification' : resultKind === 'rejected' || resultKind === 'decision' ? 'Result · decision recorded' : automaticMode && responsibility === 'check' ? (f.applied && !f.validated ? 'Applied · verification incomplete' : 'Status check') : automaticMode && responsibility === 'acp' ? 'ACP processing' : inspectionOnly ? 'Saved changes · optional inspection' : isHandoff ? 'Needs manual handling' : lane.key === 'manual' ? 'Manual remediation' : 'Review'
+  const eyebrow = targetReplaced ? 'Result · replaced by a verified fix' : supersededRow ? 'Superseded · no action available' : heldApproval ? HELD_LABEL : staleApproval ? 'Approved earlier · changed since' : writeUnconfirmed ? 'Approved · write not confirmed' : resultKind === 'verified' ? 'Result · verified on the corrected copy' : resultKind === 'saved-unverified' ? 'Saved · awaiting verification' : resultKind === 'rejected' || resultKind === 'decision' ? 'Result · decision recorded' : automaticMode && responsibility === 'check' ? (f.applied && !f.validated ? 'Applied · verification incomplete' : 'Status check') : automaticMode && responsibility === 'acp' ? 'ACP processing' : inspectionOnly ? 'Saved changes · optional inspection' : isHandoff ? 'Needs manual handling' : lane.key === 'manual' ? 'Manual remediation' : 'Review'
   // A drafted AI value the reviewer can adjust before applying. `draft` falls back to the finding's
   // proposed value until the reviewer types; `edited` flips the primary action to "Save edited fix".
   const structuralRow = isPdfStructuralRow(f)
@@ -513,7 +539,12 @@ function DetailPane({ f, decisions, readOnly = false, automaticMode = false, pre
       <div className="remediation-detail-actions" role="group" aria-label={`Decision actions for ${displayText(r.issue)}`}
            style={{ borderTop: '1px solid var(--line,#e2dce4)', background: 'var(--bg, #fff)' }}>
         {recovery && <section aria-label="What this item needs" style={{ padding: '10px 22px', borderBottom: '1px solid var(--line,#e2dce4)', fontSize: 12.5 }}>
-          <b>{recovery.title}</b><p>{recovery.reason}</p><p className="muted">{recovery.next}</p>
+          {heldApproval ? <>
+            {/* Held: the next action sits HERE, beside the sentence that asks for it — not at the foot of
+                the pane. One click, one 'single' approval of exactly the values the writer would write. */}
+            <b>{HELD_LABEL}</b><p>{heldExplanation(f)}</p>
+            {onReapprove && !readOnly && <ReapproveHeld f={f} onReapprove={onReapprove} disabled={saving} />}
+          </> : <><b>{recovery.title}</b><p>{recovery.reason}</p><p className="muted">{recovery.next}</p></>}
           {/* A retry of the WRITE for the value already approved — never a second approval. `readOnly`
               removes the control rather than disabling it: a reviewer without write permission is not
               being offered an action they cannot take, and a disabled primary button reads as "this
@@ -617,7 +648,9 @@ function DetailPane({ f, decisions, readOnly = false, automaticMode = false, pre
                    document — so neither "Saved" nor "no further approval needed" may be said. */
                 <>
                   <span style={{ fontSize: 13, color: 'var(--ink)', fontWeight: 600 }}>✓ Approval recorded earlier.</span>
-                  <span>Verification: Approved → <b>changed since approval</b> — the document or the suggestion has moved on from what was approved, nothing was written from it, and this finding is still counted as remaining.</span>
+                  {heldApproval
+                    ? <span>Verification: Approved → <b>version needs confirmation</b> — ACP cannot confirm the approval matches the current version, nothing was written from it, and this finding is still counted as remaining.</span>
+                    : <span>Verification: Approved → <b>changed since approval</b> — the document or the suggestion has moved on from what was approved, nothing was written from it, and this finding is still counted as remaining.</span>}
                 </>
               ) : writeUnconfirmed ? (
                 /* The photographed contradiction: this line said "Saved — Written" beside a result
@@ -793,6 +826,7 @@ function DetailPane({ f, decisions, readOnly = false, automaticMode = false, pre
           {resultKind === 'verified' ? 'Verified on the corrected copy: its fresh scan no longer reports this item. No further approval is needed. This is not a certification of the whole document.'
             : resultKind === 'rejected' ? 'This suggestion was rejected. Nothing was written to the document for it.'
             : resultKind === 'decision' && !f.applied ? 'A decision is recorded for this item. No change was written from this review.'
+            : heldApproval ? 'An approval for this is on record, but ACP cannot confirm it matches the current version, so nothing was written from it. Review the current version and approve it again.'
             : staleApproval ?'An approval for this is on record, but it was given against a version this document or suggestion has moved on from. Nothing was written from it, and it may need a fresh decision — so ACP may ask you about this one again.'
             : writeUnconfirmed ? 'Your approval is on record. No confirmed write of the approved value exists yet, so nothing here is applied or verified. Retry checks the approved versions; changed or missing version records require review.'
             : f.applied && !f.validated ? 'This change is applied, but verification is incomplete. No additional approval is needed and it is not counted as verified.'
@@ -816,8 +850,8 @@ function DetailPane({ f, decisions, readOnly = false, automaticMode = false, pre
             <dl className="remediation-details-list">
               <div><dt>How ACP detected this</dt><dd>{displayText(f.detectionMethod || f.proposalSource || 'Automated document analysis')}</dd></div>
               <div><dt>Observed value</dt><dd>{currentValue}</dd></div>
-              <div><dt>Verification</dt><dd>{resultKind === 'verified' ? 'A fresh scan of the corrected copy no longer reports this item. This is not a certification of the whole document.' : resultKind === 'rejected' ? 'Nothing was written, so there is nothing to verify.' : staleApproval ?'Approved earlier, then changed. Nothing was written from that approval and there is nothing to verify; the current suggestion has not been decided.' : writeUnconfirmed ? 'Approved, write not confirmed. Nothing has been written to a corrected copy, so there is nothing to verify yet.' : f.applied && !f.validated ? 'Applied, verification incomplete. Independent verification is not recorded yet.' : automaticMode && responsibility === 'acp' ? 'ACP handles the admitted application and verification work.' : automaticMode && responsibility === 'check' ? 'Automatic admission or verification has not been confirmed.' : onRecheck ? `The corrected copy will be rescanned for WCAG ${scKeyOf(f) || 'compliance'}.` : 'Verification capability is not recorded here; check the saved outcome.'}</dd></div>
-              <div><dt>Current verification state</dt><dd>{resultKind === 'verified' ? 'Verified on the corrected copy' : resultKind === 'rejected' ? 'Rejected — nothing written' : resultKind === 'decision' ? 'Decision recorded' : staleApproval ? 'Approved earlier — changed since, may need a fresh decision' : writeUnconfirmed ? 'Approved — awaiting a confirmed write' : resolved ? 'Awaiting verification' : 'Awaiting approval'}</dd></div>
+              <div><dt>Verification</dt><dd>{resultKind === 'verified' ? 'A fresh scan of the corrected copy no longer reports this item. This is not a certification of the whole document.' : resultKind === 'rejected' ? 'Nothing was written, so there is nothing to verify.' : heldApproval ? 'Approved earlier; the version needs confirmation. Nothing was written from that approval and there is nothing to verify yet.' : staleApproval ?'Approved earlier, then changed. Nothing was written from that approval and there is nothing to verify; the current suggestion has not been decided.' : writeUnconfirmed ? 'Approved, write not confirmed. Nothing has been written to a corrected copy, so there is nothing to verify yet.' : f.applied && !f.validated ? 'Applied, verification incomplete. Independent verification is not recorded yet.' : automaticMode && responsibility === 'acp' ? 'ACP handles the admitted application and verification work.' : automaticMode && responsibility === 'check' ? 'Automatic admission or verification has not been confirmed.' : onRecheck ? `The corrected copy will be rescanned for WCAG ${scKeyOf(f) || 'compliance'}.` : 'Verification capability is not recorded here; check the saved outcome.'}</dd></div>
+              <div><dt>Current verification state</dt><dd>{resultKind === 'verified' ? 'Verified on the corrected copy' : resultKind === 'rejected' ? 'Rejected — nothing written' : resultKind === 'decision' ? 'Decision recorded' : heldApproval ? 'Approved earlier — version needs confirmation' : staleApproval ? 'Approved earlier — changed since, may need a fresh decision' : writeUnconfirmed ? 'Approved — awaiting a confirmed write' : resolved ? 'Awaiting verification' : 'Awaiting approval'}</dd></div>
             </dl>
           </details>
         )}
@@ -880,7 +914,7 @@ function Divider({ orientation, label, value, min, max, onDrag, onNudge }) {
 }
 
 export default function RemediationInbox({
-  queue: suppliedQueue = [], decisions = {}, onDecide, onOpenWord, onRecheck, onOpenPlan, onVerifySaved, onRetryApproved, onPublish, preparingProposals = false, readOnly = false, legacyApprovalControls = false, autoApprove = null, automaticApprovalPolicy, onAutoApproveChange, autoApproveSaving = false, autoApproveError = null, approvalExplanation = null, afterRelease = false, onAutoApproveRetry, autoApproveNotice = null, onDismissAutoApproveNotice,
+  queue: suppliedQueue = [], decisions = {}, onDecide, onOpenWord, onRecheck, onOpenPlan, onVerifySaved, onRetryApproved, onReapprove, onPublish, preparingProposals = false, readOnly = false, legacyApprovalControls = false, autoApprove = null, automaticApprovalPolicy, onAutoApproveChange, autoApproveSaving = false, autoApproveError = null, approvalExplanation = null, afterRelease = false, onAutoApproveRetry, autoApproveNotice = null, onDismissAutoApproveNotice,
   initialSort = 'priority', initialTab = 'review', initialGroup = 'document', scanId = null,
   assignees = {}, myEmail = null, onAssign,
   // The per-ITEM board components (R4 fix preview, R7 per-document progress, R10 audit trail)
@@ -1260,7 +1294,7 @@ export default function RemediationInbox({
   )
   const guidedBody = (
     <>
-      <DetailPane f={selected} decisions={decisions} readOnly={readOnly} automaticMode={autoApprove === true} preparingProposals={preparingProposals} onDecide={act} onOpenWord={onOpenWord} onRecheck={onRecheck} onOpenPlan={onOpenPlan} onVerifySaved={onVerifySaved} onRetryApproved={onRetryApproved}
+      <DetailPane f={selected} decisions={decisions} readOnly={readOnly} automaticMode={autoApprove === true} preparingProposals={preparingProposals} onDecide={act} onOpenWord={onOpenWord} onRecheck={onRecheck} onOpenPlan={onOpenPlan} onVerifySaved={onVerifySaved} onRetryApproved={onRetryApproved} onReapprove={onReapprove}
                   headingRef={reviewHeadingRef}
                   saving={savingId != null && savingId === selected?.id}
                   error={saveError && selected && saveError.id === selected.id ? saveError : null}

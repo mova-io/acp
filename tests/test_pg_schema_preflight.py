@@ -72,6 +72,8 @@ def previous_schema(url):
     execute(url, 'DROP TABLE file_assessment_history')
     # And v61's approval artifact binding.
     execute(url, 'ALTER TABLE hitl_queue DROP COLUMN approved_corrected_sha256')
+    # And v62's viewed-content binding.
+    execute(url, 'ALTER TABLE hitl_queue DROP COLUMN approved_proposal_digest')
     execute(url, 'DELETE FROM acp_schema_version WHERE version>=58')
     execute(url, "INSERT INTO acp_schema_version(version,checksum) VALUES (57,'4a3338134fdc573bcaa2062935c2711d')")
     execute(url, "CREATE TABLE customer_probe(id INT PRIMARY KEY,value TEXT); INSERT INTO customer_probe VALUES (1,'keep')")

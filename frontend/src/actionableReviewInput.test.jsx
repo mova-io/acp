@@ -6,11 +6,11 @@ import ReviewQueueTabs from './ReviewQueueTabs.jsx'
 import { automaticReviewResponsibility as responsibility } from './automaticReviewResponsibility.js'
 afterEach(unmountAll)
 const draft = { id: 'draft', file: 'chart.xlsx', rule_id: '1.4.5', hasProposal: true, after: 'Chart description', automaticDisposition: { responsibility: 'human', state: 'review_required' } }
-const ready = { ...draft, _raw: { corrected_artifact: 'none', proposal_snapshot_ids: ['snapshot'], source_revision: 1, decision_version: 1 } }
+const ready = { ...draft, _raw: { corrected_artifact: 'none', proposal_digest: 'digest-test', proposal_snapshot_ids: ['snapshot'], source_revision: 1, decision_version: 1 } }
 it('separates incomplete drafts from actionable judgment without inventing automatic work', () => {
  expect(responsibility(draft)).toBe('check')
  expect(responsibility(ready)).toBe('human')
- for (const row of [{ ...ready, stale: true }, { ...ready, after: '' }, { ...ready, _raw: { corrected_artifact: 'none', ...ready._raw, finding_count: 2 } }, { ...ready, canApprove: false }]) expect(responsibility(row)).toBe('check')
+ for (const row of [{ ...ready, stale: true }, { ...ready, after: '' }, { ...ready, _raw: { corrected_artifact: 'none', proposal_digest: 'digest-test', ...ready._raw, finding_count: 2 } }, { ...ready, canApprove: false }]) expect(responsibility(row)).toBe('check')
  expect(responsibility({ ...draft, manual: true })).toBe('human')
  expect(responsibility(draft, { draft: { state: 'assigned' } })).toBe('human')
  expect(responsibility({ ...draft, rejectedFix: true })).toBe('human')

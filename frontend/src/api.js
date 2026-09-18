@@ -1632,6 +1632,9 @@ export const updateHitlItem = (itemId, status, reviewerNote = null, approvedValu
         // The corrected copy the reviewer was looking at: the row's `corrected_artifact` VERBATIM (its
         // sha256, or "none" when no corrected copy exists). Required on every approval, single and batch.
         expected_corrected_sha256: opts.expectedCorrectedSha256 ?? null,
+        // The row's reviewable content the reviewer was looking at: its opaque `proposal_digest`, VERBATIM.
+        // Required on every approval, single and batch (D -> F phase 6).
+        expected_proposal_digest: opts.expectedProposalDigest ?? null,
         // Feedback intelligence: WHY a rejection happened (enum; bulk/keyboard paths send 'unspecified')
         reject_reason: opts.rejectReason ?? null,
         // WCAG exception the reviewer applied instead of writing a fix: 'decorative' (1.1.1 — image

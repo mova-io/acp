@@ -1,18 +1,18 @@
 // The pure half of the P1 viewed-version binding. The mounted callers are covered by
 // viewedApprovalRemediate / viewedApprovalDrawer / viewedApprovalBell; this pins the edge rules.
 import { describe, expect, it } from 'vitest'
-import { STALE_VIEWED_VERSION_MESSAGE, VIEWED_VERSION_MISSING_MESSAGE, needsReapproval, viewedApprovalBinding, viewedBindingKey,
+import { REAPPROVE_EXPLANATION, STALE_VIEWED_VERSION_MESSAGE, VIEWED_VERSION_MISSING_MESSAGE, heldExplanation, needsReapproval, reapprovalValues, viewedApprovalBinding, viewedBindingKey,
   viewedDecisionOptions, viewedVersionConflict } from './viewedApprovalBinding.js'
 
 const SHA = 'f'.repeat(64)
-const row = { id: 'r', decision_version: 4, source_revision: 'rev-1', proposal_snapshot_ids: ['s1', 's2'], corrected_artifact: SHA,
+const row = { id: 'r', decision_version: 4, source_revision: 'rev-1', proposal_snapshot_ids: ['s1', 's2'], corrected_artifact: SHA, proposal_digest: 'dig-1',
   proposals: [{ locator: 'a', proposed_value: 'x' }, { locator: 'b', proposed_value: 'y' }] }
 
 describe('viewedApprovalBinding', () => {
   it('reads the server row, directly or through an inbox row\'s _raw, and copies the ids', () => {
     const b = viewedApprovalBinding(row)
     expect(b).toEqual({ expectedVersion: 4, expectedSourceRevision: 'rev-1', expectedProposalSnapshotIds: ['s1', 's2'],
-      expectedCorrectedSha256: SHA })
+      expectedCorrectedSha256: SHA, expectedProposalDigest: 'dig-1' })
     expect(b.expectedProposalSnapshotIds).not.toBe(row.proposal_snapshot_ids)
     expect(viewedApprovalBinding({ id: 'r', after: 'x', _raw: row })).toEqual(b)
   })
@@ -23,8 +23,9 @@ describe('viewedApprovalBinding', () => {
   it('sends the snapshot list exactly as served — legacy null slots included — and [] when none was served', () => {
     expect(viewedApprovalBinding({ ...row, proposal_snapshot_ids: ['s1', null] }).expectedProposalSnapshotIds).toEqual(['s1', null])
     expect(viewedApprovalBinding({ ...row, proposal_snapshot_ids: null }).expectedProposalSnapshotIds).toEqual([])
-    expect(viewedApprovalBinding({ id: 'j', decision_version: 0, source_revision: 'rev-1', corrected_artifact: 'none' }))
-      .toEqual({ expectedVersion: 0, expectedSourceRevision: 'rev-1', expectedProposalSnapshotIds: [], expectedCorrectedSha256: 'none' })
+    expect(viewedApprovalBinding({ id: 'j', decision_version: 0, source_revision: 'rev-1', corrected_artifact: 'none', proposal_digest: 'dig-j' }))
+      .toEqual({ expectedVersion: 0, expectedSourceRevision: 'rev-1', expectedProposalSnapshotIds: [], expectedCorrectedSha256: 'none',
+        expectedProposalDigest: 'dig-j' })
   })
   it('sends the corrected artifact verbatim — a hash or the "none" sentinel — and is null without one (never defaulted)', () => {
     expect(viewedApprovalBinding({ ...row, corrected_artifact: 'none' }).expectedCorrectedSha256).toBe('none')
@@ -32,6 +33,31 @@ describe('viewedApprovalBinding', () => {
     expect(viewedApprovalBinding({ ...row, corrected_artifact: null })).toBeNull()
     expect(viewedApprovalBinding({ ...row, corrected_artifact: ' ' })).toBeNull()
     expect(viewedDecisionOptions({ ...row, corrected_artifact: undefined }, 'approved')).toBeNull()
+  })
+  it('sends the proposal digest verbatim and is null without one (echoed, never recomputed or defaulted)', () => {
+    expect(viewedApprovalBinding({ ...row, proposal_digest: 'opaque/Value+1' }).expectedProposalDigest).toBe('opaque/Value+1')
+    expect(viewedApprovalBinding({ ...row, proposal_digest: undefined })).toBeNull()
+    expect(viewedApprovalBinding({ ...row, proposal_digest: '' })).toBeNull()
+    expect(viewedDecisionOptions({ ...row, proposal_digest: null }, 'approved')).toBeNull()
+    expect(viewedBindingKey({ ...row, proposal_digest: 'dig-2' })).not.toBe(viewedBindingKey(row))
+  })
+  it('states a CHANGE for a held approval only when the server reason names one', () => {
+    const held = (reason) => ({ ...row, status: 'approved', approval_recheck_required: true, approval_recheck_reason: reason })
+    expect(heldExplanation(held(undefined))).toBe(REAPPROVE_EXPLANATION)
+    expect(heldExplanation(held('something_new'))).toBe(REAPPROVE_EXPLANATION)
+    expect(heldExplanation(held('binding_missing'))).toMatch(/^The version this approval was given for was not recorded/)
+    expect(heldExplanation(held('binding_missing'))).not.toMatch(/changed|replaced/)
+    expect(REAPPROVE_EXPLANATION).not.toMatch(/changed|moved on|replaced/)
+    expect(heldExplanation(held('artifact_moved'))).toMatch(/^The saved corrected copy of this document has changed/)
+    expect(heldExplanation(held('source_moved'))).toMatch(/assessed source has changed/)
+    expect(heldExplanation(held('proposals_superseded'))).toMatch(/has been replaced/)
+    expect(heldExplanation(held('values_changed'))).toMatch(/no longer match/)
+  })
+  it('re-approval values mirror the server digest: recorded approved value, else the draft', () => {
+    expect(reapprovalValues({ proposals: [{ proposed_value: 'draft', approved_value: 'edited' }, { proposed_value: 'draft 2' }] }))
+      .toEqual(['edited', 'draft 2'])
+    expect(reapprovalValues({ resolution: 'described_not_replaced', proposals: [{ proposed_value: 'draft' }] })).toEqual([''])
+    expect(reapprovalValues({ evidence: [{ approved_value: 'typed' }, {}] })).toEqual(['typed', ''])
   })
   it('flags only an APPROVED row the server lists with approval_recheck_required for re-approval', () => {
     expect(needsReapproval({ ...row, status: 'approved', approval_recheck_required: true })).toBe(true)

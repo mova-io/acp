@@ -9,7 +9,7 @@ import { explainFinding, getFileContent, uploadToDrive, markRemediated, remediat
 import { reviewableInPlace } from './reviewCard.js'
 import EvidenceCard from './EvidenceCard.jsx'
 import { SIM as SIM_MODE } from './sim.js'
-import { REAPPROVE_ACTION, REAPPROVE_EXPLANATION, needsReapproval, requestReviewQueueRefresh, viewedBindingKey, viewedDecisionOptions, viewedVersionConflict, viewedVersionMissingError } from './viewedApprovalBinding.js'
+import { HELD_LABEL, REAPPROVE_ACTION, heldExplanation, needsReapproval, requestReviewQueueRefresh, viewedBindingKey, viewedDecisionOptions, viewedVersionConflict, viewedVersionMissingError } from './viewedApprovalBinding.js'
 import { CAPABILITY_FALLBACK, fmtOf, autoSCs, modeFor, reviewRecommended } from './capability.js'
 import PagePreview from './PagePreview.jsx'
 import SharePointMetadata from './SharePointMetadata.jsx'
@@ -1168,7 +1168,7 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
                         <div style={{ marginTop: 8 }}>
                           <button className="ghost small" aria-expanded={openHere}
                                   onClick={() => setReviewSc(openHere ? null : sc)}>
-                            {openHere ? '× Close review' : needsReapproval(hi) ? `⚖ ${REAPPROVE_ACTION} — approved earlier, changed since`
+                            {openHere ? '× Close review' : needsReapproval(hi) ? `⚖ ${REAPPROVE_ACTION} — ${HELD_LABEL.toLowerCase()}`
                               : `⚖ Review here — ${hi.finding_count > 1 ? `${hi.finding_count} findings, ` : ''}evidence & approve`}
                           </button>
                           {openHere && (
@@ -1186,7 +1186,7 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
                                   re-binds the approval (one 'single' decision, never repeated). */}
                               {needsReapproval(hi) && (
                                 <p className="drawer-reapprove" role="note" style={{ margin: '0 0 8px', fontSize: 12.5 }}>
-                                  <b>{REAPPROVE_ACTION}.</b> {REAPPROVE_EXPLANATION}
+                                  <b>{HELD_LABEL}.</b> {heldExplanation(hi)}
                                 </p>
                               )}
                               {/* Keyed by the row's version: an editor seeded from an older version

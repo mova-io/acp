@@ -229,7 +229,7 @@ it('unifies applying, publishing, and a real green automatic approval switch', a
 })
 it('shows admitted automatic checking as Processing while retaining manual human input', async () => {
  const policy={enabled:true,supported:true,run_id:'run',source_revision:'source'}
- const proposal={...CONTRAST_APPLY,rule_id:'1.1.1',ruleId:'1.1.1',status:'pending',proposals:[{proposed_value:'#767676',source:'AI'}],_raw:{corrected_artifact:'none',finding_count:1,proposal_snapshot_ids:['snapshot'],source_revision:'source',decision_version:0,auto_approval_status:'checking',auto_approval_run_id:'run',auto_approval_source_revision:'source'}}
+ const proposal={...CONTRAST_APPLY,rule_id:'1.1.1',ruleId:'1.1.1',status:'pending',proposals:[{proposed_value:'#767676',source:'AI'}],_raw:{corrected_artifact:'none',proposal_digest:'digest-test',finding_count:1,proposal_snapshot_ids:['snapshot'],source_revision:'source',decision_version:0,auto_approval_status:'checking',auto_approval_run_id:'run',auto_approval_source_revision:'source'}}
  const manual={id:'manual',file:'manual.docx',rule_id:'1.4.5',title:'Needs manual fix',status:'pending',hasProposal:false}
  await renderInbox({queue:[proposal,manual],autoApprove:true,automaticApprovalPolicy:policy})
  const queues=container.querySelector('[aria-label="Review queues"]')
@@ -249,7 +249,7 @@ it('shows admitted automatic checking as Processing while retaining manual human
 })
 it('does not claim review decisions or verified fixes when only automatic checks are queued', async () => {
  const policy={enabled:true,supported:true,run_id:'run',source_revision:'source'}
- const proposal={...CONTRAST_APPLY,rule_id:'1.1.1',ruleId:'1.1.1',status:'pending',proposals:[{proposed_value:'#767676',source:'AI'}],_raw:{corrected_artifact:'none',finding_count:1,proposal_snapshot_ids:['snapshot'],source_revision:'source',decision_version:0,auto_approval_status:'checking',auto_approval_run_id:'run',auto_approval_source_revision:'source'}}
+ const proposal={...CONTRAST_APPLY,rule_id:'1.1.1',ruleId:'1.1.1',status:'pending',proposals:[{proposed_value:'#767676',source:'AI'}],_raw:{corrected_artifact:'none',proposal_digest:'digest-test',finding_count:1,proposal_snapshot_ids:['snapshot'],source_revision:'source',decision_version:0,auto_approval_status:'checking',auto_approval_run_id:'run',auto_approval_source_revision:'source'}}
  await renderInbox({queue:[proposal],autoApprove:true,automaticApprovalPolicy:policy,initialTab:'review'})
  expect(container.textContent).toContain('Automatic checks are queued.')
  expect(container.textContent).not.toContain('Review decisions saved')

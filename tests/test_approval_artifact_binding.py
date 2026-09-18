@@ -60,6 +60,7 @@ def viewed(st, item_id):
                 expected_source_revision=st.remediation_source_revision("s1"),
                 expected_proposal_snapshot_ids=list(row.get("proposal_snapshot_ids") or []),
                 expected_corrected_sha256=record.get("corrected_sha256") or "none",
+                expected_proposal_digest=st.proposal_digest(row),
                 approval_scope="single")
 
 

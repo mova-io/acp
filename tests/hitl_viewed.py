@@ -24,6 +24,7 @@ def viewed_fields(item_id: str, store=None) -> dict:
             "expected_source_revision": store.remediation_source_revision(row["scan_id"]),
             "expected_proposal_snapshot_ids": list(snapshots) if isinstance(snapshots, list) else [],
             "expected_corrected_sha256": store.corrected_artifact_token(row["scan_id"], row["file"]),
+            "expected_proposal_digest": store.proposal_digest(row),
             "approval_scope": "single"}
 
 

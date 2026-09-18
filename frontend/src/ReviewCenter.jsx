@@ -3,7 +3,7 @@ import { SEV, sevOf, reasonOf, priorityScore, groupLabel } from './hitlMeta.js'
 import { confidenceForFinding, confClass } from './confidence.js'
 import { openTraceUrl } from './api.js'
 import EvidenceCard from './EvidenceCard.jsx'
-import { viewedBindingKey } from './viewedApprovalBinding.js'
+import { HELD_LABEL, REAPPROVE_ACTION, heldExplanation, reapprovalValues, viewedBindingKey } from './viewedApprovalBinding.js'
 // proposalMeta / firstProposed live in reviewCard.js — the single source of truth for how a
 // hitl_queue.proposals row is read. EvidenceCard uses them too; don't fork the logic.
 import { VALUE_FIX, firstProposed, proposalMeta, reviewType, REVIEW_TYPES } from './reviewCard.js'
@@ -94,6 +94,23 @@ export default function ReviewCenter({ items, onAct, onClose, onRefresh, error }
       setActError(`Not saved: ${e?.message || e}. Nothing was recorded — try again.`)
     } finally {
       setBusy(null); setExpanded(null)
+    }
+  }
+
+  // "Review and approve again" for a HELD approval (HitlBell marks it `reapprove`): one approval of exactly
+  // what the writer would write, through the same onAct (HitlBell binds it to the row it holds and sends
+  // approval_scope 'single'). The flag clears on the server, so the row leaves this list — no loop.
+  const reapprove = async (it) => {
+    setBusy(it.id)
+    setActError(null)
+    const values = reapprovalValues(it)
+    try {
+      await onAct(it.id, 'approved', null, values.find(Boolean) || it.approved_value || null,
+        { approvedValues: values.length ? values : null, resolution: it.resolution || null })
+    } catch (e) {
+      setActError(`Not saved: ${e?.message || e}. Nothing was recorded — try again.`)
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -228,7 +245,7 @@ export default function ReviewCenter({ items, onAct, onClose, onRefresh, error }
                       <RiskChip item={it} compact />
                       <span className="rc-item-file">{it.file || 'document'}</span>
                       {it.finding_count > 1 && <span className="muted rc-item-count">{it.finding_count} findings</span>}
-                      <span className="rc-item-reason">⚑ {reasonOf(it)}</span>
+                      <span className="rc-item-reason">⚑ {it.reapprove ? HELD_LABEL : reasonOf(it)}</span>
                       <span className={confClass(conf.level)} title={`Trust signal — how this was detected (tier: ${conf.level.label})`}>{conf.basis}</span>
                       <span className="rc-item-caret" aria-hidden="true">{isOpen ? '▾' : '▸'}</span>
                     </button>
@@ -244,6 +261,14 @@ export default function ReviewCenter({ items, onAct, onClose, onRefresh, error }
                             and HitlBell binds the approval to the row it holds now. A poll that
                             brings a new version must remount the card, or its old text would be
                             approved under the new version's binding (viewedApprovalBinding.js). */}
+                        {it.reapprove && (
+                          <div className="rc-reapprove" role="group" aria-label={HELD_LABEL}>
+                            <p><b>{HELD_LABEL}.</b> {heldExplanation(it)}</p>
+                            {reapprovalValues(it).some(Boolean) && <p className="muted">Approves: {reapprovalValues(it).filter(Boolean).map((v) => `“${v}”`).join(' · ')}</p>}
+                            <button type="button" className="primary" disabled={busy === it.id} onClick={() => reapprove(it)}>
+                              {busy === it.id ? 'Recording approval…' : REAPPROVE_ACTION}</button>
+                          </div>
+                        )}
                         <EvidenceCard
                           key={viewedBindingKey(it)}
                           item={it}

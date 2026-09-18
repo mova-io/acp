@@ -54,7 +54,7 @@ const row = {
   // approved row and never reproduced the defect at all. Exactly the production lineage instead.
   proposal_snapshot_ids: ['snap'],
   _raw: {
-    finding_count: 1, proposal_snapshot_ids: ['snap'], source_revision: 1, decision_version: 0, corrected_artifact: 'none',
+    finding_count: 1, proposal_snapshot_ids: ['snap'], source_revision: 1, decision_version: 0, corrected_artifact: 'none', proposal_digest: 'digest-test',
     scan_id: '6f07d85b39b8',
     automatic_approval: { state: 'blocked', responsibility: 'check', owner: 'ACP', reason: REASON,
       run_id: 'run-280a6fa5', scan_id: '6f07d85b39b8', source_revision: 1, proposal_snapshot_ids: ['snap'] },
@@ -146,7 +146,7 @@ describe('an approved 1.4.5 whose approved value was never written', () => {
       status: 'pending', applied: null, validated: false, hasProposal: true, after: 'Transcribed text',
       proposals: [{ proposed_value: 'Transcribed text', source: 'OCR' }],
       automaticDisposition: { state: 'blocked', responsibility: 'check', owner: 'ACP', reason: REASON },
-      _raw: { finding_count: 1, proposal_snapshot_ids: ['snap'], source_revision: 1, decision_version: 0, corrected_artifact: 'none' },
+      _raw: { finding_count: 1, proposal_snapshot_ids: ['snap'], source_revision: 1, decision_version: 0, corrected_artifact: 'none', proposal_digest: 'digest-test' },
     }
     expect(approvalRecordedOn(pending)).toBe(false)
     expect(exclusionReason(pending)).toBeNull()

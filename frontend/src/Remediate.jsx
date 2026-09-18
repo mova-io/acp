@@ -20,7 +20,7 @@ import RemediationReleasePlan from './RemediationReleasePlan.jsx'
 import { authorizeAcceptedRelease } from './releasePlanIntent.js'
 import { remediationReviewCounts, remediationDiffPage } from './remediationCountSummary.js'
 import { selectionFingerprint } from './batchReviewSelection.js'
-import { REAPPROVE_ACTION, REAPPROVE_EXPLANATION, needsReapproval, requestReviewQueueRefresh, viewedBindingKey, viewedDecisionOptions, viewedVersionConflict, viewedVersionMissingError } from './viewedApprovalBinding.js'
+import { reapprovalRequest, requestReviewQueueRefresh, viewedDecisionOptions, viewedVersionConflict, viewedVersionMissingError } from './viewedApprovalBinding.js'
 import AssessSummary from './AssessSummary.jsx'
 import { useState, useEffect, useMemo, useRef } from 'react'
 import AssessmentScopeCard from './AssessmentScopeCard.jsx'
@@ -403,31 +403,6 @@ function GroupedFixes({ fixGroups, appliedFixes = [], impact }) {
 // <details> rather than a button + state: it is natively keyboard-operable and announces its own
 // expanded state, so this adds no focus handling and no aria-expanded to keep in sync — which is
 // the kind of thing that rots silently on a product that certifies accessibility.
-// An approval on record that the writer is HOLDING (listed with approval_recheck_required): the document,
-// its corrected copy or the suggestion moved on after it was given, so nothing was written from it. One
-// click re-approves the CURRENT row with its full viewed binding, which re-binds it on the server. One
-// request per click; after a recorded re-approval the control stays spent until the row itself changes
-// (the caller keys this by the row's version), so it can never loop.
-function ReapproveHeld({ row, onReapprove, readOnly = false }) {
-  const [state, setState] = useState(null)   // null | { busy } | { done } | { error }
-  if (!needsReapproval(row)) return null
-  const run = async () => {
-    setState({ busy: true })
-    try { await onReapprove(row); setState({ done: true }) }
-    catch (e) { setState({ error: e?.message || String(e) }) }
-  }
-  return (
-    <section className="reapprove-held" aria-label="Approved earlier, changed since"
-             style={{ margin: '12px 22px', padding: '10px 12px', borderRadius: 8, fontSize: 12.5, border: '1px solid var(--line,#e2dce4)' }}>
-      <p style={{ margin: '0 0 8px' }}>{REAPPROVE_EXPLANATION}</p>
-      {!readOnly && <button type="button" className="primary" disabled={!!state?.busy || !!state?.done} onClick={run}>
-        {state?.busy ? 'Recording approval…' : REAPPROVE_ACTION}</button>}
-      {state?.done && <p role="status">Approved again against the current version. Writing and verification remain separate steps.</p>}
-      {state?.error && <p role="alert" className="error">Not approved: {state.error}</p>}
-    </section>
-  )
-}
-
 function RemSection({ id, title, count, hint, defaultOpen = false, children }) {
   return (
     <details className="panel rem-sec" id={id} open={defaultOpen}>
@@ -936,11 +911,12 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
     // A frozen batch sends no approval_scope (the server keeps its batch guard) and must name the
     // corrected copy it was frozen against; without it the batch approval is not sent.
     const bound = frozen
-      ? (frozen.decision.expectedCorrectedSha256
+      ? (frozen.decision.expectedCorrectedSha256 && frozen.decision.expectedProposalDigest
         ? { expectedVersion: frozen.decision.expectedVersion ?? item?._raw?.decision_version ?? 0,
             expectedProposalSnapshotIds: frozen.decision.expectedProposalSnapshotIds,
             expectedSourceRevision: frozen.decision.expectedSourceRevision,
-            expectedCorrectedSha256: frozen.decision.expectedCorrectedSha256 }
+            expectedCorrectedSha256: frozen.decision.expectedCorrectedSha256,
+            expectedProposalDigest: frozen.decision.expectedProposalDigest }
         : null)
       : viewedDecisionOptions(viewed || item, decisionStatus)
     // No binding, no approval: refuse BEFORE anything optimistic happens, say why in the pane (this
@@ -1024,20 +1000,16 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
     onRefresh?.()
     return result
   }
-  // Retry saving a recorded approval; do not create a second review decision.
-  // Re-approve a held approval (ReapproveHeld): the CURRENT row, bound to the version on screen, as a
-  // 'single' decision. The server re-binds it; nothing here retries or repeats it.
+  // Re-approve a HELD approval (approval_recheck_required) — the inbox's recovery section offers it as
+  // "Review and approve again". The CURRENT row, bound to the version on screen, as ONE 'single' decision
+  // approving exactly what the writer would write (reapprovalRequest), with the row's own resolution kept.
+  // The server re-binds it and clears the flag; nothing here retries or repeats it.
   const reapproveHeld = async (row) => {
     if (reviewReadOnlyRef.current) throw new Error('Historical scans are available for results browsing only.')
-    const raw = row?._raw || row
-    const bound = viewedDecisionOptions(row, 'approved')
-    if (!raw?.id || !bound) { requestReviewQueueRefresh(); throw viewedVersionMissingError() }
-    // A held WCAG-exception resolution is re-approved as that resolution, never turned into a value.
-    const resolution = raw.resolution || null
+    const request = reapprovalRequest(row)
+    if (!request) { requestReviewQueueRefresh(); throw viewedVersionMissingError() }
     try {
-      await updateHitlItem(raw.id, 'approved', null,
-        resolution ? (raw.approved_value ?? null) : (row.after ?? raw.approved_value ?? null),
-        { ...bound, resolution })
+      await updateHitlItem(request.id, 'approved', null, request.approvedValue, request.options)
     } catch (e) {
       requestReviewQueueRefresh()
       throw viewedVersionConflict(e) || e
@@ -1987,10 +1959,9 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
             preparingProposals={!runStream?.snapshot?.terminal && ((runStream?.status?.running ?? remProg?.running ?? 0) > 0 || (runStream?.status?.queued ?? remProg?.queued ?? 0) > 0)}
             onVerifySaved={reviewReadOnly ? undefined : verifySaved}
             onRetryApproved={reviewReadOnly ? undefined : retryApprovedFix}
+            onReapprove={reviewReadOnly ? undefined : reapproveHeld}
             renderDetailExtra={(sel) => (sel ? (
               <>
-                {/* A held approval (approval_recheck_required): offer the one re-approval that re-binds it. */}
-                <ReapproveHeld key={viewedBindingKey(sel)} row={sel} onReapprove={reapproveHeld} readOnly={reviewReadOnly} />
                 {/* R15 · only for a row ACP applied itself — a drafted-AI or manually-authored
                     finding was never something ACP claimed to fix on its own, so there is
                     nothing here to un-claim for those rows. */}

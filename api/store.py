@@ -520,6 +520,12 @@ _SCHEMA = [
     # alone does not move when a new corrected copy is saved, so without this an approval given
     # against one copy was written into different bytes. NULL = not recorded (legacy): held.
     "ALTER TABLE hitl_queue ADD COLUMN IF NOT EXISTS approved_corrected_sha256 TEXT",
+    # The reviewable CONTENT the approval was given for: Store.proposal_digest of the row as the
+    # reviewer viewed it. A producer refresh (enqueue_proposals without a run context, the vision
+    # recovery CAS, an evidence attach) can rewrite the same row — a different picture, a different
+    # draft — without moving any version token; this is what binds the approval to what was shown.
+    # NULL = not recorded (legacy): held.
+    "ALTER TABLE hitl_queue ADD COLUMN IF NOT EXISTS approved_proposal_digest TEXT",
     # Where the finding IS, in words, for the formats that have no page number. `page`/`pages`
     # above are integers and answer this for PDF only; a spreadsheet's answer is "Sheet
     # 'Findings' cell B2" and a deck's is "Slide 3". Without this column the review card's
@@ -2562,8 +2568,11 @@ class _PgAdapter:
     # v61 adds nullable hitl_queue.approved_corrected_sha256: the corrected artifact an approval
     # was given against. An older replica never writes it, and newer writers HOLD an approved row
     # without it until it is re-approved — the safe direction for a binding that was not recorded.
-    _SCHEMA_VERSION = 61
-    _SCHEMA_CHECKSUM_AT_VERSION = "e7f27561225a4d1df3d3c1bc9f426912"
+    # v62 adds nullable hitl_queue.approved_proposal_digest (the viewed proposal content an
+    # approval was given for). Older replicas never write it; newer writers hold an approved row
+    # without it until it is re-approved, as for v61's artifact binding.
+    _SCHEMA_VERSION = 62
+    _SCHEMA_CHECKSUM_AT_VERSION = "ad8f55efc5117cb0b80fe0233bdcd82d"
     # Namespaced so it cannot collide with an advisory lock taken anywhere else. Session-scoped
     # (pg_advisory_lock, not _xact) because the migration spans several transactions.
     _MIGRATION_ADVISORY_KEY = 0x4143500001          # 'ACP' + slot 1
@@ -12236,8 +12245,11 @@ class Store:
                 # EXACTLY the rows the ordinary writer holds (approved_write_hold), so a held
                 # approval is never an invisible wedge: the flag is what asks for the re-check
                 # that re-binds it. A superset of the retry gate's three stale reasons.
-                row['approval_recheck_required'] = (
-                    self.approved_write_hold(row, revisions=revisions) is not None)
+                hold = self.approved_write_hold(row, revisions=revisions)
+                row['approval_recheck_required'] = hold is not None
+                if hold is not None:
+                    # The truthful reason: only binding_missing says nothing about a change.
+                    row['approval_recheck_reason'] = self.WRITE_HOLD_CODES.get(hold)
         if include_superseded:
             for r in rows:
                 r["superseded"] = r["id"] in superseded
@@ -12409,7 +12421,8 @@ class Store:
                                release_intent_id: str | None = None,
                                standing_approval_run_id: str | None = None,
                                viewed: bool = False,
-                               expected_corrected_sha256: str | None = None) -> tuple[dict | None, bool]:
+                               expected_corrected_sha256: str | None = None,
+                               expected_proposal_digest: str | None = None) -> tuple[dict | None, bool]:
         """Persist one reviewer decision atomically and make exact PUT replays a no-op.
 
         These writes collectively make the decision true.  Keeping them behind the adapter's
@@ -12447,6 +12460,8 @@ class Store:
             payload['viewed'] = True
         if expected_corrected_sha256 is not None:
             payload['expected_corrected_sha256'] = expected_corrected_sha256
+        if expected_proposal_digest is not None:
+            payload['expected_proposal_digest'] = expected_proposal_digest
         fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True,
                                     separators=(",", ":")).encode()).hexdigest()
 
@@ -12513,7 +12528,8 @@ class Store:
             if viewed_approval:
                 if (expected_version is None or expected_proposal_snapshot_ids is None
                         or not str(expected_source_revision or "").strip()
-                        or not str(expected_corrected_sha256 or "").strip()):
+                        or not str(expected_corrected_sha256 or "").strip()
+                        or not str(expected_proposal_digest or "").strip()):
                     raise ValueError("viewed version required")
                 if replay:
                     # An exact repeat of an approval that is already recorded and still current
@@ -12532,7 +12548,8 @@ class Store:
                         or list(expected_proposal_snapshot_ids) != served
                         or not now_revision or expected_source_revision != now_revision
                         or expected_corrected_sha256 != self.corrected_artifact_token(
-                            current.get("scan_id"), current.get("file"))):
+                            current.get("scan_id"), current.get("file"))
+                        or expected_proposal_digest != self.proposal_digest(current)):
                     raise ValueError("stale viewed version")
             if expected_version is not None and int(expected_version) != current_version:
                 raise ValueError("stale decision version")
@@ -12581,6 +12598,9 @@ class Store:
                 if (expected_corrected_sha256 is not None and expected_corrected_sha256
                         != self.corrected_artifact_token(current["scan_id"], current.get("file"))):
                     raise ValueError("stale source revision")
+                if (expected_proposal_digest is not None
+                        and expected_proposal_digest != self.proposal_digest(current)):
+                    raise ValueError("stale proposal selection")
             if replay:
                 return current, True
 
@@ -12629,13 +12649,18 @@ class Store:
                 # the one current under this lock.
                 artifact = expected_corrected_sha256 or self.corrected_artifact_token(
                     current.get("scan_id"), current.get("file"))
+                # The content: what the reviewer SENT (compared above). The automatic paths that
+                # call this directly bind the content under this lock, which they have already
+                # matched to their immutable proposal snapshots. approve_proposal_values only
+                # writes approved_value, which the digest excludes, so it is the same value.
+                content = expected_proposal_digest or self.proposal_digest(current)
                 with self._db.cursor() as cur:
                     self._db.execute(cur,
                         "UPDATE hitl_queue SET approved_proposal_snapshot_ids=%s,"
                         "approved_source_revision=%s,approved_value_sha256=%s,"
-                        "approved_corrected_sha256=%s WHERE id=%s",
+                        "approved_corrected_sha256=%s,approved_proposal_digest=%s WHERE id=%s",
                         (json.dumps(approved_aligned, separators=(",", ":")),
-                         source_revision, digest, artifact, item_id))
+                         source_revision, digest, artifact, content, item_id))
             if status == "approved" and resolution == self.DESCRIBED_RESOLUTION:
                 described_id = self.queue_described_image_alt(item_id)
                 if described_id is None:
@@ -12728,6 +12753,43 @@ class Store:
         record = (self.get_file_record(scan_id, file) or {}) if scan_id and file else {}
         return str(record.get("corrected_sha256") or "").strip() or self.NO_CORRECTED_ARTIFACT
 
+    # Reviewer-owned keys: written by the approval itself, so never part of what was VIEWED.
+    _REVIEWER_OWNED_PROPOSAL_KEYS = frozenset({"approved_value"})
+
+    @classmethod
+    def proposal_digest(cls, row: dict | None) -> str:
+        """sha256 of a review row's reviewable CONTENT — what the reviewer is shown and what an
+        approval writes to.
+
+        Every proposal and every evidence entry, in order, exactly as its producer wrote it:
+        locator (the target), proposed_value, before, rationale, source/model, finding ids, thumb,
+        validation and review metadata, companion/explain-only flags — everything EXCEPT the
+        reviewer-owned `approved_value` (_REVIEWER_OWNED_PROPOSAL_KEYS), which the approval itself
+        writes. Deliberately "everything else" rather than a list of keys: a producer that adds a
+        field changes the digest without anyone having to remember to include it, and every
+        producer path that rewrites a row changes it by construction — no version to bump.
+
+        GET /hitl/queue serves it as `proposal_digest`; an approval echoes it as
+        `expected_proposal_digest` and records it as `approved_proposal_digest`.
+        """
+        import hashlib
+
+        def reviewable(entries):
+            out = []
+            for entry in entries or []:
+                if isinstance(entry, dict):
+                    out.append({k: v for k, v in entry.items()
+                                if k not in cls._REVIEWER_OWNED_PROPOSAL_KEYS})
+                else:
+                    out.append(entry)
+            return out
+
+        row = row or {}
+        content = {"proposals": reviewable(row.get("proposals")),
+                   "evidence": reviewable(row.get("evidence"))}
+        return hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":"),
+                                         ensure_ascii=False, default=str).encode()).hexdigest()
+
     def _bind_derived_approval(self, item_id: str, source_revision: str | None,
                                artifact: str) -> None:
         """Record a complete binding on an approval DERIVED from a human decision in the same
@@ -12741,9 +12803,10 @@ class Store:
         with self._db.cursor() as cur:
             self._db.execute(cur,
                 "UPDATE hitl_queue SET approved_proposal_snapshot_ids=%s,approved_source_revision=%s,"
-                "approved_value_sha256=%s,approved_corrected_sha256=%s WHERE id=%s",
+                "approved_value_sha256=%s,approved_corrected_sha256=%s,approved_proposal_digest=%s "
+                "WHERE id=%s",
                 (json.dumps(aligned, separators=(",", ":")), source_revision,
-                 self._approved_value_digest(row), artifact, item_id))
+                 self._approved_value_digest(row), artifact, self.proposal_digest(row), item_id))
 
     @classmethod
     def _row_writes_document(cls, row: dict) -> bool:
@@ -12807,8 +12870,9 @@ class Store:
         approved_artifact = str(item.get("approved_corrected_sha256") or "").strip()
         approved_digest = str(item.get("approved_value_sha256") or "").strip()
         approved_snapshots = item.get("approved_proposal_snapshot_ids")
+        approved_content = str(item.get("approved_proposal_digest") or "").strip()
         if (not approved_revision or not approved_artifact or not approved_digest
-                or not isinstance(approved_snapshots, list)):
+                or not isinstance(approved_snapshots, list) or not approved_content):
             return self.RETRY_NO_BINDING
         cache = revisions if revisions is not None else {}
         if scan_id not in cache:
@@ -12832,6 +12896,10 @@ class Store:
         instances = item.get("proposals") or item.get("evidence") or []
         aligned = [captured[i] if i < len(captured) else None for i in range(len(instances))]
         if list(approved_snapshots) != aligned:
+            return self.RETRY_PROPOSALS_SUPERSEDED
+        # The content the approval was given for — a refresh that kept every token (same
+        # snapshot ids, even none) but changed a target or a draft is caught here.
+        if self.proposal_digest(item) != approved_content:
             return self.RETRY_PROPOSALS_SUPERSEDED
         return None
 
@@ -12906,6 +12974,11 @@ class Store:
         if not approved_snapshots or any(not value for value in approved_snapshots):
             return None, self.RETRY_NO_BINDING
         if list(approved_snapshots) != aligned:
+            return None, self.RETRY_PROPOSALS_SUPERSEDED
+        approved_content = str(item.get("approved_proposal_digest") or "").strip()
+        if not approved_content:
+            return None, self.RETRY_NO_BINDING
+        if self.proposal_digest(item) != approved_content:
             return None, self.RETRY_PROPOSALS_SUPERSEDED
         if not self._row_approved_values(item):
             return None, self.RETRY_NOTHING_TO_WRITE

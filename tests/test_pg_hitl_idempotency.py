@@ -58,6 +58,7 @@ def test_viewed_binding_is_a_compare_and_set_under_the_row_lock():
     item_id = st.enqueue_proposals(scan_id, "deck.pptx", "1.1.1", [{
         "locator": "ppt/slides/slide1.xml#Picture 1", "proposed_value": "A synthetic chart."}])
     viewed_revision = st.remediation_source_revision(scan_id)
+    viewed_content = st.proposal_digest(st.get_hitl_item(item_id))
     barrier = threading.Barrier(2)
 
     def decide(text, request_id):
@@ -68,7 +69,7 @@ def test_viewed_binding_is_a_compare_and_set_under_the_row_lock():
                 actor="reviewer@example.com", detail=None, request_id=request_id,
                 expected_version=0, expected_proposal_snapshot_ids=[],
                 expected_source_revision=viewed_revision, viewed=True,
-                expected_corrected_sha256="none")
+                expected_corrected_sha256="none", expected_proposal_digest=viewed_content)
         except ValueError as exc:
             return str(exc)
 
@@ -105,7 +106,8 @@ def test_an_approval_is_bound_to_the_exact_corrected_artifact_on_postgres():
         actor="reviewer@example.com", detail=None, expected_version=0,
         expected_proposal_snapshot_ids=[], viewed=True,
         expected_source_revision=st.remediation_source_revision(scan_id),
-        expected_corrected_sha256="a" * 64)
+        expected_corrected_sha256="a" * 64,
+        expected_proposal_digest=st.proposal_digest(st.get_hitl_item(item_id)))
     assert st.approved_write_hold(st.get_hitl_item(item_id)) is None
     revision = st.remediation_source_revision(scan_id)
     st.record_remediation(scan_id, "deck.pptx", corrected_sha256="b" * 64)

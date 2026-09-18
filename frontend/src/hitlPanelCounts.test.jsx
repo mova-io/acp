@@ -26,7 +26,7 @@ afterEach(unmountAll)
 // awaiting the reviewer's confirmation, manual work, and finished work.
 const draft = (id) => ({ id, file: `d-${id}.docx`, title: 'DOCX · Image needs alt text', rule_id: '1.1.1',
   severity: 'SERIOUS', hasProposal: true, after: `alt ${id}`,
-  _raw: { corrected_artifact: 'none', proposals: [{ proposed_value: `alt ${id}` }], proposal_snapshot_ids: [`s-${id}`],
+  _raw: { corrected_artifact: 'none', proposal_digest: 'digest-test', proposals: [{ proposed_value: `alt ${id}` }], proposal_snapshot_ids: [`s-${id}`],
           source_revision: 'r1', decision_version: 1 } })
 // Same lane, no lineage — approvable individually, never in a batch.
 const unversioned = (id) => ({ id, file: `u-${id}.docx`, title: 'DOCX · Image needs alt text',
