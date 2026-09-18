@@ -46,6 +46,8 @@ const KnowledgeGraph = lazy(() => import('./KnowledgeGraph.jsx'))
 const AdminLiveTraffic = lazy(() => import('./AdminLiveTraffic.jsx'))
 const LiveOperationsNotifier = lazy(() => import('./LiveOperationsNotifier.jsx'))
 import SignIn from './SignIn.jsx'
+import FindingEvidenceViewer from './FindingEvidenceViewer.jsx'
+import { captureEvidenceTarget, forgetEvidenceTarget, withoutEvidenceParams } from './evidenceLink.js'
 import Settings from './Settings.jsx'
 import MyDataDialog from './MyDataDialog.jsx'
 import Monitor from './Monitor.jsx'
@@ -290,8 +292,30 @@ export function useSharePointWorkflowKeepalive({ hasSPToken, owner, reconnectRev
   }, [hasSPToken, owner, reconnectRevision, setActiveWorkflows, setTokenRefreshError])
 }
 
+// A report's finding link (evidenceLink.js): `/?view=evidence&scan=…&file=…&finding=…`. Read ONCE
+// per page load, before sign-in, so the target survives the SignIn screen (and, through
+// sessionStorage, a redirect sign-in that returns to a bare "/").
+const evidenceStorage = () => { try { return window.sessionStorage } catch { return null } }
+function initialEvidenceTarget() {
+  if (typeof window === 'undefined') return null
+  const { target, restoredHref } = captureEvidenceTarget({ search: window.location.search, storage: evidenceStorage() })
+  if (restoredHref) {
+    try { window.history.replaceState(window.history.state, '', `${restoredHref}${window.location.hash}`) } catch { /* address bar only */ }
+  }
+  return target
+}
+
 export default function App() {
   const [me, setMe] = useState(null)
+  const [evidenceTarget, setEvidenceTarget] = useState(initialEvidenceTarget)
+  // Signed in with the target on screen: the address bar carries it now, so the sign-in copy in
+  // storage has done its job and must not outlive it.
+  useEffect(() => { if (me && evidenceTarget) forgetEvidenceTarget(evidenceStorage()) }, [me, evidenceTarget])
+  const closeEvidence = () => {
+    forgetEvidenceTarget(evidenceStorage())
+    try { window.history.replaceState(window.history.state, '', withoutEvidenceParams(window.location.href)) } catch { /* address bar only */ }
+    setEvidenceTarget(null)
+  }
   const [userTimezone, setUserTimezone] = useState('America/Chicago')
   // Why the user is looking at the sign-in screen. null on a first visit; set when a 401
   // bounced them out mid-session, so SignIn can say so rather than appear for no reason.
@@ -1200,6 +1224,9 @@ export default function App() {
   const runManifest = useScanManifest(scan?.run?.id, { skip: !scan?.run?.assessed_at })
 
   if (!me) return <SignIn onSignedIn={signIn} notice={signedOutReason} />   // SignIn's own BuildStamp shows the full CalVer
+  // After sign-in, never before: the viewer's facts request is owner-scoped, and there are no
+  // hooks below this line, so this early return cannot change the hook count.
+  if (evidenceTarget) return <FindingEvidenceViewer target={evidenceTarget} onClose={closeEvidence} />
 
   const switchScan = async (id) => {
     if (id === scan?.run?.id) return

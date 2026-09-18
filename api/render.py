@@ -61,7 +61,8 @@ def office_render_enabled() -> bool:
 def render_page_png(data: bytes, ext: str, page: int = 1) -> bytes | None:
     """Render page N (1-indexed) of a document to a PNG, downscaled to _MAX_EDGE on the long
     side. `page` is CLAMPED to the document's real range, so an out-of-range request returns
-    the nearest valid page rather than nothing — the "locate in document" evidence primitive.
+    the nearest valid page rather than nothing — right for an orientation thumbnail, WRONG for a
+    picture presented as the page a finding sits on: use render_exact_page_png for that.
 
     Returns the PNG bytes, or None for anything we can't render (non-PDF, empty, corrupt,
     encrypted, or any pdfium/Pillow error). Never raises — a preview is best-effort."""
@@ -83,6 +84,70 @@ def render_page_png(data: bytes, ext: str, page: int = 1) -> bytes | None:
 def render_page1_png(data: bytes, ext: str) -> bytes | None:
     """Page-1 preview (ADR 0015). Back-compat wrapper over render_page_png."""
     return render_page_png(data, ext, 1)
+
+
+# ── Exact pages ──────────────────────────────────────────────────────────────
+# render_page_png CLAMPS, which is right for an orientation thumbnail and wrong for evidence: on a
+# one-page PDF it returns byte-identical PNGs for page 1 and page 999, so a preview captioned
+# "page 99" was a picture of the last page. Anything that shows a page AS the page a finding sits
+# on goes through render_exact_page_png, which refuses a page the document does not have and says
+# how many it does have. render_page_png itself is unchanged: the generic preview route relies on
+# the clamp, and its output is never presented as an exact page.
+
+def _as_pdf(data: bytes, ext: str) -> bytes | None:
+    """The document as PDF bytes (itself for a PDF, a LibreOffice conversion for Office)."""
+    if not data or not can_render(ext):
+        return None
+    e = (ext or "").lower()
+    return data if e in RENDERABLE_EXTS else _office_to_pdf(data, e)
+
+
+def _pdf_page_count(pdf_bytes: bytes) -> int | None:
+    import pypdfium2 as pdfium
+    pdf = pdfium.PdfDocument(pdf_bytes)
+    try:
+        return len(pdf)
+    finally:
+        pdf.close()
+
+
+def page_count(data: bytes, ext: str) -> int | None:
+    """How many rendered pages (slides, for pptx) the document has, or None when it cannot be
+    rendered here. Never raises."""
+    try:
+        pdf_bytes = _as_pdf(data, ext)
+        return _pdf_page_count(pdf_bytes) if pdf_bytes else None
+    except Exception:
+        return None
+
+
+def render_exact_page_png(data: bytes, ext: str, page: int) -> dict:
+    """Page `page` (1-indexed) of the document, or an explicit refusal. NEVER a substitute page.
+
+    Returns {"png": bytes|None, "page": int, "pages": int|None, "reason": None|str}:
+      reason None            png is exactly that page;
+      reason "out_of_range"  the document has `pages` pages and `page` is not one of them;
+      reason "unrenderable"  the type, the bytes or the renderer failed (pages may be None).
+    Never raises, for the same reason render_page_png does not."""
+    try:
+        want = int(page)
+    except (TypeError, ValueError):
+        return {"png": None, "page": page, "pages": None, "reason": "out_of_range"}
+    try:
+        pdf_bytes = _as_pdf(data, ext)
+        pages = _pdf_page_count(pdf_bytes) if pdf_bytes else None
+    except Exception:
+        pdf_bytes, pages = None, None
+    if not pages:
+        return {"png": None, "page": want, "pages": None, "reason": "unrenderable"}
+    if want < 1 or want > pages:
+        return {"png": None, "page": want, "pages": pages, "reason": "out_of_range"}
+    # In range, so render_page_png's clamp is a no-op here. Going through it (with the already
+    # converted PDF) rather than straight to _render_pdf_page keeps one render seam for tests and
+    # keeps the Office conversion to a single LibreOffice run.
+    png = render_page_png(pdf_bytes, ".pdf", want)
+    return {"png": png or None, "page": want, "pages": pages,
+            "reason": None if png else "unrenderable"}
 
 
 _OFFICE_CONVERT_TIMEOUT = float(os.environ.get("ACP_OFFICE_RENDER_TIMEOUT", "60"))

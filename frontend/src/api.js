@@ -669,9 +669,12 @@ export const getFileReportFacts = (scanId, file) => (SIM || !scanId || !file
           { headers: headers(), cache: 'no-store' }).then(j))
 // Scan-level facts. Paginated over the per-file index (`offset`/`limit`/`complete`); the
 // top-level totals, `factsDigest`, `previous` and `previousReason` are the same on every page.
-export const getScanReportFacts = (scanId, { offset = 0, limit = 200 } = {}) => (SIM || !scanId
+// `digest` (Contract 3): the first page's factsDigest, sent with every LATER page. The server
+// answers 409 when the evidence has moved on since, so a caller never stitches page 1 of one
+// snapshot to page 2 of another. The first page is requested without it (a fresh build).
+export const getScanReportFacts = (scanId, { offset = 0, limit = 200, digest = null } = {}) => (SIM || !scanId
   ? sim(null)
-  : fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/report-facts?offset=${encodeURIComponent(offset)}&limit=${encodeURIComponent(limit)}`,
+  : fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/report-facts?offset=${encodeURIComponent(offset)}&limit=${encodeURIComponent(limit)}${digest ? `&digest=${encodeURIComponent(digest)}` : ''}`,
           { headers: headers(), cache: 'no-store' }).then(j))
 // EXACT-BYTES page render: the server rasterises only bytes whose sha256 equals `sha256`, and
 // answers 404 when it does not hold them. That is what makes a preview's provenance knowable —
@@ -689,12 +692,45 @@ export const getFileArtifactPage = (scanId, file, sha256, page = 1) => (SIM || !
   ? sim(null)
   : fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/files/${encodeURIComponent(file)}/artifact/${encodeURIComponent(sha256)}/page/${encodeURIComponent(page)}`,
           { headers: headers() })
-      .then(async (r) => (r.ok ? { blob: await r.blob(), sha256: r.headers?.get?.('X-ACP-Artifact-Sha256') || null } : null))
+      .then(async (r) => (r.ok ? { blob: await r.blob(), sha256: r.headers?.get?.('X-ACP-Artifact-Sha256') || null, renderedPage: headerInt(r, 'X-ACP-Rendered-Page') } : null))
       .catch(() => null))
 
+// A positive integer response header, or null when absent/unreadable (a cross-origin host that
+// does not expose it reads as null — "not confirmed", never as a number we made up).
+function headerInt(r, name) {
+  const n = Number(r?.headers?.get?.(name))
+  return Number.isInteger(n) && n > 0 ? n : null
+}
+
+// The same exact-bytes route, for a viewer that must SAY why a page is not shown. Never rejects.
+// Resolves one of:
+//   { ok: true,  blob, sha256, page, renderedPage, pageCount }
+//   { ok: false, status, detail }   — status null for a network failure / SIM
+// `detail` is the server's own sentence ("page 99 is beyond this document's 12 pages", "ACP does
+// not hold bytes with that digest for this document"), which is the specific reason a reviewer
+// needs; getFileArtifactPage collapses all of these to null. The route is strict: a page the
+// document does not have is refused, never substituted with the nearest one.
+export const getExactArtifactPage = (scanId, file, sha256, page) => {
+  if (SIM || !scanId || !file || !sha256) return sim({ ok: false, status: null, detail: null })
+  return fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/files/${encodeURIComponent(file)}/artifact/${encodeURIComponent(sha256)}/page/${encodeURIComponent(page)}`,
+    { headers: headers() })
+    .then(async (r) => {
+      if (r.ok) {
+        return { ok: true, blob: await r.blob(), page,
+          sha256: r.headers?.get?.('X-ACP-Artifact-Sha256') || null,
+          renderedPage: headerInt(r, 'X-ACP-Rendered-Page'), pageCount: headerInt(r, 'X-ACP-Page-Count') }
+      }
+      let detail = null
+      try { const body = await r.json(); detail = typeof body?.detail === 'string' ? body.detail : null } catch { /* not JSON */ }
+      return { ok: false, status: r.status, detail }
+    })
+    .catch(() => ({ ok: false, status: null, detail: null }))
+}
+
 // Raw Response (blob body) for the accessible server renderer; null in SIM (no server).
-export const postReportRender = (scanId, body) => (SIM ? Promise.resolve(null)
-  : fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/report-render`, { method: 'POST', headers: headers({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) }))
+// `signal` (optional) aborts the in-flight request — a cancelled packet export stops its render.
+export const postReportRender = (scanId, body, { signal } = {}) => (SIM ? Promise.resolve(null)
+  : fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/report-render`, { method: 'POST', headers: headers({ 'Content-Type': 'application/json' }), body: JSON.stringify(body), ...(signal ? { signal } : {}) }))
 // Versioned reviewer decisions on saved changes (api/routes/change_review.py). Real mode only —
 // changeReview.js owns the SIM behaviour (local, clearly unsaved), so these never fake a server.
 export const fetchChangeReviews = (scanId, file) =>
@@ -2071,10 +2107,18 @@ export const getFileThumbnail = (scanId, file) => (SIM
       .catch(() => null))
 // Rendered PNG of page N — the "locate in document" evidence primitive. The backend clamps
 // `page` to the document's range; null (→ placeholder) for non-PDF, SIM, or any failure.
-export const getFilePage = (scanId, file, page = 1) => (SIM || !scanId
+// Because it clamps, a caller that CAPTIONS the page passes `{ detail: true }` and gets
+// `{ blob, renderedPage, pageCount }`: `renderedPage` is the page the server says it drew
+// (X-ACP-Rendered-Page), or null when the server does not say — in which case the page shown is
+// NOT confirmed, and must not be captioned as if it were.
+export const getFilePage = (scanId, file, page = 1, { detail = false } = {}) => (SIM || !scanId
   ? sim(null)
   : fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/files/${encodeURIComponent(file)}/page/${page}`, { headers: headers() })
-      .then(r => (r.ok ? r.blob() : null))
+      .then(async (r) => {
+        if (!r.ok) return null
+        const blob = await r.blob()
+        return detail ? { blob, renderedPage: headerInt(r, 'X-ACP-Rendered-Page'), pageCount: headerInt(r, 'X-ACP-Page-Count') } : blob
+      })
       .catch(() => null))
 
 // Normalized bounding box {page,x,y,w,h} for the shape a finding's `part#rId` locator names —
@@ -2090,11 +2134,25 @@ export const getFileGeometry = (scanId, file, locator) => (SIM || !scanId || !fi
 
 // Deep link back to the source document at the given slide/page. Returns {url, label} on success,
 // {url: null} when no link is possible (local, missing SP token, Graph error). Non-blocking.
-export const getSourceLink = (scanId, file, page = 1) => (SIM || !scanId || !file
-  ? sim({ url: null })
-  : fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/files/${encodeURIComponent(file)}/source_link?page=${page}`, { headers: headers() })
-      .then(r => (r.ok ? r.json() : { url: null }))
-      .catch(() => ({ url: null })))
+// `page: null` means NO page is known: the request carries none, and the slide anchor the server
+// defaults to (`slide=1` for .pptx) is removed, so the link opens the document without claiming
+// a slide nobody recorded.
+export const getSourceLink = (scanId, file, page = 1) => {
+  const p = Number.isInteger(page) && page > 0 ? page : null
+  if (SIM || !scanId || !file) return sim({ url: null })
+  return fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/files/${encodeURIComponent(file)}/source_link${p ? `?page=${p}` : ''}`, { headers: headers() })
+    .then(r => (r.ok ? r.json() : { url: null }))
+    .then((d) => (p || !d?.url ? d : { ...d, url: withoutSlideAnchor(d.url) }))
+    .catch(() => ({ url: null }))
+}
+function withoutSlideAnchor(url) {
+  try {
+    const u = new URL(url)
+    if (!u.searchParams.has('slide')) return url
+    u.searchParams.delete('slide')
+    return u.toString()
+  } catch { return url }
+}
 
 // The docx heading outline {before,after} for a heading finding's Structure evidence — computed on
 // demand from the document (mirrors getFileGeometry). null when unavailable (non-docx, <2 headings,

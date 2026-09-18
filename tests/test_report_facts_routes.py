@@ -284,12 +284,16 @@ def test_the_cache_key_carries_the_digest_so_it_cannot_serve_other_bytes(client,
     monkeypatch.setattr(_blob, "download_remediated", lambda *a, **k: _PDF, raising=False)
     monkeypatch.setattr(_blob, "download_render", lambda *a, **k: None, raising=False)
     monkeypatch.setattr(_blob, "upload_render",
-                        lambda owner, sid, key, data: seen.setdefault("key", key), raising=False)
+                        lambda owner, sid, key, data: seen.setdefault(key, data), raising=False)
     monkeypatch.setattr(_render, "can_render", lambda ext: True, raising=False)
     monkeypatch.setattr(_render, "render_page_png", lambda d, e, p: b"png", raising=False)
     _seed(isolated_store)
-    client(OWNER).get(_artifact_url(_PDF_SHA, page=3))
-    assert _PDF_SHA in seen["key"] and "#p3" in seen["key"]
+    # Page 1: _PDF has ONE page, and the exact route now refuses page 3 of it outright
+    # (tests/test_report_facts_exact_page.py) — this test used to pass only because it clamped.
+    client(OWNER).get(_artifact_url(_PDF_SHA, page=1))
+    image_keys = [k for k, v in seen.items() if v == b"png"]
+    assert len(image_keys) == 1
+    assert _PDF_SHA in image_keys[0] and image_keys[0].endswith("#exact#p1")
 
 
 def test_a_file_outside_the_scan_cannot_be_previewed(client, isolated_store, held_bytes):

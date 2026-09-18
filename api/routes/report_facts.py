@@ -106,7 +106,14 @@ def _candidate_bytes(request: Request, sid: str, filename: str, owner: str):
 
 @router.get("/scans/{sid}/files/{filename:path}/artifact/{sha256}/page/{page}")
 def get_artifact_page(sid: str, filename: str, sha256: str, page: int, request: Request):
-    """A page image of exactly the bytes named by `sha256`, or 404. Never a substitute."""
+    """A page image of exactly the bytes named by `sha256`, AND exactly page `page`, or 404.
+
+    Never a substitute in either dimension. Other bytes are refused (the digest is the request),
+    and so is another page: this route used to clamp — `max(1, min(page, 5000))`, then
+    render_page_png's own clamp — so on a one-page PDF page 999 answered 200 with page 1, which a
+    caller captioned "page 999". Now a page the document does not have is a 404 whose detail names
+    the document's page count, and a 200 says which page it is (`X-ACP-Rendered-Page`).
+    """
     import blob as _blob
     import render as _render
 
@@ -122,15 +129,39 @@ def get_artifact_page(sid: str, filename: str, sha256: str, page: int, request: 
     ext = os.path.splitext(filename)[1].lower()
     if not _render.can_render(ext):
         raise HTTPException(404, "no preview available for this file type")
-    page = max(1, min(int(page or 1), _MAX_PAGE))
+    unit = "slide" if ext == ".pptx" else "page"
+    if page < 1:
+        raise HTTPException(404, f"{unit} {page} is not a {unit} of this document; "
+                                 f"{unit}s are numbered from 1")
+    if page > _MAX_PAGE:
+        raise HTTPException(404, f"{unit} {page} is beyond the {_MAX_PAGE} {unit}s ACP renders")
 
-    # The cache key carries the digest, so a cached image can never be served for other bytes.
-    cache_key = f"{filename}#a{digest}#p{page}"
+    def beyond(pages: int) -> HTTPException:
+        return HTTPException(404, f"{unit} {page} is beyond this document's {pages} "
+                                  f"{unit}{'' if pages == 1 else 's'}")
+
+    def served(png: bytes, pages: int | None) -> Response:
+        headers = {"Cache-Control": "private, max-age=86400",
+                   "X-ACP-Artifact-Sha256": digest, "X-ACP-Rendered-Page": str(page)}
+        if pages:
+            headers["X-ACP-Page-Count"] = str(pages)
+        return Response(png, media_type="image/png", headers=headers)
+
+    # The cache keys carry the digest, so a cached image can never be served for other bytes.
+    # `#exact` because the pre-fix key (`#a<sha>#p<n>`) may still hold a CLAMPED render of a page
+    # that does not exist, and this route must never read one. The page count is cached beside
+    # the renders so an out-of-range request is refused without re-converting an Office file.
+    cache_key = f"{filename}#a{digest}#exact#p{page}"
+    count_key = f"{filename}#a{digest}#exact#pages"
+    try:
+        known_pages = int((_blob.download_render(owner, sid, count_key) or b"0").decode()) or None
+    except (ValueError, UnicodeDecodeError, AttributeError):
+        known_pages = None
+    if known_pages is not None and page > known_pages:
+        raise beyond(known_pages)
     cached = _blob.download_render(owner, sid, cache_key)
     if cached is not None:
-        return Response(cached, media_type="image/png",
-                        headers={"Cache-Control": "private, max-age=86400",
-                                 "X-ACP-Artifact-Sha256": digest})
+        return served(cached, known_pages)
 
     # Verify BEFORE rasterising: the digest is the question, not a label applied afterwards.
     data = next((d for d in _candidate_bytes(request, sid, filename, owner)
@@ -138,10 +169,12 @@ def get_artifact_page(sid: str, filename: str, sha256: str, page: int, request: 
     if data is None:
         raise HTTPException(404, "ACP does not hold bytes with that digest for this document")
 
-    png = _render.render_page_png(data, ext, page)
-    if not png:
+    got = _render.render_exact_page_png(data, ext, page)
+    if got.get("pages"):
+        _blob.upload_render(owner, sid, count_key, str(got["pages"]).encode())   # best-effort
+    if got.get("reason") == "out_of_range":
+        raise beyond(got["pages"])
+    if not got.get("png"):
         raise HTTPException(404, "could not render this page")
-    _blob.upload_render(owner, sid, cache_key, png)   # best-effort cache; never raises
-    return Response(png, media_type="image/png",
-                    headers={"Cache-Control": "private, max-age=86400",
-                             "X-ACP-Artifact-Sha256": digest})
+    _blob.upload_render(owner, sid, cache_key, got["png"])   # best-effort cache; never raises
+    return served(got["png"], got.get("pages"))

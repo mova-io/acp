@@ -62,7 +62,9 @@ describe('Thumbnail fetches the page it claims to show', () => {
 
   it('routes a later page to /page/{n} and page 1 to the cheaper /thumbnail', () => {
     // renderPage = the geometry box's page when a locator resolves one, else the `page` prop.
-    expect(src).toMatch(/renderPage === 1 \? getFileThumbnail\(scanId, file\) : getFilePage\(scanId, file, renderPage\)/)
+    // Page N asks for `{ detail: true }` so the server can say which page it drew — the generic
+    // route clamps, and a picture is only captioned page N when that is confirmed.
+    expect(src).toMatch(/renderPage === 1\s*\?\s*getFileThumbnail\(scanId, file\)[\s\S]{0,80}:\s*getFilePage\(scanId, file, renderPage, \{ detail: true \}\)/)
   })
 
   it('re-fetches when the page changes — a stale render is the wrong page', () => {
@@ -74,8 +76,10 @@ describe('Thumbnail fetches the page it claims to show', () => {
   })
 
   it('names the page it actually rendered — hardcoded "page 1" alt is inaccurate alt text', () => {
-    expect(src).toMatch(/alt=\{`Page \$\{renderPage\} of/)
-    expect(src).not.toMatch(/alt=\{`Page 1 of/)
+    // ...and only when the page is CONFIRMED; otherwise the alt says it is not (thumbnailPages.test.jsx
+    // checks the rendered DOM).
+    expect(src).toMatch(/confirmed \? `Page \$\{renderPage\} of/)
+    expect(src).not.toMatch(/`Page 1 of/)
   })
 })
 
@@ -95,7 +99,10 @@ describe('the review card shows the reviewer the page and the passage', () => {
   })
 
   it('passes the finding page — not the cover — down to the render', () => {
-    expect(card).toMatch(/<Thumbnail[^>]*page=\{card\.page \|\| 1\}/)
+    // heroPage: the pager's measured page, else the recorded page — never `|| 1`, which captioned
+    // an unplaced finding "Page 1".
+    expect(card).toMatch(/<Thumbnail[^>]*page=\{heroPage\}/)
+    expect(card).not.toMatch(/page=\{card\.page \|\| 1\}/)
     expect(src).toMatch(/page: pageOf\(it\)/)
   })
 

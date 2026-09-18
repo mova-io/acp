@@ -102,7 +102,9 @@ describe('collectPreviews', () => {
     // "not verified" — never "after the edit".
     expect(previews[3].src).toMatch(/^data:image\/png;base64,/)
     expect(previews[3].provenance).toBe('unverified')
-    expect(previews[3].caption).toBe('Document preview — version not verified — page 3')
+    // ...and the PAGE is not confirmed either: the generic route clamps an out-of-range page and
+    // this test double does not say which page it drew (X-ACP-Rendered-Page).
+    expect(previews[3].caption).toBe('Document preview — version not verified — page 3 (page not confirmed)')
     expect(status.notIncluded).toEqual([11, 12, 13])
     expect(status.reason).toMatch(/3 more referenced pages are not included \(pages 11, 12, 13\)/)
   })
