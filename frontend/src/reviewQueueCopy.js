@@ -76,7 +76,7 @@ export function reviewEmptyLine(files, { totalHitl = 0, acted = {} } = {}) {
  */
 export function reviewLeadLine(files, reviewCount = 0, explanation = undefined) {
   if (reviewCount > 0) return null
-  // THE SECOND BUG, seen on scan b3eba56d4d5d: this line was gated on human-pending rows alone, so
+  // THE SECOND BUG, seen in the production case: this line was gated on human-pending rows alone, so
   // it said "All clear" while two tasks sat in Status checks and the server still listed an
   // unresolved finding. With the population explanation (reviewPopulationExplanation.js) the lead
   // is its headline, and "All clear" appears only when that explanation is all clear — no task in

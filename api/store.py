@@ -8705,7 +8705,12 @@ class Store:
                        "rejected": "unchanged_no_fix", "skipped": "unchanged_no_fix"}.get(status)
         if not disposition:
             return 0
-        return self.set_finding_group_disposition(
+        # A row's binding just changed (proposal refresh, a re-decision). If that lapsed a
+        # target-removal retirement, reopen it explicitly: the group projection below is limited
+        # to `finding_count` rows in instance-key order and need not reach the retired finding.
+        from review_target_reconciliation import reopen_lapsed
+        reopened = reopen_lapsed(self, item["scan_id"], item["file"])
+        return reopened + self.set_finding_group_disposition(
             item["scan_id"], item["file"], item["rule_id"], disposition,
             event_key=f"hitl:{item_id}:{status}", review_item_id=item_id,
             limit=int(item.get("finding_count") or 1), batch_id=batch_id)

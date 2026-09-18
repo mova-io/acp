@@ -25,9 +25,9 @@ import review_target_reconciliation as rtr
 from apply_office_image_replacement import apply_office_image_replacement
 
 SID = 'trm-scan'
-FILE = 'UTSW_Discharge_Summary.docx'
+FILE = 'synthetic-target-replacement.docx'
 OWNER = 'owner@example.com'
-TEXT = 'Discharge instructions\nTake medication twice daily'
+TEXT = 'Opening hours\nMonday to Friday'
 C1_KEYS = {'removed_by_item_id', 'removed_by_rule_id', 'targets', 'finding_ids',
            'corrected_artifact_sha256', 'source_artifact_sha256', 'verified_at', 'assessment',
            'assessment_status', 'skipped_rules'}
@@ -43,7 +43,7 @@ def picture(color):
 def docx(colors=('red',)):
     from docx import Document
     doc = Document()
-    doc.add_heading('Discharge summary', 1)
+    doc.add_heading('Synthetic report', 1)
     doc.add_paragraph('Synthetic body copy.')
     for color in colors:
         doc.add_picture(io.BytesIO(picture(color)))
@@ -824,3 +824,123 @@ def test_auto_route_still_routes_and_reconciles(store, monkeypatch):
             user_email = None
     response = routes.hitl_auto_queue(SID, Req())
     assert called == [SID] and response['target_removals']['superseded'] == [w.alt]
+
+
+# ── follow-up 3: every lapse of the binding reopens the ledger, not only a new artifact ─────
+
+def _consistent_open(store, w):
+    """Row visible as work again AND the ledger agrees, read through the real surfaces."""
+    assert w.row() is not None
+    assert w.row(include_superseded=True).get('superseded') is False
+    [finding] = w.findings()
+    assert finding['disposition'] == 'awaiting_review'
+    view = store._stage_domain_reconciliation(store.get_stage_execution(w.batch), {})
+    assert view['buckets']['superseded'] == 0
+    assert view['unresolved_findings_total'] == 1
+    assert [f['finding_id'] for f in view['unresolved_findings']] == [finding['finding_id']]
+    events = store.finding_disposition_events(SID, w.batch, finding['finding_id'])
+    retired_at = max(i for i, e in enumerate(events) if e['to_disposition'] == 'superseded_by_reassessment')
+    reopen = events[retired_at + 1]                    # append-only, and it says why
+    assert reopen['to_disposition'] == 'awaiting_review'
+    assert reopen['fix_evidence_ids'][0].startswith('target_removal_lapsed:')
+    return finding
+
+
+def test_a_real_proposal_refresh_reopens_the_retired_finding(store):
+    """Same corrected sha, new proposal from a later remediation pass (enqueue_proposals is the
+    production refresh): the binding lapses, so the row is work again and the ledger must say so."""
+    w = World(store)
+    w.reconcile()
+    assert w.row() is None and w.findings()[0]['disposition'] == 'superseded_by_reassessment'
+    sha_before = store.get_file_record(SID, FILE)['corrected_sha256']
+
+    store.enqueue_proposals(SID, FILE, '1.1.1', [
+        {'locator': 'word/document.xml#Picture 1', 'before': '',
+         'proposed_value': 'A refreshed synthetic draft', 'source': 'vision'}],
+        rule_name='Non-text Content')
+
+    assert store.get_file_record(SID, FILE)['corrected_sha256'] == sha_before
+    _consistent_open(store, w)
+
+
+def test_an_identical_refresh_keeps_the_retirement(store):
+    """A refresh that changes nothing the evidence is bound to is not a lapse."""
+    w = World(store)
+    w.reconcile()
+    row = store.get_hitl_item(w.alt)
+    store.sync_hitl_finding_dispositions(w.alt, row['status'])
+    assert w.row() is None and w.findings()[0]['disposition'] == 'superseded_by_reassessment'
+
+
+def test_a_real_decision_version_change_reopens_the_retired_finding(store):
+    """The one decision still accepted on a retired row — re-saving it as pending with a note —
+    bumps decision_version through complete_hitl_decision; the ledger follows the row."""
+    w = World(store)
+    w.reconcile()
+    store.complete_hitl_decision(w.alt, 'pending', 'looked again', None, resolution=None,
+                                 approved_values=None, actor=OWNER, detail=None)
+    assert store.get_hitl_item(w.alt)['decision_version'] == 1
+    _consistent_open(store, w)
+
+
+def test_the_sync_path_reopens_even_when_its_group_limit_would_skip_the_finding(store):
+    """sync projects `finding_count` rows in instance-key order. With a second, already-open
+    finding for the row sorting first, the group projection alone would never reach the
+    retired one — the explicit lapse check must."""
+    w = World(store)
+    w.reconcile()
+    [retired] = w.findings()
+    with store._db.cursor() as cur:
+        store._db.execute(cur,
+            "INSERT INTO finding_disposition(scan_id,batch_id,finding_id,workflow_id,snapshot_id,"
+            "document_id,file,rule_id,instance_key,assessment_status,disposition,review_item_id,"
+            "fix_evidence_ids,verified_at,revision,created_at,updated_at) "
+            "VALUES(%s,%s,'aaa-open',%s,%s,'doc',%s,'1.1.1','aaa-first','review','awaiting_review',"
+            "%s,'[]',NULL,1,'t','t')", (SID, w.batch, SID, SID, FILE, w.alt))
+        store._db.execute(cur, "UPDATE hitl_queue SET proposal_snapshot_ids=%s WHERE id=%s",
+                          (json.dumps(['snap-lapsed']), w.alt))
+    store.sync_hitl_finding_dispositions(w.alt, 'pending')
+    by_id = {f['finding_id']: f['disposition'] for f in w.findings()}
+    assert by_id[retired['finding_id']] == 'awaiting_review'
+
+
+def test_reconcile_targets_reopens_a_lapsed_retirement_even_without_new_proof(store, monkeypatch):
+    """The copy changed by a path that did not reopen (simulated by a direct pointer update) and
+    no saved-copy check exists for the new copy: the call must still reopen the finding under
+    its locks, and must not claim anything retired."""
+    w = World(store)
+    _persist(store, w)
+    blob = CountingBlob(w.corrected, w.source)
+    monkeypatch.setitem(sys.modules, 'blob', blob)
+    rtr.reconcile_scan(store, SID)
+    assert w.findings()[0]['disposition'] == 'superseded_by_reassessment'
+    with store._db.cursor() as cur:
+        store._db.execute(cur, "UPDATE file_records SET corrected_sha256=%s WHERE scan_id=%s AND file=%s",
+                          ('b' * 64, SID, FILE))
+    assert w.findings()[0]['disposition'] == 'superseded_by_reassessment'      # stale until asked
+    order = []
+    real_rows, real_file = rtr.lock_rows, rtr.lock_file
+    monkeypatch.setattr(rtr, 'lock_rows', lambda st, ids: (order.append('rows'), real_rows(st, ids))[1])
+    monkeypatch.setattr(rtr, 'lock_file', lambda st, s, f: (order.append('file'), real_file(st, s, f))[1])
+    reads = len(blob.reads)
+
+    body = _client(store, monkeypatch).post(f'/hitl/queue/{SID}/reconcile-targets',
+                                            headers={'Authorization': f'Bearer {OWNER}'}).json()
+
+    assert body['superseded_count'] == 0
+    assert body['files'][0]['skipped'] == [{'item_id': None, 'reason': 'verification_missing'}]
+    assert order[:2] == ['rows', 'file']
+    assert len(blob.reads) == reads                                             # no proof, no read
+    _consistent_open(store, w)
+
+
+def test_nothing_lapsed_takes_no_write_lock(store, monkeypatch):
+    """Polling a file whose retirement is still current must not take the write locks."""
+    w = World(store)
+    _persist(store, w)
+    monkeypatch.setitem(sys.modules, 'blob', CountingBlob(w.corrected, w.source))
+    rtr.reconcile_scan(store, SID)
+    taken = []
+    monkeypatch.setattr(rtr, 'lock_file', lambda *a: taken.append(a) or None)
+    rtr.reconcile_scan(store, SID)
+    assert taken == []

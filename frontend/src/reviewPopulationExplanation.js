@@ -1,7 +1,7 @@
 // One explanation of the review population, so every sentence about "what is left" reads the
 // same numbers.
 //
-// THE BUG THIS EXISTS TO PREVENT, seen in production on scan b3eba56d4d5d (synthetic reproduction
+// THE BUG THIS EXISTS TO PREVENT, seen in the production case (synthetic reproduction
 // in reviewPopulationExplanation.test.jsx). One DOCX, five review tasks, one unresolved finding.
 // The same screen said, at once:
 //
@@ -73,14 +73,26 @@ const KNOWN_BUCKETS = new Set(['awaiting_recorded_outcome', 'not_in_remediation_
  * The server-side inputs from a stage snapshot's `domain_reconciliation` (C2). `findingTotal` is
  * the unresolved-finding count the tile shows — null when the partition does not balance, because
  * an unbalanced count is not one to reason from.
+ *
+ * `findingLedger` says whether the ledger as a WHOLE can be trusted to prove that nothing remains:
+ * 'consistent' only when the buckets add up to the total (WorkflowOutcomeTiles' `balanced`) and no
+ * integrity signal says otherwise — the same signals stageAccountingModel treats as inconsistent
+ * (domain.exact === false, recorded violations, and, when the snapshot is passed, integrity.ok ===
+ * false / reconciliation.exact === false / reconciliation_status 'inconsistent'). An unresolved
+ * subset of 0 inside an unbalanced ledger (total 9, buckets summing to 4) proves nothing about the
+ * other 5, so it cannot support "All clear". 'unknown' when there is no ledger at all.
  */
-export function findingInputsFrom(domain) {
+export function findingInputsFrom(domain, snapshot = null) {
   if (!domain || domain.available === false || !domain.buckets) {
-    return { unresolvedFindings: null, unresolvedFindingsTruncated: false, unresolvedFindingsTotal: null, findingTotal: null }
+    return { unresolvedFindings: null, unresolvedFindingsTruncated: false, unresolvedFindingsTotal: null, findingTotal: null,
+      findingLedger: 'unknown' }
   }
   const buckets = domain.buckets
   const values = Object.values(buckets)
   const balanced = isCount(domain.total) && values.every(isCount) && values.reduce((a, b) => a + b, 0) === domain.total
+  const integrityBroken = domain.exact === false || (Array.isArray(domain.violations) && domain.violations.length > 0)
+    || snapshot?.integrity?.ok === false || snapshot?.reconciliation?.exact === false
+    || snapshot?.reconciliation_status === 'inconsistent'
   const findingTotal = balanced
     ? ATTENTION_BUCKETS.reduce((sum, key) => sum + (buckets[key] || 0), 0)
       + Object.keys(buckets).filter(key => !KNOWN_BUCKETS.has(key)).reduce((sum, key) => sum + buckets[key], 0)
@@ -92,6 +104,7 @@ export function findingInputsFrom(domain) {
     // list also carries approved-pending-verification findings, which the tile files under Processing.
     unresolvedFindingsTotal: isCount(domain.unresolved_findings_total) ? domain.unresolved_findings_total : null,
     findingTotal,
+    findingLedger: balanced && !integrityBroken ? 'consistent' : 'inconsistent',
   }
 }
 
@@ -109,10 +122,11 @@ export const PROGRESS_DEFINITION = 'Same tasks in both counts. Final outcome = c
  * @param unresolvedFindingsTruncated  server said the list was capped
  * @param unresolvedFindingsTotal  server's uncapped count of the unresolved_findings list, or null
  * @param findingTotal      server unresolved-finding count (the "Unresolved findings" tile), or null
+ * @param findingLedger     'consistent' | 'inconsistent' | 'unknown' (findingInputsFrom), or null when not supplied
  * @param files             scan file records, for the unreadable-document caveat
  */
 export function explainReviewPopulation({ rows = [], decisions = {}, automatic = false, unresolvedFindings = null,
-  unresolvedFindingsTruncated = false, unresolvedFindingsTotal = null, findingTotal = null, filter = null, files = [] } = {}) {
+  unresolvedFindingsTruncated = false, unresolvedFindingsTotal = null, findingTotal = null, findingLedger = null, filter = null, files = [] } = {}) {
   const tasks = dedupeReviewTasks(rows || [])
   const tabs = new Map()
   const counts = { review: 0, processing: 0, 'status-check': 0, results: 0 }
@@ -200,7 +214,12 @@ export function explainReviewPopulation({ rows = [], decisions = {}, automatic =
   // the tile's balanced count at 0 (findingInputsFrom returns null when the buckets do not add up) or
   // the server's uncapped list total at 0. A missing domain, a missing list or unbalanced buckets
   // leave the totals UNKNOWN — and an unknown is not a zero, however empty the queue looks.
-  const findingTotalsKnown = findingTotal === 0 || unresolvedFindingsTotal === 0
+  // An inconsistent ledger can never prove zero. The tile's count is only non-null when its buckets
+  // balance, so findingTotal === 0 suffices unless an integrity signal contradicts it; the list total
+  // alone needs the ledger to be affirmatively consistent.
+  const findingTotalsState = findingLedger === 'inconsistent' ? 'inconsistent'
+    : findingTotal === 0 || (unresolvedFindingsTotal === 0 && findingLedger === 'consistent') ? 'known' : 'unknown'
+  const findingTotalsKnown = findingTotalsState === 'known'
   const allClear = remaining.length === 0 && counts.review === 0 && counts.processing === 0 && counts['status-check'] === 0
     && progress.awaitingOutcome === 0 && unmatchedFindings.length === 0 && !unlistedFindings
     && !(serverFindings > 0) && !(unresolvedFindingsTotal > 0) && unreadable === 0 && findingTotalsKnown
@@ -208,7 +227,7 @@ export function explainReviewPopulation({ rows = [], decisions = {}, automatic =
   const explanation = {
     taskTotal: tasks.length, humanCount: counts.review, processingCount: counts.processing,
     statusCheckCount: counts['status-check'], resultsCount: counts.results,
-    findingTotal: serverFindings, findingTotalsKnown, findingNote: FINDING_NOTE,
+    findingTotal: serverFindings, findingTotalsKnown, findingTotalsState, findingNote: FINDING_NOTE,
     remaining, unmatchedFindings, unlistedFindings, allClear, automatic, progress,
   }
   explanation.headline = headlineOf(explanation, files)
@@ -254,6 +273,7 @@ function otherWork(e, except = null) {
   return parts
 }
 export const UNKNOWN_TOTALS = 'No open review tasks; current finding totals unavailable.'
+export const INCONSISTENT_TOTALS = 'No open review tasks; current finding totals are inconsistent, so ACP cannot confirm nothing remains.'
 // Nothing left in the QUEUE and nothing the server itemised — the only open question is the totals.
 const tasksSettled = (e) => e.remaining.length === 0 && !e.humanCount && !e.processingCount && !e.statusCheckCount
   && !e.progress.awaitingOutcome && !e.unmatchedFindings.length && !e.unlistedFindings && !(e.findingTotal > 0)
@@ -264,7 +284,8 @@ function headlineOf(e, files) {
   if (e.allClear) return 'All clear — nothing needs your review.'
   // Every task settled, but the finding totals cannot be confirmed: say exactly that, never "clear".
   if (tasksSettled(e) && !e.findingTotalsKnown) {
-    return caveat ? `${UNKNOWN_TOTALS} ${caveat}` : UNKNOWN_TOTALS
+    const line = e.findingTotalsState === 'inconsistent' ? INCONSISTENT_TOTALS : UNKNOWN_TOTALS
+    return caveat ? `${line} ${caveat}` : line
   }
   const sentences = []
   if (e.humanCount) {
@@ -284,7 +305,8 @@ function headlineOf(e, files) {
   else if (!unlinked && e.findingTotal > 0 && !e.humanCount && !e.statusCheckCount && !e.processingCount) {
     sentences.push(`The server still reports ${plural(e.findingTotal, 'unresolved finding')} — see Remaining findings.`)
   }
-  if (!e.findingTotalsKnown && !e.unlistedFindings && !unlinked && !(e.findingTotal > 0)) {
+  if (e.findingTotalsState === 'inconsistent') sentences.push('Current finding totals are inconsistent.')
+  else if (!e.findingTotalsKnown && !e.unlistedFindings && !unlinked && !(e.findingTotal > 0)) {
     sentences.push('Current finding totals are unavailable.')
   }
   if (caveat) sentences.push(caveat)
@@ -304,7 +326,10 @@ function emptyFilterLineOf(e, filter) {
   const others = otherWork(e, tab)
   if (others.length) return `${lead} This is a filtered view — ${joinParts(others)} still ${others.length === 1 && /^1 /.test(others[0]) ? 'remains' : 'remain'} in other tabs.`
   if (e.allClear) return `${lead} Nothing else remains in this queue.`
-  if (tasksSettled(e) && !e.findingTotalsKnown) return `${lead} No other open review tasks; current finding totals unavailable.`
+  if (tasksSettled(e) && !e.findingTotalsKnown) {
+    return `${lead} No other open review tasks; ${e.findingTotalsState === 'inconsistent'
+      ? 'current finding totals are inconsistent, so ACP cannot confirm nothing remains.' : 'current finding totals unavailable.'}`
+  }
   return `${lead} This is a filtered view; other tasks may remain.`
 }
 

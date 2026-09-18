@@ -26,17 +26,32 @@ describe('reconcile-targets result copy', () => {
     // `unchanged` = retired by an EARLIER re-check (the server's contract), never "still open".
     expect(reconciliationSummary({ superseded_count: 0, files: [file({ unchanged: [{ item_id: 'a' }],
       skipped: [{ item_id: null, reason: 'nothing_to_reconcile' }] })] }))
-      .toBe('Nothing changed: 1 item was already closed by an earlier re-check. Not changed: no open item in this scan is one this re-check applies to.')
+      .toBe('Nothing changed: 1 item was already closed by a verified target replacement. Not changed: no open item in this scan is one this re-check applies to.')
   })
 })
 
 it('never describes an already-closed item as still holding its target', () => {
   const text = reconciliationSummary({ superseded_count: 1, files: [file({ superseded: [{ item_id: 'b' }], unchanged: [{ item_id: 'a' }] })] })
-  expect(text).toBe('1 item closed: another verified change replaced its target. 1 item was already closed by an earlier re-check.')
+  expect(text).toBe('1 item closed: another verified change replaced its target. 1 item was already closed by a verified target replacement.')
   expect(text).not.toMatch(/still ha(s|ve)/)
 })
 
 it('explains a bounded run in plain words', () => {
   expect(reconciliationSummary({ superseded_count: 0, files: [file({ skipped: [{ item_id: null, reason: 'deferred_bounded' }] })] }))
     .toBe('Nothing changed: this re-check stopped at its per-request limit — run it again to check the rest.')
+})
+
+it('an already-closed item with nothing else to report says exactly that, with no new changes', () => {
+  expect(reconciliationSummary({ superseded_count: 0, files: [file({ unchanged: [{ item_id: 'a' }] })] }))
+    .toBe('Nothing changed: 1 item was already closed by a verified target replacement.')
+})
+
+it('keeps the skip reasons for items that really remain open beside an already-closed one', () => {
+  const text = reconciliationSummary({ superseded_count: 0, files: [file({ unchanged: [{ item_id: 'a' }],
+    skipped: [{ item_id: 'b', reason: 'target_remains' }] })] })
+  expect(text).toBe('Nothing changed: 1 item was already closed by a verified target replacement. Not changed: its target is still in the saved copy.')
+})
+
+it('does not blame the corrected copy when either stored document may be missing', () => {
+  expect(reasonText('bytes_unavailable')).not.toMatch(/corrected/)
 })

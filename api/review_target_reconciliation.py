@@ -1,6 +1,6 @@
 """Retire review rows whose exact targets a DIFFERENT, verified fix has removed from the document.
 
-THE PRODUCTION CASE (scan b3eba56d4d5d, a Word discharge summary). One body picture carried two
+THE CASE (reproduced synthetically in the tests). One Word body picture carried two
 review rows: 1.1.1 asking for alt text (pending, with a drafted description) and 1.4.5 replacing
 the picture with its OCR transcript (approved). The 1.4.5 writer deleted the picture, the fresh
 independent assessment of the saved copy was complete and reported nothing left — and the 1.1.1
@@ -434,52 +434,78 @@ _SYNC = {'pending': 'awaiting_review', 'in_review': 'awaiting_review',
          'rejected': 'unchanged_no_fix', 'skipped': 'unchanged_no_fix'}
 
 
-def reopen_lapsed(store, scan_id, file) -> int:
-    """Reopen findings this module retired whose evidence is no longer CURRENT.
+def lapsed_findings(store, scan_id, file) -> list[dict]:
+    """Findings this module retired whose removal evidence is no longer CURRENT. Reads only.
 
-    Called wherever file_records.corrected_sha256 changes. The derived row flag lapses on its
-    own (current_removals is computed at read time), but the ledger row is persisted: left alone
-    it would keep reporting the finding superseded while its review row is ordinary work again —
-    the inbox and the ledger disagreeing in the opposite direction from the production bug. So
-    the retired finding goes back to the disposition its review row implies (the same mapping
-    sync_hitl_finding_dispositions uses), with an append-only event naming why. If the removal
-    still holds on the new bytes, the caller's own reconciliation retires it again against the
-    new evidence (the apply job does exactly that right after its commit).
-
-    Only findings whose supersession evidence came from THIS module are touched; anything else
-    that ever writes superseded_by_reassessment keeps its own semantics.
+    Evidence lapses whenever anything it is bound to moves: the corrected artifact, the row's
+    decision_version, its proposals/snapshots/targets, the batch or the scope. Only findings
+    whose supersession evidence came from THIS module qualify; anything else that ever writes
+    superseded_by_reassessment keeps its own semantics.
     """
     batch_id = current_batch(store, scan_id)
     if not batch_id:
-        return 0
+        return []
     with store._db.cursor() as cur:
         store._db.execute(cur,
             "SELECT finding_id,revision,review_item_id,fix_evidence_ids FROM finding_disposition "
             "WHERE scan_id=%s AND batch_id=%s AND file=%s AND disposition='superseded_by_reassessment'",
             (scan_id, batch_id, file))
-        retired = [r for r in store._db.fetchall(cur)
+        retired = [dict(r, batch_id=batch_id) for r in store._db.fetchall(cur)
                    if any(str(e).startswith('target_removed:')
                           for e in json.loads(r.get('fix_evidence_ids') or '[]'))]
+    if not retired:
+        return []
+    protected = protected_findings(store, scan_id, file, batch_id)
+    return [r for r in retired if r['finding_id'] not in protected]
+
+
+def reopen_lapsed(store, scan_id, file) -> int:
+    """Reopen every lapsed retirement of `file`. Caller holds whatever locks its path requires.
+
+    The derived row flag lapses on its own (current_removals is computed at read time), but the
+    ledger row is persisted: left alone it would keep reporting the finding superseded while its
+    review row is ordinary work again. So the retired finding goes back to the disposition its
+    review row implies (the mapping sync_hitl_finding_dispositions uses), with an append-only
+    event naming why. Called where the artifact changes (record_remediation, the retry CAS), where
+    a row's binding changes (sync_hitl_finding_dispositions: proposal refresh, re-decision), and by
+    the narrow reconcile-targets call before it looks for new proof. If the removal still holds,
+    the next complete check retires it again against the evidence that is current then.
+    """
+    lapsed = lapsed_findings(store, scan_id, file)
+    if not lapsed:
+        return 0
+    with store._db.cursor() as cur:
         store._db.execute(cur,
             "SELECT corrected_sha256 FROM file_records WHERE scan_id=%s AND file=%s", (scan_id, file))
         sha = (store._db.fetchone(cur) or {}).get('corrected_sha256') or 'none'
-    if not retired:
-        return 0
-    protected = protected_findings(store, scan_id, file, batch_id)
     reopened = 0
-    for finding in retired:
-        if finding['finding_id'] in protected:
-            continue
+    for finding in lapsed:
         item = store.get_hitl_item(finding['review_item_id']) if finding.get('review_item_id') else None
         disposition = _SYNC.get(str((item or {}).get('status') or 'pending'), 'awaiting_review')
         revision = int(finding.get('revision') or 0)
         store.transition_finding_disposition(
-            scan_id, batch_id, finding['finding_id'], disposition, expected_revision=revision,
-            event_id=f"target-removal-lapsed:{scan_id}:{batch_id}:{finding['finding_id']}:r{revision}",
+            scan_id, finding['batch_id'], finding['finding_id'], disposition, expected_revision=revision,
+            event_id=f"target-removal-lapsed:{scan_id}:{finding['batch_id']}:{finding['finding_id']}:r{revision}",
             review_item_id=finding.get('review_item_id'),
             fix_evidence_ids=[f'target_removal_lapsed:{sha}'])
         reopened += 1
     return reopened
+
+
+def reopen_lapsed_locked(store, scan_id, file) -> int:
+    """reopen_lapsed under the documented lock order (review rows, then the file), for callers
+    that hold no locks of their own. A lock-free read first, so a poll with nothing lapsed takes
+    no write lock at all; the answer is re-derived under the locks before anything is written."""
+    lapsed = lapsed_findings(store, scan_id, file)
+    if not lapsed:
+        return 0
+    with store.transaction():
+        begin_write(store)
+        rows = _file_rows(store, scan_id, file)
+        lock_rows(store, [r['id'] for r in rows if _eligible(r)]
+                  + [f['review_item_id'] for f in lapsed if f.get('review_item_id')])
+        lock_file(store, scan_id, file)
+        return reopen_lapsed(store, scan_id, file)
 
 
 # ── reconciliation ─────────────────────────────────────────────────────────────────────────
@@ -867,6 +893,10 @@ def reconcile_from_saved_assessment(store, scan_id, file, owner, *, budget=None)
     if not str(file).lower().endswith('.docx'):
         result['skipped'].append({'item_id': None, 'reason': 'format_unsupported'})
         return result
+    # First make the ledger honest about what is NO LONGER proven, whether or not new proof
+    # turns up below: a lapsed retirement must never outlive its evidence just because the
+    # saved copy has not been re-checked yet.
+    reopen_lapsed_locked(store, scan_id, file)
     todo, retired, rows = candidates(store, scan_id, file)
     if not todo:
         result['unchanged'] = [{'item_id': item_id} for item_id in retired]

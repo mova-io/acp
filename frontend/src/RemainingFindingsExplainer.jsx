@@ -6,6 +6,7 @@ import './RemainingFindingsExplainer.css'
 // words on this panel cannot disagree with the pills, the progress line or the "All clear" lead.
 // Rendered nothing when the explanation is all clear: the lead line already says so, and a second
 // panel repeating it would be a second place for the claim to drift.
+const explainedTotalsMissing = (e) => e.findingTotal == null
 const itemLabel = (criterion) => criterion ? `Open ${criterion} item` : 'Open item'
 
 // `showHeadline={false}` when the host already prints explanation.headline as its lead line, so the
@@ -20,8 +21,9 @@ export default function RemainingFindingsExplainer({ explanation, onOpenItem, sh
     <p className="remaining-findings-explainer__units muted">
       {explanation.taskTotal.toLocaleString()} review task{explanation.taskTotal === 1 ? '' : 's'}
       {explanation.findingTotal != null
-        ? <> · {explanation.findingTotal.toLocaleString()} unresolved finding{explanation.findingTotal === 1 ? '' : 's'} reported by the server</>
-        : <> · current finding totals unavailable</>}
+        && <> · {explanation.findingTotal.toLocaleString()} unresolved finding{explanation.findingTotal === 1 ? '' : 's'} reported by the server</>}
+      {explanation.findingTotalsState === 'inconsistent' ? <> · current finding totals are inconsistent</>
+        : explainedTotalsMissing(explanation) && <> · current finding totals unavailable</>}
       . {explanation.findingNote}
     </p>
     {remaining.length > 0 && <>

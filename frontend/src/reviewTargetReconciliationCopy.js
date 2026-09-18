@@ -9,7 +9,8 @@ const REASONS = {
   nothing_to_reconcile: 'no open item in this scan is one this re-check applies to',
   no_current_batch: 'there is no current remediation run for this document',
   format_unsupported: 'this re-check covers Word documents only',
-  bytes_unavailable: 'the saved corrected copy is not available',
+  // Either stored document can be the missing one (the assessed original or the corrected copy).
+  bytes_unavailable: 'a stored copy of the document needed for this re-check is not available',
   artifact_not_current: 'the saved corrected copy changed since it was checked',
   artifact_changed_before_commit: 'the saved corrected copy changed while this re-check ran',
   unreadable_document: 'the saved corrected copy could not be read',
@@ -48,7 +49,7 @@ const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
 // evidence (api/review_target_reconciliation.py returns retired ids there, and a replayed
 // retirement lands there too). It never means "still open": items that stay open arrive in
 // `skipped`, each with its reason.
-const alreadyClosed = (n) => `${plural(n, 'item')} ${n === 1 ? 'was' : 'were'} already closed by an earlier re-check`
+const alreadyClosed = (n) => `${plural(n, 'item')} ${n === 1 ? 'was' : 'were'} already closed by a verified target replacement`
 
 /** The one status sentence for a reconcile-targets response. Claims only what the response says. */
 export function reconciliationSummary(result) {

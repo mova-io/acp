@@ -31,7 +31,7 @@ import review_target_reconciliation as rtr
 from test_remediation_verified_office_image_replacement import TEXT, document, members
 
 SID = 'rv-target-replacement'
-FILE = 'UTSW_Discharge_Summary.docx'
+FILE = 'synthetic-target-replacement.docx'
 OWNER = 'owner@example.com'
 
 
@@ -83,7 +83,7 @@ def _seed(store, source):
     store.record_remediation(SID, FILE, blob_url='http://b/1', corrected_sha256=sha256(source).hexdigest())
     alt_id = store.enqueue_proposals(SID, FILE, '1.1.1', [
         {'locator': 'word/document.xml#Picture 1', 'before': '',
-         'proposed_value': 'Synthetic discharge instructions banner', 'source': 'vision'}],
+         'proposed_value': 'Synthetic opening hours banner', 'source': 'vision'}],
         rule_name='Non-text Content')
     fixer = store.enqueue_proposals(SID, FILE, '1.4.5', [
         {'locator': 'image 1', 'before': 'text baked into an image', 'proposed_value': TEXT,
@@ -123,7 +123,7 @@ def test_approved_ocr_replacement_retires_the_pending_alt_row(store, monkeypatch
     assert row['status'] == 'pending' and not row.get('applied')
     assert not any(p.get('approved_value') for p in row['proposals'])
     xml = members(blob.data)['word/document.xml'].decode()
-    assert 'Synthetic discharge instructions banner' not in xml     # no alt text written
+    assert 'Synthetic opening hours banner' not in xml     # no alt text written
     assert alt_id not in {r['id'] for r in store.list_hitl_queue(scan_id=SID)}
     audit = next(r for r in store.list_hitl_queue(scan_id=SID, include_superseded=True)
                  if r['id'] == alt_id)

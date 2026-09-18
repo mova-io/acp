@@ -1118,7 +1118,8 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
   // snapshot only when it is for this scan; otherwise they are unknown (null), never zero.
   const stageDomain = remediationStage && (remediationStage.scan_id == null || remediationStage.scan_id === runId)
     ? remediationStage.domain_reconciliation : null
-  const findingInputs = findingInputsFrom(stageDomain)
+  // The snapshot too, so its own integrity/reconciliation signals can mark the ledger inconsistent.
+  const findingInputs = findingInputsFrom(stageDomain, stageDomain ? remediationStage : null)
   const reviewExplanation = explainReviewPopulation({
     rows: inboxQueue, decisions: inboxDecisions, automatic: runAiApproval.enabled === true, files, ...findingInputs,
   })

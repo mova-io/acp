@@ -15,7 +15,7 @@ import Remediate from './Remediate.jsx'
 
 const SCAN = 'scan-frr'
 const BATCH = 'batch-frr'
-const FILE = 'synthetic-discharge.docx'
+const FILE = 'synthetic-summary.docx'
 // The real writer's locator for a DOCX body image — note the space.
 const IMAGE = 'image 1'
 const POLICY = { enabled: true, supported: true, run_id: BATCH, source_revision: 'src', revision: 1 }
@@ -47,8 +47,8 @@ const contrast = { ...base, id: 'item-143', rule_id: '1.4.3', rule_name: 'Text c
   approved_value: '#595959', proposals: [{ locator: 'docx:run:4', before: '#9A9A9A', proposed_value: '#595959', approved_value: '#595959', source: 'deterministic' }] }
 // 1.4.5 — approved, applied, validated: the OCR text replacement that removed the image.
 const imagesOfText = { ...base, id: 'item-145', rule_id: '1.4.5', rule_name: 'Images of text', status: 'approved', applied: 1, validated: true,
-  approved_value: 'Discharge checklist: rest, fluids, follow-up in 7 days',
-  proposals: [{ locator: IMAGE, proposed_value: 'Discharge checklist: rest, fluids, follow-up in 7 days', source: 'OCR' }] }
+  approved_value: 'Summary checklist: rest, fluids, follow-up in 7 days',
+  proposals: [{ locator: IMAGE, proposed_value: 'Summary checklist: rest, fluids, follow-up in 7 days', source: 'OCR' }] }
 // 3.1.1 — verified.
 const language = { ...base, id: 'item-311', rule_id: '3.1.1', rule_name: 'Document language', status: 'approved', applied: 1, validated: true,
   approved_value: 'en-US', proposals: [{ locator: 'docx:settings:lang', before: 'none', proposed_value: 'en-US' }] }

@@ -3,14 +3,14 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { createTestRoot, unmountAll } from './testRoots.js'
 import { automaticReviewQueue } from './automaticReviewQueue.js'
 import { autoFixRows } from './remediationInboxModel.js'
-import { explainReviewPopulation } from './reviewPopulationExplanation.js'
+import { explainReviewPopulation, findingInputsFrom } from './reviewPopulationExplanation.js'
 import RemainingFindingsExplainer from './RemainingFindingsExplainer.jsx'
 
-// Synthetic, production-shaped (scan b3eba56d4d5d before the target-replacement fix): 1.1.1 alt
+// Synthetic, production-shaped (the production case before the target-replacement fix): 1.1.1 alt
 // text pending and parked in Status checks, 1.4.5 saved and awaiting its re-check, three confirmed
 // applied changes, and the server's finding ledger listing 1.1.1 as awaiting review.
 afterEach(unmountAll)
-const FILE = 'UTSW_Discharge_Summary.docx'
+const FILE = 'synthetic-summary.docx'
 const policy = { enabled: true, supported: true, run_id: 'run-1', source_revision: 'rev-1' }
 const raw111 = { id: 101, scan_id: 'scan', file: FILE, rule_id: 'SC_1_1_1', rule_name: 'Non-text Content', status: 'pending',
   proposals: [{ proposed_value: 'Synthetic chart', locator: 'docx:drawing:1:paragraph:32' }], proposal_snapshot_ids: ['p1'], source_revision: 'rev-1', decision_version: 1 }
@@ -97,6 +97,18 @@ it('with unknown finding totals, says they are unavailable instead of rendering 
     expect(!!container.querySelector('.remaining-findings-explainer__headline')).toBe(showHeadline)
     if (showHeadline) expect(container.textContent).toContain('No open review tasks; current finding totals unavailable.')
   }
+})
+
+it('with an inconsistent ledger, keeps the subset count but says the totals are inconsistent', async () => {
+  const settled = rows.map(r => r.id === 102 ? { ...r, validated: true } : r).filter(r => r.id !== 101)
+  const explanation = explainReviewPopulation({ rows: settled, automatic: true, ...findingInputsFrom({ available: true, total: 9,
+    buckets: { resolved_verified: 3, superseded: 1 }, unresolved_findings: [], unresolved_findings_total: 0, unresolved_findings_truncated: false }) })
+  expect(explanation.allClear).toBe(false)
+  const { container } = await mount(explanation)
+  expect(container.textContent).not.toMatch(/All clear/)
+  expect(container.querySelector('.remaining-findings-explainer__units').textContent)
+    .toContain('4 review tasks · 0 unresolved findings reported by the server · current finding totals are inconsistent')
+  expect(container.textContent).toContain('No open review tasks; current finding totals are inconsistent, so ACP cannot confirm nothing remains.')
 })
 
 it('omits its headline when the host already prints it as the lead line, keeping the item list', async () => {

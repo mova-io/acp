@@ -112,7 +112,7 @@ it('the header progress and the inbox pane counter are the same two numbers', as
   // What the pane prints, and what Remediate's header now derives — the same call on the same pair.
   const p = progress(RUN, decisions)
   expect(p).toEqual({ resolved: 5, total: 13 })    // 3 verified + 2 decided
-  // Wording changed deliberately (finding/review reconciliation, scan b3eba56d4d5d): "N of M
+  // Wording changed deliberately (finding/review reconciliation, the production case): "N of M
   // reviewed" and "N of M actions complete" were two definitions of done over one denominator.
   // Both surfaces now print the SAME explanation's two labels; the decided count is still `p`'s.
   const e = explainReviewPopulation({ rows: RUN, decisions })

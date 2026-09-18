@@ -49,9 +49,9 @@ it('renders the live panel with separate reconciled groups under automatic appro
  expect(container.querySelector('[aria-label="Remaining work item counts"]').textContent).toContain('4 need your input')
 })
 
-// Scan b3eba56d4d5d, synthetic: the ops panel, the Review workspace tile, the pills and the
+// The production case, synthetic: the ops panel, the Review workspace tile, the pills and the
 // explanation must all describe the same two status checks and the same zero human tasks.
-const FILE='UTSW_Discharge_Summary.docx'
+const FILE='synthetic-summary.docx'
 const policy={enabled:true,supported:true,run_id:'run-1',source_revision:'rev-1'}
 const raw111={id:101,scan_id:'scan',file:FILE,rule_id:'SC_1_1_1',rule_name:'Non-text Content',status:'pending',proposals:[{proposed_value:'Synthetic chart',locator:'docx:drawing:1:paragraph:32'}],proposal_snapshot_ids:['p1'],source_revision:'rev-1',decision_version:1}
 const production=(fixed)=>automaticReviewQueue([

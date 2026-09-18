@@ -16,3 +16,7 @@ it('Remediate reads findings only from a stage snapshot of the same run', () => 
   expect(remediate).toContain('remediationStage.scan_id === runId')
   expect(remediate).toContain('findingInputsFrom(')
 })
+
+it('Remediate hands the same-run stage snapshot to findingInputsFrom, so its integrity signals count', () => {
+  expect(remediate).toContain('findingInputsFrom(stageDomain, stageDomain ? remediationStage : null)')
+})

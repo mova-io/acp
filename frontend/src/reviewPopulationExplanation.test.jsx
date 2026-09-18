@@ -8,8 +8,8 @@ import { explainReviewPopulation, findingInputsFrom, progressLabelsOf, FINDING_N
 import { reviewLeadLine } from './reviewQueueCopy.js'
 import ReviewQueueTabs from './ReviewQueueTabs.jsx'
 
-// Synthetic reproduction of scan b3eba56d4d5d (DOCX, one body image). No customer content: the
-// file name is the shape label existing tests already use, and every value below is invented.
+// Synthetic reproduction of the production case (DOCX, one body image). No customer content:
+// the file name and every value below are invented.
 //
 // Production screen: Unresolved findings 1 · Review workspace 0 · Needs your review 0 · "All clear —
 // nothing needs your review" · 4 of 5 reviewed vs 3 of 5 actions complete / 2 awaiting outcome ·
@@ -17,7 +17,7 @@ import ReviewQueueTabs from './ReviewQueueTabs.jsx'
 
 afterEach(unmountAll)
 
-const FILE = 'UTSW_Discharge_Summary.docx'
+const FILE = 'synthetic-summary.docx'
 const SCAN = 'scan-synthetic'
 const policy = { enabled: true, supported: true, run_id: 'run-1', source_revision: 'rev-1' }
 
@@ -207,39 +207,80 @@ describe('the server list total (domain_reconciliation.unresolved_findings_total
   })
 })
 
-// All clear needs KNOWN-zero finding evidence. Every case below has a terminal-only queue (all five
-// tasks in Results), so the only open question is whether the server's finding totals are known.
-describe('unknown finding totals never read as All clear', () => {
+// All clear needs KNOWN-zero finding evidence from a CONSISTENT ledger. Every case below has a
+// terminal-only queue (all five tasks in Results), so the only open question is the finding totals.
+describe('unknown or inconsistent finding totals never read as All clear', () => {
   const settled = { rows: POST_FIX, decisions: {}, automatic: true }
   const UNKNOWN = 'No open review tasks; current finding totals unavailable.'
+  const INCONSISTENT = 'No open review tasks; current finding totals are inconsistent, so ACP cannot confirm nothing remains.'
+  const expectWithheld = (e, headline) => {
+    expect([e.humanCount, e.processingCount, e.statusCheckCount, e.remaining.length]).toEqual([0, 0, 0, 0])
+    expect(e.findingTotalsKnown).toBe(false)
+    expect(e.allClear).toBe(false)
+    expect(e.headline).toBe(headline)
+    expect(reviewLeadLine([], 0, e)).toBe(headline)
+    expect(e.emptyFilterLine('review')).toBe(`No tasks in Needs your input. No other open review tasks; ${headline.split('; ')[1]}`)
+  }
   const unknownCases = {
     'a null domain': findingInputsFrom(null),
     'a missing list and no count': findingInputsFrom({ available: true, total: 4 }),
-    'unbalanced buckets with an empty list': findingInputsFrom({ available: true, total: 9, buckets: { resolved_verified: 3, superseded: 1 }, unresolved_findings: [] }),
   }
   for (const [name, inputs] of Object.entries(unknownCases)) {
     it(`withholds All clear for ${name}`, () => {
-      expect(inputs.findingTotal).toBeNull()
+      expect(inputs).toMatchObject({ findingTotal: null, findingLedger: 'unknown' })
       const e = explainReviewPopulation({ ...settled, ...inputs })
-      expect([e.humanCount, e.processingCount, e.statusCheckCount, e.remaining.length]).toEqual([0, 0, 0, 0])
-      expect(e.findingTotalsKnown).toBe(false)
-      expect(e.allClear).toBe(false)
-      expect(e.findingTotal).toBeNull()        // an empty list is not reported as "0 findings"
-      expect(e.headline).toBe(UNKNOWN)
-      expect(reviewLeadLine([], 0, e)).toBe(UNKNOWN)
-      expect(e.emptyFilterLine('review')).toBe('No tasks in Needs your input. No other open review tasks; current finding totals unavailable.')
+      expect(e.findingTotalsState).toBe('unknown')
+      expect(e.findingTotal).toBeNull()        // no list, no count: nothing is reported as "0 findings"
+      expectWithheld(e, UNKNOWN)
     })
   }
-  it('still says All clear on known-zero evidence (balanced tile at 0, or an uncapped list total of 0)', () => {
-    const balanced = explainReviewPopulation({ ...settled, ...findingInputsFrom(POST_DOMAIN) })
-    expect(balanced.findingTotalsKnown).toBe(true)
-    expect(balanced.allClear).toBe(true)
-    expect(balanced.headline).toBe('All clear — nothing needs your review.')
-    const byListTotal = explainReviewPopulation({ ...settled, unresolvedFindings: [], unresolvedFindingsTotal: 0 })
-    expect(byListTotal.allClear).toBe(true)
-    // A balanced tile at 0 is itself known-zero evidence, list or no list.
-    const tileOnly = explainReviewPopulation({ ...settled, ...findingInputsFrom({ ...POST_DOMAIN, unresolved_findings: undefined }) })
-    expect(tileOnly.allClear).toBe(true)
+  it('an uncapped list total of 0 with no ledger to vouch for it is not known zero', () => {
+    expectWithheld(explainReviewPopulation({ ...settled, unresolvedFindings: [], unresolvedFindingsTotal: 0 }), UNKNOWN)
+  })
+
+  // The ACTUAL backend shape: unresolved_findings_total is always present. The unresolved subset is 0,
+  // but the buckets add up to 4 of 9 assessed findings, so 5 are unaccounted for.
+  const REPRO = { available: true, total: 9, buckets: { resolved_verified: 3, superseded: 1 },
+    unresolved_findings: [], unresolved_findings_total: 0, unresolved_findings_truncated: false }
+  const inconsistentCases = {
+    'the reproduced shape (total 9, buckets 4, uncapped total 0)': [REPRO],
+    'balanced buckets the server marks exact:false': [{ ...POST_DOMAIN, exact: false, unresolved_findings_total: 0 }],
+    'balanced buckets with recorded violations': [{ ...POST_DOMAIN, unresolved_findings_total: 0, violations: [{ code: 'disposition_partition' }] }],
+    'a snapshot whose integrity check failed': [{ ...POST_DOMAIN, unresolved_findings_total: 0 }, { integrity: { ok: false } }],
+  }
+  for (const [name, args] of Object.entries(inconsistentCases)) {
+    it(`withholds All clear for ${name}`, () => {
+      const inputs = findingInputsFrom(...args)
+      expect(inputs.findingLedger).toBe('inconsistent')
+      const e = explainReviewPopulation({ ...settled, ...inputs, files: [] })
+      expect(e.findingTotalsState).toBe('inconsistent')
+      expectWithheld(e, INCONSISTENT)
+    })
+  }
+  it('reproduction exactly as reported: empty rows, no files', () => {
+    const e = explainReviewPopulation({ ...findingInputsFrom(REPRO), rows: [], files: [] })
+    expect(e.allClear).toBe(false)
+    expect(e.headline).toBe(INCONSISTENT)
+  })
+  it('keeps subset counts while saying the totals are inconsistent when tasks remain', () => {
+    const e = explainReviewPopulation({ rows: PRE_FIX, decisions: {}, automatic: true,
+      ...findingInputsFrom({ ...PRE_DOMAIN, exact: false, unresolved_findings_total: 1 }) })
+    expect(e.findingTotal).toBe(1)
+    expect(e.remaining.find(r => r.criterion === '1.1.1').findingIds).toEqual(['fnd-111'])
+    expect(e.headline).toBe('Nothing needs your decision. 2 items are status checks ACP is tracking — see Status checks. Current finding totals are inconsistent.')
+  })
+
+  it('still says All clear on known-zero evidence from a consistent ledger', () => {
+    for (const domain of [POST_DOMAIN, { ...POST_DOMAIN, unresolved_findings_total: 0, exact: true, violations: [] },
+      { ...POST_DOMAIN, unresolved_findings: undefined }]) {   // a balanced tile at 0 is itself known zero, list or no list
+      const inputs = findingInputsFrom(domain)
+      expect(inputs.findingLedger).toBe('consistent')
+      const e = explainReviewPopulation({ ...settled, ...inputs })
+      expect(e.findingTotalsKnown).toBe(true)
+      expect(e.allClear).toBe(true)
+      expect(e.headline).toBe('All clear — nothing needs your review.')
+    }
+    expect(explainReviewPopulation({ ...settled, unresolvedFindings: [], unresolvedFindingsTotal: 0, findingLedger: 'consistent' }).allClear).toBe(true)
   })
   it('adds the unavailable sentence when tasks remain and totals are unknown', () => {
     const e = explainReviewPopulation({ rows: PRE_FIX, decisions: {}, automatic: true })

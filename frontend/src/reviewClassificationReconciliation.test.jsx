@@ -1,5 +1,5 @@
 // Finding/review reconciliation — the classification model (contract C3), on a synthetic
-// reproduction of the production population behind scan b3eba56d4d5d (DOCX, one body image).
+// reproduction of the production population (DOCX, one body image).
 //
 // What the screen said: "All clear — nothing needs your review", 4 of 5 reviewed beside 3 of 5
 // actions complete, pills Needs your input 0 / Processing 0 / Status checks 2 / Results 3, and a
@@ -29,7 +29,7 @@ afterEach(unmountAll)
 
 const SCAN = 'scan-synthetic-1'
 const RUN = 'run-synthetic-1'
-const FILE = 'UTSW_Discharge_Summary.docx'
+const FILE = 'synthetic-summary.docx'
 const IMAGE = 'docx:drawing:1:paragraph:32'
 const policy = { enabled: true, supported: true, run_id: RUN, source_revision: 1 }
 const OLD_GENERIC = 'This suggestion needs individual review or has not been admitted to automatic application.'
@@ -317,7 +317,7 @@ describe('the writer note is the locator source, spaces included (api/handlers.p
 
   it.each([
     ['the production image locator', 'image 1'],
-    ['a Word docPr name with spaces', 'Picture 3 – Discharge chart (copy)'],
+    ['a Word docPr name with spaces', 'Picture 3 – Summary chart (copy)'],
   ])('dedupes %s', (_label, locator) => {
     const af = evidence(writerNote(locator))
     expect(af.targetLocator).toBe(locator)
