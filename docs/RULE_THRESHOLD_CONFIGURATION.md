@@ -26,7 +26,8 @@ through detector **and** fixer **and** re-scan verification, not adding a form f
 
 The rubric hash is the good news: anything placed inside the rubric document is hashed, stamped
 on every result and already invalidates cached analyses. A threshold block stored in the rubric
-therefore gets versioning and "was this file assessed under the current settings?" for free.
+therefore gets change detection ("was this file assessed under the current settings?") for
+free. It does not get history: see the second finding below.
 
 ## Not every rule has a knob
 
@@ -38,7 +39,42 @@ whether alt text is accurate) have no numeric setting at all; the honest control
 review lane, which already exists. Only ACP's own heuristics — heading size margins, word limits,
 peer counts, geometry tolerances — are candidates. Counts per format are in the table below.
 
-<!-- counts filled from the explanation catalog; see "Counts" -->
+### Counts
+
+Counted from the explanation catalog (`api/rule_explanations/`), whose drift tests re-derive
+every number from the code that decides by it:
+
+| Format | Cells | WCAG-standard numbers | ACP heuristic numbers | Word lists | Cells with no number |
+|---|---|---|---|---|---|
+| docx | 24 | 7 | 32 | 2 | 10 |
+| pptx | 25 | 9 | 20 | 1 | 11 |
+| xlsx | 18 | 3 | 17 | 1 | 7 |
+| pdf | 22 | 6 | 45 | 1 | 7 |
+| html | 33 | 1 | 16 | 1 (+ abbreviation glossary) | 22 |
+
+About 15 of the office heuristics are shared by all three formats (OCR images of text, reading
+level, language of parts, sensory wording). Roughly **100 distinct heuristic numbers** remain,
+and at least 22 of them (pdf 14, html 8) are inline in function bodies rather than named
+constants. Those have to be extracted before anything can configure them.
+
+Configurable today without a code change:
+- `rubric.disabled_rules` and `rubric.compliant_threshold` (global, `PUT /rubric`).
+- Scan scope: a platform default, a per-user widen-only override, and a per-assessment selection.
+- Per-file scope rules.
+- `level=A|AA` on assess.
+- Five or six OCR values, set as deployment environment variables (`ACP_OCR_*`).
+
+None of the detector heuristics are admin-editable.
+
+Two findings from building the catalog bear directly on this work:
+- **26 office rule-catalog IDs are never emitted by any code** (e.g. `PPTX-RESIZE-001`,
+  `XLSX-CONTRAST-001`). `disabled_rules` matches exact IDs, so disabling one of these changes
+  nothing. The explanation payload lists them as `not_emitted`. A settings UI built on top of
+  the rubric has to show that, or it will offer switches that do nothing.
+- **The rubric has a hash but no history.** Each run stores the rubric name and hash, but the
+  configuration behind an old hash is not kept, so an old result cannot be traced back to its
+  settings. Phase 5 has to add that history, which it can do as `app_settings` rows keyed by
+  hash, with no migration.
 
 ## Phases, ranked
 
@@ -49,12 +85,12 @@ They are ranges because the thresholds are not yet threaded anywhere; confidence
 |---|---|---|---|---|
 | 0 | Read-only explanation catalog + Settings tab | done in this PR | — | `api/rule_explanations/`, `GET /rules/explanations` |
 | 1 | Bounded heading heuristic settings (section-label word limit, peer count, size margins), global, validated ranges, stored inside the rubric so the hash changes | 3–5 | medium | One rule family; detector + promoter already share one predicate. Needs a ContextVar (the `assessment_selection` pattern) so workers read the value without changing detector signatures. |
-| 2 | Every other ACP heuristic family with server-side validation (min/max, type, "cannot go below the WCAG number") | 8–15 | low–medium | Range depends on the heuristic count below; each family needs a boundary fixture proving the setting moves the real decision. |
+| 2 | Other ACP heuristic families with server-side validation (min/max, type, never past the WCAG number) | 12–20 | low | ~100 distinct heuristic numbers in ~25 families; 22+ must first be extracted from function bodies. Priced per FAMILY (one validated block + one boundary fixture each), not per number. Recommend a curated subset of families, not all ~100. |
 | 3 | Defaults, reset-to-default, diff-from-default display | 2–3 | high | Defaults are the constants; reset deletes the rubric key. |
 | 4 | Role, audit, tenant isolation | 4–8 | low | Admin gate exists. Audit trail of rubric edits does not. Per-tenant values need a tenant concept that does not exist (owner_email only); per-user keys work without schema change but are not org policy. |
-| 5 | Versioned snapshot, reproducible re-scan, stale decisions | 5–10 | low–medium | The hash exists; still needed: keep old rubric versions to re-run under, and mark approved remediation decisions stale when a threshold that produced their finding changes. |
+| 5 | Versioned snapshot, reproducible re-scan, stale decisions | 5–10 | low–medium | The hash exists and is stamped per file; the config behind an old hash is not kept. Needed: rubric history (app_settings rows keyed by hash), re-run under a named version, and approved decisions marked stale when a threshold behind their finding changes. |
 
-**Total for phases 1–5: about 22–41 engineering days, low-to-medium confidence.** Phase 1
+**Total for phases 1–5: about 26–46 engineering days, low-to-medium confidence.** Phase 1
 alone is independently shippable and delivers the concrete ask (tuning the heading heuristic)
 without touching anything else. No calendar date is implied.
 

@@ -42,6 +42,20 @@ def rules():
     }
 
 
+@router.get("/rules/explanations")
+def rule_explanations(request: Request):
+    """What ACP actually checks for each WCAG criterion, per format (Settings → Rule explanations).
+
+    Read-only product metadata, gated exactly like GET /rules: behind the access gate, open to any
+    signed-in user who can read the rules list. The explanations are static per process (cached in
+    rule_explanations.build); the rubric state and settings are read per request because they are
+    the parts an administrator can change. No `/rules/{x}` route exists anywhere, so this literal
+    path cannot be shadowed."""
+    import rule_explanations
+    user = getattr(getattr(request, "state", None), "user_email", None)
+    return rule_explanations.payload(user=user)
+
+
 class RubricUpdate(BaseModel):
     disabled_rules: list[str] | None = None
     compliant_threshold: int | None = None

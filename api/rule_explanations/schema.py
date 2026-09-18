@@ -43,9 +43,11 @@ class Threshold:
     """One number or condition a rule decides by.
 
     `value` is rendered verbatim, so derive it from the constant (f"{CONST / 2:g}pt"), never type
-    it. `source` is "module:NAME" for the constant it came from, so a reader — and the drift test —
-    can find it. `configurable` is True ONLY when an existing setting changes it today; a value
-    in code is False however easy it would be to expose.
+    it. `source` is "module:NAME" — a constant where one exists, otherwise the function whose body
+    holds the number (the drift tests re-derive it either way), so a reader can find it.
+    `configurable` is True ONLY when something changes it today without a code change: an admin
+    setting ("rubric.compliant_threshold") or a deployment environment variable ("env:ACP_OCR_…").
+    A value in code is False however easy it would be to expose.
     """
     label: str
     value: str
@@ -62,7 +64,8 @@ class RuleRef:
     source: str                         # repo-relative path of the emitting module
     method: str                         # one of METHODS
     fix: str                            # one of FIX_MODES
-    engine: str = "acp"                 # "acp" (this repo's Python) or "office-analyser" (the .NET engine)
+    engine: str = "acp"                 # "acp" (this repo's Python), "office-analyser" (the vendored .NET
+                                        # engine) or "pdf-analyser" (the vendored PDF engine, ADR 0029)
 
 
 @dataclass(frozen=True)
@@ -87,5 +90,12 @@ class CriterionExplanation:
 
 
 def to_json(obj) -> dict:
-    """Dataclass → JSON-ready dict (tuples become lists)."""
-    return asdict(obj)
+    """Dataclass → JSON-ready dict. `asdict` keeps tuples as tuples; convert them so the value is
+    plain JSON data, equal to what a client gets back after a round trip."""
+    def plain(v):
+        if isinstance(v, dict):
+            return {k: plain(x) for k, x in v.items()}
+        if isinstance(v, (list, tuple)):
+            return [plain(x) for x in v]
+        return v
+    return plain(asdict(obj))
