@@ -156,6 +156,55 @@ function parseXlsx(raw) {
   return mkLoc(`Sheet ${sheet} · ${word} ${value}`, 'object', { sheet, objectId: `${oid}:${value}`, raw })
 }
 
+// ACP's own Office writer locators (R1 remediation_diff.locator). `word:p:N` etc. are 1-based
+// OOXML document order — shown as recorded. None of these ever carries a page: a Word page is a
+// layout artefact, and a slide PART name is not a slide number (presentation.xml orders slides).
+function parseWordToken(raw) {
+  let m = raw.match(/^word:p:([1-9][0-9]*)(?::run:([1-9][0-9]*))?$/)
+  if (m) return mkLoc(`Paragraph ${Number(m[1])}${m[2] ? ` · text run ${Number(m[2])}` : ''}`, 'paragraph', { objectId: raw, raw })
+  m = raw.match(/^word:table:([1-9][0-9]*)(?::row:([1-9][0-9]*))?$/)
+  if (m) return mkLoc(`Table ${Number(m[1])}${m[2] ? ` · row ${Number(m[2])}` : ''}`, 'object', { objectId: raw, raw })
+  if (raw === 'word:document:outline') return mkLoc('Document-wide (heading outline)', 'document', { raw })
+  return null
+}
+
+const OOXML_PART = /^((?:word|ppt|xl)\/[^#\s][^#]*?\.xml)(?:#([\s\S]+))?$/
+const OOXML_PART_NAMES = [
+  [/^word\/document\.xml$/, () => 'document body'],
+  [/^word\/header([0-9]*)\.xml$/, (m) => `header ${m[1]}`.trim()],
+  [/^word\/footer([0-9]*)\.xml$/, (m) => `footer ${m[1]}`.trim()],
+  [/^word\/(footnotes|endnotes|comments)\.xml$/, (m) => m[1]],
+  [/^ppt\/slides\/(slide[0-9]+\.xml)$/, (m) => `slide file ${m[1]}`],
+  [/^ppt\/slideLayouts\/slideLayout([0-9]+)\.xml$/, (m) => `slide layout ${m[1]}`],
+  [/^ppt\/slideMasters\/slideMaster([0-9]+)\.xml$/, (m) => `slide master ${m[1]}`],
+  [/^ppt\/notesSlides\/(notesSlide[0-9]+\.xml)$/, (m) => `speaker notes file ${m[1]}`],
+  [/^xl\/tables\/(table[0-9]+\.xml)$/, (m) => `Excel table file ${m[1]}`],
+  [/^xl\/drawings\/(drawing[0-9]+\.xml)$/, (m) => `drawing layer file ${m[1]}`],
+  [/^xl\/worksheets\/(sheet[0-9]+\.xml)$/, (m) => `worksheet file ${m[1]}`],
+]
+
+function parseOoxmlPart(raw) {
+  const m = raw.match(OOXML_PART)
+  if (!m) return null
+  const part = m[1]
+  const fragment = (m[2] || '').trim() || null
+  let where = null
+  for (const [re, name] of OOXML_PART_NAMES) {
+    const pm = part.match(re)
+    if (pm) { where = name(pm); break }
+  }
+  where = where || `part ${part}`
+  if (fragment == null) return mkLoc(where.charAt(0).toUpperCase() + where.slice(1), 'object', { objectId: raw, raw })
+  const what = /^rId[0-9]+$/.test(fragment) ? `Image (relationship ${fragment})` : `Object “${fragment}”`
+  return mkLoc(`${what} · ${where}`, 'object', { objectId: raw, raw })
+}
+
+// Text a reader can take as it stands (mirrors report_location._is_human): starts with a letter,
+// only letters, digits, spaces and ordinary punctuation, and more than one word when it has
+// digits ("image 1", not "rId5"). A machine string stays in `raw` but out of a label.
+const HUMAN_TEXT = /^\p{L}(?:[\p{L}\p{N}]|[ .,'’()\-–])*$/u
+const isHumanText = (raw) => HUMAN_TEXT.test(raw) && (raw.includes(' ') || !/\p{Nd}/u.test(raw))
+
 function parseLegacySheetCell(raw) {
   const bang = raw.match(/^'?([^'!:/#]+)'?!\$?([A-Za-z]{1,3})\$?([0-9]+)/)
   if (bang) { const cell = `${bang[2].toUpperCase()}${bang[3]}`; return mkLoc(`Sheet ${bang[1]} · cell ${cell}`, 'cell', { sheet: bang[1], cell, raw }) }
@@ -183,13 +232,15 @@ export function parseLocation(rawIn, pageIn = null, fmtIn = null) {
   else if (prefix === 'docx') parsed = parseDocx(raw)
   else if (prefix === 'pptx') parsed = parsePptx(raw, page)
   else if (prefix === 'xlsx') parsed = parseXlsx(raw)
+  else if (prefix === 'word') parsed = parseWordToken(raw)
+  if (parsed == null) parsed = parseOoxmlPart(raw)
   if (parsed == null) parsed = parseLegacySheetCell(raw)
   if (parsed != null) return parsed
+  // Unknown format: `raw` is kept verbatim; it is in the label only when it already reads as words.
   const rawIsPage = page != null && [`slide ${page}`, `page ${page}`].includes(raw.toLowerCase())
-  if (page != null && fmt === 'pptx') {
-    return mkLoc(rawIsPage ? `Slide ${page}` : `Slide ${page} · ${raw}`, 'slide', { page, slide: page, raw })
-  }
-  if (page != null) return mkLoc(rawIsPage ? `Page ${page}` : `Page ${page} · ${raw}`, 'page', { page, raw })
+  const tail = !rawIsPage && isHumanText(raw) ? ` · ${raw}` : ''
+  if (page != null && fmt === 'pptx') return mkLoc(`Slide ${page}${tail}`, 'slide', { page, slide: page, raw })
+  if (page != null) return mkLoc(`Page ${page}${tail}`, 'page', { page, raw })
   return mkLoc(raw, null, { raw })
 }
 
@@ -207,6 +258,9 @@ export function locationOf(rec, { fmt = null, locationHref = null } = {}) {
       page: posInt(nested.page), slide: posInt(nested.slide), sheet: str(nested.sheet), cell: str(nested.cell),
       objectId: str(nested.objectId), element: str(nested.element ?? nested.raw), raw: str(nested.raw ?? nested.element),
     }
+    // R1: a saved change's location says where it came from — 'recorded' (the writer stored it)
+    // or 'legacy_note' (read back from the saving step's note; its label already says so).
+    if (nested.source != null) loc.source = str(nested.source)
     // An href-only location (contract 2: attachEvidenceLinks gives a finding with no recorded
     // location `{label:null, kind:null, href}`) stays — the record is still linkable, and
     // locationLabel() says "Location not recorded". Nothing else about it is invented.
@@ -239,6 +293,23 @@ export function locationOf(rec, { fmt = null, locationHref = null } = {}) {
   loc.href = href
   return loc
 }
+// R1: a saved change's location the store read back from the saving step's own note
+// (`location_source: 'legacy_note'`) is never presented as a recorded one. The server puts this
+// qualifier in the label (report_location.LEGACY_NOTE_QUALIFIER — pinned to the same text by the
+// shared fixture); a record that reaches the browser without it (a raw diff row) gets it here, once.
+export const LEGACY_NOTE_QUALIFIER = " (from the saving step's note, not a recorded location)"
+export function withLocationSource(loc, source) {
+  if (!loc || source !== 'legacy_note') return loc
+  const base = loc.label || loc.raw
+  return {
+    ...loc,
+    page: null,
+    slide: null,
+    source: 'legacy_note',
+    label: base && !base.endsWith(LEGACY_NOTE_QUALIFIER) ? `${base}${LEGACY_NOTE_QUALIFIER}` : base,
+  }
+}
+
 export const LOCATION_NOT_RECORDED = 'Location not recorded'
 export const locationLabel = (loc) => (loc && loc.label) || LOCATION_NOT_RECORDED
 
@@ -458,7 +529,9 @@ export function buildChangeCards({ file, diffs = [], reviews = null, previews = 
     const id = str(x.id) || changeIdOf(name, x, idx)
     const sc = scOfValue(x.sc) || scOfValue(x.rule_id ?? x.ruleId)
     const cname = names[sc] || criterionName(sc)
-    const location = locationOf(x, { fmt, locationHref })
+    // 'recorded' | 'legacy_note' (reconstructed by the store from an exact writer note) | null
+    const locationSource = str(x.locationSource ?? x.location_source ?? x.location?.source)
+    const location = withLocationSource(locationOf(x, { fmt, locationHref }), locationSource)
     const before = x.before == null ? null : String(x.before)
     const after = x.after == null ? null : String(x.after)
     const bT = clamp && needsClamp(before)
@@ -487,8 +560,7 @@ export function buildChangeCards({ file, diffs = [], reviews = null, previews = 
       criterionName: cname,
       ruleId: str(x.ruleId ?? x.rule_id),
       location,
-      // 'recorded' | 'legacy_note' (reconstructed by the store from an exact writer note) | null
-      locationSource: str(x.locationSource ?? x.location_source),
+      locationSource: location ? locationSource : null,
       before, after,
       beforeTruncated: bT, afterTruncated: aT,
       fullRef: (bT || aT) ? `${fullRefPrefix}${id}` : null,
@@ -868,6 +940,25 @@ export function findingCardsFromFacts(facts, { assignee = null, locationHref = n
   })
   return rankFindingCards(cards)
 }
+
+// C6 (R-B2): one sentence for the server's `sameScanHistory` — this document against the
+// assessment a re-assessment replaced inside the same scan. The counts are the server's; nothing
+// is re-derived. "not_recorded" and "not_available" are worded as absence of a record, never as
+// "assessed once", and a snapshot whose context was not recorded is never "a different scope".
+export function sameScanHistoryText(s) {
+  if (!s || typeof s !== 'object') return null
+  const reason = str(s.reason)
+  const n = (v) => (Array.isArray(v) ? v.length : null)
+  if (s.status === 'compared') {
+    const nc = s.notComparable && typeof s.notComparable === 'object' ? s.notComparable.current || 0 : 0
+    return `Within this scan: this document was re-assessed. Against the assessment it replaced, ${n(s.introduced) ?? NR_TEXT} finding(s) are new, ${n(s.resolved) ?? NR_TEXT} no longer reported and ${n(s.persisting) ?? NR_TEXT} still reported${nc ? `; ${nc} without a detector location cannot be matched one by one` : ''}. "No longer reported" is not a verified fix.`
+  }
+  if (s.status === 'baseline_unusable' || s.status === 'not_comparable') {
+    return `Within this scan: an earlier assessment of this document was replaced, but it is not compared — ${reason || 'the reason was not recorded'}.`
+  }
+  return `Within this scan: ${reason || 'no replaced assessment is recorded; this is not evidence that there was none'}.`
+}
+const NR_TEXT = 'Not recorded'
 
 // Comparison built ONLY from a real comparable snapshot the server supplied. There is no fallback
 // that subtracts aggregate counts: "fewer findings than last time" is not evidence that a

@@ -209,7 +209,11 @@ describe('every finding and every change survives', () => {
     // both are 3 — the preview route can render it. The label names the slide.
     expect(locationOf({ page: 3 }, { fmt: 'pptx' })).toMatchObject({ slide: 3, page: 3, label: 'Slide 3', kind: 'slide' })
     expect(locationOf({ location: "Budget!B4" })).toMatchObject({ sheet: 'Budget', cell: 'B4' })
-    expect(locationOf({ page: 7, location: 'word/header1.xml#Picture 1' })).toMatchObject({ page: 7, element: 'word/header1.xml#Picture 1' })
+    // An OOXML part locator (ACP's own Office writer vocabulary) never carries a page, even when
+    // the row does: a Word header has no page of its own (Word paginates at layout time). The raw
+    // locator is kept; the label names the part in words. (Previously this pinned `page: 7`.)
+    expect(locationOf({ page: 7, location: 'word/header1.xml#Picture 1' })).toMatchObject({
+      page: null, element: 'word/header1.xml#Picture 1', label: 'Object “Picture 1” · header 1' })
     const href = locationOf({ page: 2 }, { locationHref: () => '/scans/s1/files/a.pdf?page=2' })
     expect(href.href).toBe('/scans/s1/files/a.pdf?page=2')
     expect(locationOf({ page: 2 }, { locationHref: () => 'javascript:alert(1)' }).href).toBeNull()

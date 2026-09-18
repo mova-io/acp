@@ -188,6 +188,17 @@ def test_a_source_md5_is_never_reported_as_a_sha256(isolated_store):
                                            "sha256": "d41d8cd98f00b204e9800998ecf8427e"}
 
 
+def test_a_tagged_sha256_source_is_a_sha256_in_bare_hex(isolated_store):
+    """`sha256:<hex>` is a sha256. The report header already said so (server_identity), while the
+    facts called it "other" and the same PDF told the reader no original preview was possible."""
+    digest = "ab" * 32
+    _scan(isolated_store, files=[_doc(checksum="sha256:" + digest.upper())])
+    identity = rf.build_file_facts(isolated_store, SID, FILE, owner=OWNER)["identity"]
+    assert identity["sourceChecksumKind"] == "sha256"
+    assert identity["sourceSha256"] == digest       # what the exact-bytes route compares against
+    assert rf.checksum_kind("sha256:" + "0" * 63) == "other"
+
+
 def test_a_corrected_copy_with_no_recorded_digest_is_unknown_not_source(isolated_store):
     """The review's finding: a remediated file whose saved copy has no hash has NO identity."""
     _scan(isolated_store, files=[_doc()])

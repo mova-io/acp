@@ -94,7 +94,18 @@ def build_estate(store):
         store._db.execute(cur, "UPDATE file_records SET remediated_at=%s WHERE scan_id=%s AND file=%s",
                           ("2026-09-02T10:00:00+00:00", NEW, renamed))
     store.record_remediation_diffs(NEW, renamed, [
-        {"rule_id": "1.1.1", "before": "", "after": "Hospital logo", "note": "vision"}])
+        {"rule_id": "1.1.1", "before": "", "after": "Hospital logo", "note": "vision"},
+        # R1 (schema v59): a location the Word writer RECORDED — a 1-based OOXML paragraph token,
+        # and a page it should never have sent (stored, never shown: Word has no pages) …
+        {"rule_id": "1.3.1", "before": "Body Text", "after": "Heading 2", "note": "promoted",
+         "locator": "word:p:4", "page": 3},
+        # … and a legacy row the store reads back from the handlers' exact note prefix.
+        {"rule_id": "1.4.5", "before": "", "after": "Floor plan",
+         "note": "approved by a reviewer · word/document.xml#rId7"}])
+    store.record_remediation_diffs(NEW, "decks/quarterly.pptx", [
+        # a slide PART is not a slide number: never "Slide 3"
+        {"rule_id": "1.1.1", "before": "", "after": "Revenue chart",
+         "locator": "ppt/slides/slide3.xml#Picture 9"}])
     import report_facts as rf
     change_id = rf.verified_change_id(renamed, "1.1.1", 0)
     store.save_decision(NEW, renamed, "change_review:" + change_id, json.dumps({
@@ -139,7 +150,83 @@ def generate(client, store) -> dict:
         assert r.status_code == 200, r.text
         files[row["file"]] = r.json()
     return {"_generatedBy": "tests/test_report_facts_real_fixture.py (real store, real routes)",
-            "scanPages": [first, second], "files": files}
+            "scanPages": [first, second], "files": files,
+            "contractShape": contract_shape(client, store)}
+
+
+CONTRACT_SHAPE_NOTE = (
+    "CONTRACT-SHAPE section: the same real store and real routes, but with STAND-IN R-B2/R-B3 "
+    "readers (report_history.prior_assessment_in_scan / change_reviews_for_document) returning "
+    "exactly the owner response's shapes, because those readers are not on this base. Replace "
+    "with the real readers once they land.")
+
+
+def contract_shape(client, store) -> dict:
+    """Per-file facts with stand-in history readers. Built through the real route, so the
+    projection, ids and digests are the server's; only the two readers' RETURN VALUES are made up."""
+    import types
+    import report_facts as rf
+    renamed, lang = "policies/renamed.docx", "policies/language-not-set.docx"
+    current = store.get_scan(NEW, owner=OWNER)
+    renamed_issues = next(f for f in current["files"] if f["file"] == renamed)["issues"]
+    replaced = [{"rule_id": i.get("rule_id") or i.get("ruleId"), "wcag": i.get("wcag"),
+                 "severity": i.get("severity"), "detail": i.get("detail"), "page": i.get("page"),
+                 "location": i.get("location")} for i in renamed_issues
+                if i.get("location") != "docx:image:3"]
+    replaced.append({"rule_id": "DOCX-ALT-001", "wcag": "1.1.1 Non-text Content",
+                     "severity": "SERIOUS", "detail": "Seal has no description", "page": None,
+                     "location": "docx:image:4"})
+
+    def snapshot(context, basis):
+        return {"history_id": "h-1", "seq": 1, "history_total": 2, "context_source": context,
+                "assessment_outcome": "assessed", "issues_state": "recorded",
+                "issue_count": len(replaced), "zero_findings": False, "completeness": "complete",
+                "rules_not_checked": [], "rule_manifest": [],
+                "written_at": "2026-09-01T08:30:00+00:00",
+                "superseded_at": "2026-09-01T09:00:00+00:00",
+                "superseded_by": {"job_id": "j-2", "attempt": 1},
+                "artifact": {"file": renamed, "drive_file_id": "d-renamed", "checksum": "md5-d-renamed"},
+                "integrity": "verified", "row_at_replacement": None, "comparison_basis": basis}
+
+    same = {"rubric": "same", "scope": "same", "file_scope": "same"}
+    unknown = {"rubric": "not_recorded", "scope": "not_recorded", "file_scope": "not_recorded"}
+    priors = {
+        renamed: {"run": {"id": NEW, "same_scan_snapshot": True}, "file_row": {"file": renamed},
+                  "issues": replaced, "snapshot": snapshot("recorded_at_write", same)},
+        lang: {"run": {"id": NEW, "same_scan_snapshot": True}, "file_row": {"file": lang},
+               "issues": replaced, "snapshot": snapshot("not_recorded", unknown)},
+    }
+    decisions = [{"scan_id": OLD, "file": "policies/was-called-this.docx",
+                  "kind": f"change_review:policies/was-called-this.docx::1.1.1::{i}",
+                  "change_id": f"policies/was-called-this.docx::1.1.1::{i}",
+                  "value": json.dumps({"change_id": f"policies/was-called-this.docx::1.1.1::{i}",
+                                       "verdict": "accepted", "reviewer": OWNER,
+                                       "at": f"2026-08-0{2 + i}T08:00:00+00:00"}),
+                  "ts": f"2026-08-0{2 + i}T08:00:00+00:00", "scan_at": "2026-08-01T09:00:00+00:00"}
+                 for i in (1, 0)]
+    module = types.ModuleType("report_history")
+    module.prior_assessment_in_scan = lambda st, sid, f, *, owner: priors.get(f)
+    module.change_reviews_for_document = lambda st, sid, f, *, owner, limit=200: (
+        {"decisions": decisions, "total": 5, "returned": 2, "limit": limit, "truncated": True}
+        if f == renamed else {"decisions": [], "total": 0, "returned": 0, "limit": limit,
+                              "truncated": False})
+    saved = sys.modules.get("report_history")
+    sys.modules["report_history"] = module
+    try:
+        rf.clear_scan_index_cache()
+        files = {}
+        for name in (renamed, lang, "sheets/brand-new.xlsx"):
+            r = client.get(f"/scans/{NEW}/files/{quote(name, safe='')}/report-facts")
+            assert r.status_code == 200, r.text
+            files[name] = r.json()
+        scan = client.get(f"/scans/{NEW}/report-facts?limit=10").json()
+    finally:
+        if saved is None:
+            sys.modules.pop("report_history", None)
+        else:
+            sys.modules["report_history"] = saved
+        rf.clear_scan_index_cache()
+    return {"_note": CONTRACT_SHAPE_NOTE, "files": files, "scanComparison": scan["comparison"]}
 
 
 def test_the_committed_fixture_is_what_the_real_store_produces(client, isolated_store):
@@ -171,3 +258,34 @@ def test_the_fixture_holds_the_three_reproduced_scenarios(client, isolated_store
     assert renamed["status"] == "compared" and renamed["renamed"] is True
     assert f["sheets/brand-new.xlsx"]["comparison"]["reasonCode"] == "no_earlier_assessment"
     assert f["decks/quarterly.pptx"]["findings"][0]["location"]["label"] == "Slide 2 · shape 5"
+
+
+def test_the_fixture_holds_the_r1_locations_from_the_real_store(client, isolated_store):
+    got = generate(client, isolated_store)
+    changes = {c["ruleId"]: c for c in got["files"]["policies/renamed.docx"]["savedChanges"]}
+    assert changes["1.1.1"]["location"] is None                     # nothing recorded
+    assert changes["1.3.1"]["location"]["label"] == "Paragraph 4"
+    assert changes["1.3.1"]["location"]["page"] is None             # the stored page 3 is not shown
+    assert changes["1.3.1"]["location"]["source"] == "recorded"
+    legacy = changes["1.4.5"]["location"]
+    assert legacy["source"] == "legacy_note" and legacy["page"] is None
+    assert legacy["label"].endswith("(from the saving step's note, not a recorded location)")
+    deck = got["files"]["decks/quarterly.pptx"]["savedChanges"][0]["location"]
+    assert deck["label"] == "Object “Picture 9” · slide file slide3.xml"
+    assert deck["page"] is None and deck["slide"] is None
+
+
+def test_the_contract_shape_section(client, isolated_store):
+    cs = generate(client, isolated_store)["contractShape"]
+    renamed = cs["files"]["policies/renamed.docx"]
+    same = renamed["sameScanHistory"]
+    assert same["status"] == "compared"
+    by_id = {x["id"]: x["detail"] for x in renamed["findings"]}
+    assert [by_id[i] for i in same["introduced"]] == ["Map has no description"]
+    assert [r["detail"] for r in same["resolved"]] == ["Seal has no description"]
+    assert "showing 2 of 5" in renamed["priorDecisionsReason"]
+    lang = cs["files"]["policies/language-not-set.docx"]
+    assert lang["sameScanHistory"]["reasonCode"] == "context_not_recorded"
+    assert lang["priorDecisions"] == []
+    assert cs["files"]["sheets/brand-new.xlsx"]["sameScanHistory"]["status"] == "not_recorded"
+    assert cs["scanComparison"]["sameScan"]["filesCompared"] == 1

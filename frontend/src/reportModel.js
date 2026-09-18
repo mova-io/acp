@@ -17,7 +17,7 @@ import {
   scOfValue, fmtOfFile, isSafeHref, normaliseRowIssues, buildChangeCards, buildFindingCards,
   buildComparison, buildComparisonFromFacts, findingCardsFromFacts, factsFindings,
   boundList, locationLabel, technicalText, humanText, verificationText, clippedNote,
-  isHumanOutstanding, RESPONSE_NOTICE,
+  isHumanOutstanding, RESPONSE_NOTICE, sameScanHistoryText,
 } from './reportEvidence.js'
 
 // Shared ink palette. Every colour used as TEXT here is dark enough to clear WCAG
@@ -546,6 +546,16 @@ export function buildFileReportModel(d = {}) {
     if (!d.previous && typeof d.previousReason === 'string' && d.previousReason.trim()) comparison.reason = d.previousReason.trim()
   }
   blocks.push(comparison)
+  // C6 (R-B2): the assessment a re-assessment REPLACED inside this same scan. A compared or
+  // refused snapshot is stated from the Reviewer packet up; "none recorded" / "cannot be read" is
+  // the common case and is stated in Full evidence — worded so it never reads as "assessed once".
+  const sameScan = facts && facts.sameScanHistory && typeof facts.sameScanHistory === 'object' ? facts.sameScanHistory : null
+  if (sameScan) {
+    const quiet = sameScan.status === 'not_recorded' || sameScan.status === 'not_available'
+    if (quiet ? atLeast('full') : atLeast('reviewer')) {
+      T(sameScanHistoryText(sameScan), { size: 9, color: sameScan.status === 'compared' ? undefined : MUTED })
+    }
+  }
 
   // ── Reviewer packet ─────────────────────────────────────────────────────────────────────
   if (atLeast('reviewer')) {
@@ -593,7 +603,14 @@ export function buildFileReportModel(d = {}) {
         H('Decisions recorded on earlier scans', 2)
         T(facts.priorDecisionsReason || 'Recorded against earlier scans of this document; not carried forward.', { size: 9, color: MUTED })
         blocks.push({ k: 'bullets', items: facts.priorDecisions.map((p) => `${p.verdictLabel || p.verdict || 'Decision'} on ${p.changeId || 'a change'} in scan ${p.scanId || NR}${p.at ? ` at ${p.at}` : ''}${p.reviewer ? ` by ${p.reviewer}` : ''} — not carried forward`), o: {} })
-      } else if (facts.priorDecisions == null && facts.priorDecisionsReason) {
+        // R-B3 bounds: a page of the history is never presented as the whole of it.
+        const bounds = facts.priorDecisionsBounds
+        if (bounds && bounds.truncated) {
+          T(`Showing ${facts.priorDecisions.length} of ${bounds.total ?? 'more'} earlier decisions (newest first); the rest are not listed here.`, { bold: true })
+        }
+      } else if (facts.priorDecisionsReason) {
+        // None (not readable / not available) and [] (none recorded) are different answers; the
+        // reason says which, and neither is silently dropped.
         T(facts.priorDecisionsReason, { size: 9, color: MUTED })
       }
     }

@@ -177,7 +177,10 @@ def checksum_kind(value) -> str | None:
     text = str(value or "").strip().lower()
     if not text:
         return None
-    if _SHA256.match(text):
+    # `sha256:<64 hex>` is ACP's own tagged form (and the one the report header already accepts
+    # as SHA-256 — report_render.server_identity). Calling it "other" here made the same report
+    # say "SHA-256" in its identity table and "not sha-256, so no preview" beside the previews.
+    if _SHA256.match(text) or _SHA256.match(text.removeprefix("sha256:")):
         return "sha256"
     if re.fullmatch(r"[0-9a-f]{32}", text):
         return "md5"
@@ -208,7 +211,8 @@ def artifact_identity(record: dict) -> dict:
     return {
         "sourceChecksum": source,
         "sourceChecksumKind": kind,
-        "sourceSha256": source if kind == "sha256" else None,
+        # Bare lower-case hex: the exact-bytes route compares against hashlib's hexdigest.
+        "sourceSha256": str(source).strip().lower().removeprefix("sha256:") if kind == "sha256" else None,
         "correctedSha256": corrected,
         "currentArtifact": current,
         "remediatedAt": remediated_at,
@@ -330,20 +334,31 @@ def build_saved_changes(store, scan_id: str, filename: str, record: dict,
     for diff in (store.get_remediation_diffs(scan_id, filename) or []):
         rule_id = str(diff.get("rule_id") or "")
         before, after = diff.get("before") or "", diff.get("after") or ""
-        # R1 (accepted by the #2131 owner): remediation_diff gains optional `locator`/`page`.
-        # Read defensively — a legacy row without them is "Location not recorded", never page 1.
-        verified_locator = diff.get("locator") or None
+        # R1 (store schema v59, every diff reader): `locator`, `page` and `location_source` —
+        # "recorded" (the writer stored them), "legacy_note" (the store reconstructed the locator
+        # at read time from an exact writer-note prefix; never a page) or None (unknown: both
+        # are None, and the report says "Location not recorded" — never page 1).
+        # The store's `location_source` is AUTHORITATIVE: a locator it did not vouch for is not
+        # shown. Only a pre-R1 store (no key at all) is classified here.
+        if "location_source" in diff:
+            source = diff.get("location_source")
+            if source not in (report_location.LOCATION_RECORDED,
+                              report_location.LOCATION_LEGACY_NOTE):
+                source = None
+        else:
+            source = (report_location.LOCATION_RECORDED
+                      if (diff.get("locator") or diff.get("page")) else None)
+        verified_locator = (diff.get("locator") or None) if source else None
+        location = report_location.saved_change_location(
+            verified_locator, diff.get("page") if source else None, fmt, source)
         rows.append({
             "id": verified_change_id(filename, rule_id, diff.get("seq") or 0),
             "ruleId": rule_id, "sc": sc_of(rule_id), "seq": int(diff.get("seq") or 0),
             "locator": verified_locator,
-            "location": report_location.parse_location(verified_locator, diff.get("page"), fmt),
-            # R1 owner contract: "recorded" (stored by the writer), "legacy_note" (reconstructed
-            # at read time from an exact writer note prefix), or None (unknown).
-            # When the store states the source it is used VERBATIM; only a pre-R1 row (no key at
-            # all) is classified here.
-            "locationSource": (diff.get("location_source") if "location_source" in diff else
-                               ("recorded" if (verified_locator or diff.get("page")) else None)),
+            "location": location,
+            # Also on `location.source`; kept here for consumers of the first R1 shape. None
+            # whenever there is no location to qualify (a Word "page" alone is not one).
+            "locationSource": source if location is not None else None,
             "before": before, "after": after,
             "note": diff.get("note") or None,
             "verification": "verified",
@@ -368,12 +383,16 @@ def build_saved_changes(store, scan_id: str, filename: str, record: dict,
         rule_id = str(change.get("rule_id") or "")
         before, after = change.get("before") or "", change.get("after") or ""
         locator = change.get("locator")
+        # The writer's own change record: whatever it holds was recorded by the writer.
+        location = report_location.saved_change_location(
+            locator, change.get("page"), fmt,
+            report_location.LOCATION_RECORDED if (locator or change.get("page")) else None)
         rows.append({
             "id": unverified_change_id(filename, rule_id, locator, before, after),
             "ruleId": rule_id, "sc": sc_of(rule_id), "seq": None,
             "locator": locator,
-            "location": report_location.parse_location(locator, change.get("page"), fmt),
-            "locationSource": "recorded" if (locator or change.get("page")) else None,
+            "location": location,
+            "locationSource": report_location.LOCATION_RECORDED if location is not None else None,
             "before": before, "after": after,
             "note": change.get("reason") or change.get("note") or None,
             "verification": "not_verified",
@@ -637,18 +656,58 @@ def scope_digest(run: dict) -> str | None:
                           .encode()).hexdigest()
 
 
+# ── report-history reads (R-B1/R-B2/R-B3, the #2131 owner's Stream G) ──────────────────────────
+# Stream G implements them as functions taking the store in `api/report_history.py`; Stream D adds
+# thin Store wrappers with the same names. Whichever has landed is used — the Store method first,
+# then `report_history.<fn>(store, …)` — and with neither the facts say the read is not available
+# rather than implying there was nothing to read.
+
+_report_history_missing = False
+
+
+def _report_history():
+    import sys
+    module = sys.modules.get("report_history")
+    if module is not None:
+        return module
+    global _report_history_missing
+    if _report_history_missing:
+        return None
+    try:
+        import report_history   # noqa: F401  (Stream G's module; absent on older bases)
+    except ImportError:
+        _report_history_missing = True
+        return None
+    return sys.modules.get("report_history")
+
+
+def history_reader(store, name: str):
+    """`store.<name>` when the Store has it, else `report_history.<name>` bound to the store, else
+    None. Both take the same arguments after the store."""
+    method = getattr(store, name, None)
+    if callable(method):
+        return method
+    module = _report_history()
+    fn = getattr(module, name, None) if module is not None else None
+    if callable(fn):
+        return lambda *args, **kwargs: fn(store, *args, **kwargs)
+    return None
+
+
 def prefetch_baselines(store, scan_id: str, names: list[str], *, owner: str,
                        context: dict) -> str:
     """Load every file's baseline for a scan-index build in one store read, when the store has it.
 
-    Returns 'batched' or 'per_file'. `previous_assessments_for_scan` is store request R-B1
-    (/tmp/acp-report-followup-store-requests.md): identical semantics to
-    `previous_assessment_for_file`, bounded query count. Until it exists — or if it fails — each
-    file falls back to the per-file read inside `_load_baseline`, memoised for this build, so the
-    index row and the per-file route always go through the SAME selection and the SAME digest.
+    Returns 'batched' or 'per_file'. `previous_assessments_for_scan` is R-B1 (owner response):
+    `{file: previous}` with EXACTLY `previous_assessment_for_file`'s value per file, files with no
+    baseline absent. Until it exists — or if it fails — each file falls back to the per-file read
+    inside `_load_baseline`, memoised for this build. The per-file route goes through
+    `_load_baseline` too, which uses the SAME batched reader (with `files=[name]`) whenever it
+    exists — so the index row and the per-file route share one selection and one digest even
+    before the Store's per-file method is made to delegate to it.
     """
-    batched = getattr(store, "previous_assessments_for_scan", None)
-    if not callable(batched):
+    batched = history_reader(store, "previous_assessments_for_scan")
+    if batched is None:
         return "per_file"
     try:
         got = batched(scan_id, owner=owner, files=list(names)) or {}
@@ -666,10 +725,18 @@ def _load_baseline(store, scan_id: str, filename: str, *, owner: str,
     memo = (context or {}).get("previous_by_file")
     if memo is not None and filename in memo:
         return memo[filename]
-    try:
-        result = (store.previous_assessment_for_file(scan_id, filename, owner=owner), False)
-    except Exception:
-        result = (None, True)
+    result = None
+    batched = history_reader(store, "previous_assessments_for_scan")
+    if batched is not None:
+        try:
+            result = ((batched(scan_id, owner=owner, files=[filename]) or {}).get(filename), False)
+        except Exception:
+            result = None      # same fallback the scan-index prefetch takes
+    if result is None:
+        try:
+            result = (store.previous_assessment_for_file(scan_id, filename, owner=owner), False)
+        except Exception:
+            result = (None, True)
     if memo is not None:
         memo[filename] = result
     return result
@@ -882,16 +949,40 @@ PRIOR_DECISIONS_UNAVAILABLE = (
 # (Store request R-B3, /tmp/acp-report-followup-store-requests.md, is what lifts this.)
 
 
+PRIOR_DECISIONS_LIMIT = 200
+
+
 def build_prior_decisions(store, scan_id: str, filename: str, *, owner: str) -> tuple:
-    """(list|None, reason). Earlier decisions are EVIDENCE about the document, never current
-    decisions about this scan's changes — each is marked not_carried_forward."""
-    reader = getattr(store, "change_reviews_for_document", None)
-    if not callable(reader):
-        return None, PRIOR_DECISIONS_UNAVAILABLE
+    """(list|None, reason, bounds|None). Earlier decisions are EVIDENCE about the document, never
+    current decisions about this scan's changes — each is marked not_carried_forward.
+
+    R-B3 (owner response): `change_reviews_for_document(scan_id, file, *, owner, limit)` returns
+    None for an unknown/foreign scan, else `{"decisions": [...], "total", "returned", "limit",
+    "truncated"}`. `bounds` carries those counts, so a truncated list reads "showing N of TOTAL"
+    and is never mistaken for the whole history.
+    """
+    reader = history_reader(store, "change_reviews_for_document")
+    if reader is None:
+        return None, PRIOR_DECISIONS_UNAVAILABLE, None
     try:
-        rows = reader(scan_id, filename, owner=owner) or []
+        result = reader(scan_id, filename, owner=owner, limit=PRIOR_DECISIONS_LIMIT)
     except (KeyError, TypeError, ValueError):
-        return None, "decisions recorded against earlier scans of this document could not be read"
+        return (None, "decisions recorded against earlier scans of this document could not be "
+                      "read", None)
+    if result is None:
+        return (None, "decisions recorded against earlier scans of this document are not "
+                      "available for this scan", None)
+    if isinstance(result, dict):
+        rows = result.get("decisions") or []
+        total = result.get("total")
+        bounds = {"total": total if isinstance(total, int) else None,
+                  "returned": len(rows),
+                  "limit": result.get("limit"),
+                  "truncated": bool(result.get("truncated"))}
+    else:
+        # The first request's shape (a bare list); nothing about truncation is known then.
+        rows = list(result)
+        bounds = {"total": None, "returned": len(rows), "limit": None, "truncated": None}
     out = []
     for row in rows:
         try:
@@ -901,13 +992,72 @@ def build_prior_decisions(store, scan_id: str, filename: str, *, owner: str) -> 
         if not isinstance(value, dict):
             continue
         out.append({"scanId": row.get("scan_id"), "file": row.get("file"),
-                    "changeId": value.get("change_id"), "verdict": value.get("verdict"),
+                    "changeId": value.get("change_id") or row.get("change_id"),
+                    "verdict": value.get("verdict"),
                     "verdictLabel": VERDICT_LABELS.get(value.get("verdict"), "unknown"),
                     "reviewer": value.get("reviewer"), "at": value.get("at") or row.get("ts"),
+                    "scanAt": row.get("scan_at"),
                     "artifactSha256": value.get("artifact_sha256"),
                     "status": "not_carried_forward"})
-    return out, ("decisions recorded against earlier scans of this document; they apply to the "
-                 "bytes reviewed then and are not carried forward to this scan's changes")
+    reason = ("decisions recorded against earlier scans of this document; they apply to the "
+              "bytes reviewed then and are not carried forward to this scan's changes")
+    if bounds["truncated"]:
+        total = bounds["total"] if bounds["total"] is not None else "more"
+        reason = f"{reason} (showing {bounds['returned']} of {total}, newest first)"
+    elif not rows:
+        reason = "no decision is recorded against an earlier scan of this document"
+    bounds["unreadable"] = len(rows) - len(out)
+    if bounds["unreadable"]:
+        reason = f"{reason}; {bounds['unreadable']} recorded decision(s) could not be read"
+    return out, reason, bounds
+
+
+# ── the assessment this one REPLACED inside the same scan (audit gap C6, R-B2) ───────────────
+
+def build_same_scan_history(store, scan_id: str, filename: str, *, owner: str,
+                            current_findings: list[dict], current_state: dict,
+                            ledger_scope: str | None) -> dict:
+    """This document compared with the assessment its current one replaced in THIS scan.
+
+    R-B2 (owner response): `prior_assessment_in_scan(scan_id, file, *, owner)` returns None when
+    no replaced assessment was CAPTURED — which is not evidence that none existed — or
+    `previous_assessment_for_file`'s keys plus a `snapshot` block describing what was recorded at
+    the replaced write. Usability is decided from that block ONLY (report_comparison.
+    same_scan_problem): the envelope's `run` is never fed to scope_digest (a not_recorded run
+    would read as "different scope"), and this scan's per-finding ledger is never applied to the
+    snapshot — it describes the current assessment, not the replaced one.
+    """
+    import report_comparison as rc
+    reader = history_reader(store, "prior_assessment_in_scan")
+    if reader is None:
+        return rc.same_scan_empty(rc.SAME_SCAN_NOT_AVAILABLE, "reader_unavailable")
+    try:
+        found = reader(scan_id, filename, owner=owner)
+    except (KeyError, TypeError, ValueError):
+        return rc.same_scan_empty(rc.BASELINE_UNUSABLE, "lookup_failed")
+    if not found:
+        return rc.same_scan_empty(rc.SAME_SCAN_NOT_RECORDED, "not_recorded")
+    snapshot = rc.same_scan_snapshot(found, scan_id)
+    problem = rc.same_scan_problem(found)
+    if problem:
+        return rc.same_scan_empty(rc.BASELINE_UNUSABLE, problem[0], snapshot, text=problem[1])
+    if (current_state or {}).get("state", "assessed") != "assessed":
+        text = rc.reason("current_not_assessed", state=current_state.get("state"),
+                         why=current_state.get("stateReason") or current_state.get("state"))
+        return rc.same_scan_empty(rc.NOT_COMPARABLE, "current_not_assessed", snapshot, text=text)
+    # Built in THIS document's id space (same scan, current name), so ids match the current
+    # findings; a finding without a detector location stays not comparable, as across scans.
+    previous_findings = build_findings(scan_id, filename, found.get("issues") or [],
+                                       ledger_scope=ledger_scope or scan_id)
+    classified = rc.classify(current_findings or [], previous_findings, None)
+    total = snapshot.get("historyTotal")
+    of_n = f" (the most recent of {total})" if isinstance(total, int) and total > 1 else ""
+    text = (f"matched finding by finding against the assessment this one replaced inside this "
+            f"scan, written {snapshot.get('writtenAt') or 'at a time not recorded'}{of_n}, under "
+            f"the same rubric and scope as recorded at both writes")
+    return {**rc.same_scan_empty(rc.COMPARED, "compared", snapshot, text=text), **classified,
+            "reopened": None,
+            "reopenedReason": rc.reason("same_scan_no_ledger")}
 
 
 def build_file_facts(store, scan_id: str, filename: str, *, owner: str,
@@ -959,8 +1109,11 @@ def build_file_facts(store, scan_id: str, filename: str, *, owner: str,
         previous, previous_reason, comparison = None, ("comparison was not requested"), None
     by_file = _approvals_by_file(store, scan_id, owner=owner, context=context)
     approvals = build_approvals(None if by_file is None else by_file.get(filename, []))
-    prior_decisions, prior_decisions_reason = build_prior_decisions(
+    prior_decisions, prior_decisions_reason, prior_decisions_bounds = build_prior_decisions(
         store, scan_id, filename, owner=owner)
+    same_scan = build_same_scan_history(
+        store, scan_id, filename, owner=owner, current_findings=findings,
+        current_state=state, ledger_scope=ledger_scope)
 
     facts = {
         "factsVersion": FACTS_VERSION,
@@ -1017,6 +1170,10 @@ def build_file_facts(store, scan_id: str, filename: str, *, owner: str,
         "approvals": approvals,
         "priorDecisions": prior_decisions,
         "priorDecisionsReason": prior_decisions_reason,
+        # {total, returned, limit, truncated, unreadable} from R-B3, or None when not read.
+        "priorDecisionsBounds": prior_decisions_bounds,
+        # C6 (R-B2): this document against the assessment it REPLACED inside this same scan.
+        "sameScanHistory": same_scan,
         "limits": {"valueMaxChars": VALUE_MAX_CHARS, "noteMaxChars": NOTE_MAX_CHARS,
                    "savedChangesLimit": saved_changes_limit,
                    "findingsLimit": FINDINGS_LIMIT,
@@ -1096,6 +1253,9 @@ def build_scan_index(store, scan_id: str, *, owner: str) -> dict | None:
     baseline_read = prefetch_baselines(store, scan_id, names, owner=owner, context=context)
 
     index: list[dict] = []
+    # C6 per-document same-scan summaries: aggregated below, not added to the index row (the
+    # row key set is pinned by rf-C's packet recording; the full block is in the per-file facts).
+    same_scan_rows: list[dict | None] = []
     totals = {"documents": len(names), "assessed": 0, "notAssessed": 0, "error": 0, "partial": 0,
               "findingsTotal": 0, "savedChangesVerified": 0, "savedChangesUnverified": 0,
               "approvalsRecheckRequired": 0}
@@ -1137,6 +1297,7 @@ def build_scan_index(store, scan_id: str, *, owner: str) -> dict | None:
         else:
             totals["approvalsRecheckRequired"] += row["approvalsRecheckRequired"]
         index.append(row)
+        same_scan_rows.append(rc.compact(facts.get("sameScanHistory")))
     if not approvals_known:
         totals["approvalsRecheckRequired"] = None
     if not unverified_known:
@@ -1144,7 +1305,8 @@ def build_scan_index(store, scan_id: str, *, owner: str) -> dict | None:
 
     comparison = rc.aggregate(
         [r["comparison"] for r in index],
-        same_scan_history=callable(getattr(store, "prior_assessment_in_scan", None)))
+        same_scan_history=history_reader(store, "prior_assessment_in_scan") is not None,
+        same_scan_rows=same_scan_rows)
     facts = {
         "factsVersion": FACTS_VERSION,
         "factsDigest": None,

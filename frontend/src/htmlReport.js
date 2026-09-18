@@ -200,7 +200,7 @@ function changeCard(b, hl, ctx) {
 <h${hl} id="${hid}">${esc(b.title)}</h${hl}>
 <dl class="facts">
 <div><dt>Record</dt><dd><code>${esc(b.id)}</code></dd></div>
-<div><dt>Location</dt><dd>${locationHtml(b.location)}${b.locationSource === 'legacy_note' && b.location ? ' <span class="c-muted">(read from the saving step’s own note; no structured location was stored)</span>' : ''}</dd></div>
+<div><dt>Location</dt><dd>${locationHtml(b.location)}</dd></div>
 <div><dt>Reason</dt><dd>${esc(b.reason || 'Reason not recorded')}</dd></div>
 <div><dt>Technical verification</dt><dd>${esc(b.verification ? verificationText(b.verification) : technicalText(b.technical?.status))}${b.verificationDetail || b.technical?.detail ? ` — ${esc(b.verificationDetail || b.technical.detail)}` : ''}</dd></div>
 <div><dt>Human confirmation</dt><dd>${esc(humanLine)}${human.loaded === false ? ' (decisions not loaded)' : ''}${human.note ? ` — “${esc(human.note)}”` : ''}</dd></div>

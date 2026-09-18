@@ -105,9 +105,71 @@ describe('contract 1 locations reach the report as words', () => {
     expect(sheet.location).toMatchObject({ label: 'Sheet Budget 2026 · cell B3', page: null, sheet: 'Budget 2026', cell: 'B3' })
   })
   it('a verified change with no recorded locator reads "Location not recorded", never page 1', () => {
-    const card = fileModel('policies/renamed.docx').blocks.find((b) => b.k === 'changeCard')
+    const card = fileModel('policies/renamed.docx').blocks.find((b) => b.k === 'changeCard' && b.ruleId === '1.1.1')
     expect(card.location).toBeNull()
     expect(reportHtmlFromModel(fileModel('policies/renamed.docx'), { origin: null })).toContain('Location not recorded')
+  })
+})
+
+// R1 from the REAL store (schema v59): the writer's recorded locator, and a legacy note the store
+// read back — the latter always flagged, neither ever given a page Word or a slide part lacks.
+describe('R1 — verified-change locations, as the real store returns them', () => {
+  const cards = (name) => fileModel(name).blocks.filter((b) => b.k === 'changeCard')
+  it('a recorded Word paragraph token reads as words and never as a page', () => {
+    const para = cards('policies/renamed.docx').find((c) => c.ruleId === '1.3.1')
+    expect(para.location).toMatchObject({ label: 'Paragraph 4', page: null, source: 'recorded' })
+    expect(para.locationSource).toBe('recorded')
+  })
+  it('a legacy-note location is qualified exactly once, in the label every renderer prints', () => {
+    const legacy = cards('policies/renamed.docx').find((c) => c.ruleId === '1.4.5')
+    expect(legacy.location.label).toBe("Image (relationship rId7) · document body (from the saving step's note, not a recorded location)")
+    expect(legacy.location.page).toBeNull()
+    const html = reportHtmlFromModel(fileModel('policies/renamed.docx'), { origin: null })
+    // Printed wherever the location is printed (card, appendix …) — each time once, never doubled,
+    // and never without the qualifier.
+    const n = (s) => html.split(s).length - 1
+    expect(n('not a recorded location')).toBeGreaterThan(0)
+    expect(n('document body (from the saving step&#39;s note, not a recorded location)') + n("document body (from the saving step's note, not a recorded location)"))
+      .toBe(n('Image (relationship rId7) · document body'))
+    expect(n('not a recorded location)') ).toBe(n('not a recorded location'))
+    expect(html).not.toMatch(/not a recorded location\)[^<]*not a recorded location/)
+  })
+  it('a slide part is never called a slide number', () => {
+    const [card] = cards('decks/quarterly.pptx')
+    expect(card.location).toMatchObject({ label: 'Object “Picture 9” · slide file slide3.xml', page: null, slide: null })
+  })
+})
+
+// CONTRACT-SHAPE section of the same fixture: real store and routes, stand-in R-B2/R-B3 readers
+// (not on this base yet) returning the owner response's exact shapes.
+describe('R-B2 / R-B3 — contract-shape facts through the models', () => {
+  const CS = real.contractShape.files
+  const model = (name, mode = 'full') => buildFileReportModel({ file: name, mode, facts: CS[name], rows: [] })
+  it('a same-scan comparison is stated with the server’s counts from the Reviewer packet up', () => {
+    const text = textOf(model('policies/renamed.docx', 'reviewer'))
+    expect(text).toContain('Within this scan: this document was re-assessed. Against the assessment it replaced, 1 finding(s) are new, 1 no longer reported and 1 still reported')
+    expect(textOf(model('policies/renamed.docx', 'summary'))).not.toContain('Within this scan')
+  })
+  it('a snapshot whose context was not recorded reads "not recorded", never "different scope"', () => {
+    const text = textOf(model('policies/language-not-set.docx', 'reviewer'))
+    expect(text).toMatch(/Within this scan: an earlier assessment of this document was replaced, but it is not compared — the replaced assessment's rubric and scope were not recorded/)
+    expect(text).not.toMatch(/different (rubric|scope)/)
+  })
+  it('"none recorded" is stated only in Full evidence, as absence of a record', () => {
+    expect(textOf(model('sheets/brand-new.xlsx', 'reviewer'))).not.toContain('Within this scan')
+    expect(textOf(model('sheets/brand-new.xlsx', 'full'))).toContain('not evidence that there was no earlier one')
+  })
+  it('a truncated earlier-decision list says showing N of TOTAL; an empty one says none', () => {
+    const text = textOf(model('policies/renamed.docx'))
+    expect(text).toContain('showing 2 of 5')
+    expect(text).toContain('Showing 2 of 5 earlier decisions (newest first)')
+    expect(textOf(model('policies/language-not-set.docx'))).toContain('no decision is recorded against an earlier scan of this document')
+  })
+  it('the scan comparison carries the same-scan note (one line) and keeps totals one population', () => {
+    const cmp = real.contractShape.scanComparison
+    expect(cmp.sameScan).toMatchObject({ filesCompared: 1, filesBaselineUnusable: 1 })
+    expect(cmp.notes.filter((n) => n.startsWith('Re-assessments inside this scan'))).toHaveLength(1)
+    expect(cmp.totals.sameScan).toBeUndefined()
   })
 })
 

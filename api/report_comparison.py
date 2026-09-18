@@ -53,6 +53,30 @@ REASONS = {
                                 "document was {status}, so that assessment is not a baseline"),
     "current_not_assessed": ("this document's current assessment is {state} ({why}), so a "
                              "difference from an earlier one would not describe the document"),
+    # ── same-scan history (C6, R-B2) ──
+    "reader_unavailable": ("ACP cannot yet read an assessment that a re-assessment replaced inside "
+                           "this scan, so changes within one scan are not compared; this is not "
+                           "evidence that the document was assessed only once"),
+    "not_recorded": ("no replaced assessment of this document was recorded in this scan — it was "
+                     "assessed once here, or re-assessed before ACP began recording replaced "
+                     "assessments; this is not evidence that there was no earlier one"),
+    "context_not_recorded": ("the replaced assessment's {what} {was} not recorded when it was "
+                             "written, so whether it is comparable with the current one is not "
+                             "known"),
+    "same_scan_different_context": ("the replaced assessment used a different {what}, so its "
+                                    "findings are not comparable"),
+    "same_scan_failed": ("the replaced assessment did not produce a result (outcome: {outcome}), "
+                         "so it is not a baseline — its empty finding list would make every "
+                         "current finding look new"),
+    "same_scan_issues_unavailable": ("the replaced assessment's finding list was not recorded as a "
+                                     "complete set, so it is not a baseline"),
+    "same_scan_partial": ("the replaced assessment was {completeness}{rules}, so its finding list "
+                          "is incomplete and not a baseline"),
+    "same_scan_issues_changed": ("the replaced assessment's finding rows changed after they were "
+                                 "written, so they are not the assessment as recorded"),
+    "same_scan_no_ledger": ("this scan's per-finding ledger describes the current assessment, not "
+                            "the one it replaced, so whether a finding reported again had been "
+                            "fixed in between is not recorded"),
 }
 
 
@@ -146,6 +170,91 @@ def empty(status: str, code: str, text: str, baseline: dict | None = None) -> di
             "notComparable": None, "notComparableByCriterion": []}
 
 
+# ── same-scan history (C6, R-B2) ──────────────────────────────────────────────────────────────
+# Two statuses beyond contract 4's, because "nothing to compare with" has two different causes
+# here and they must not read alike: the store cannot tell (not_available), or it can and recorded
+# no replaced assessment (not_recorded — still not evidence that none happened).
+SAME_SCAN_NOT_AVAILABLE = "not_available"
+SAME_SCAN_NOT_RECORDED = "not_recorded"
+
+_BASIS_WORDS = {"rubric": "rubric", "scope": "scan scope", "file_scope": "per-file scope"}
+
+
+def same_scan_empty(status: str, code: str, snapshot: dict | None = None, *,
+                    text: str | None = None) -> dict:
+    out = empty(status, code, text or reason(code),
+                baseline=None if snapshot is None else {
+                    "scanId": snapshot.get("scanId"), "file": snapshot.get("file"),
+                    "generatedAt": snapshot.get("writtenAt"),
+                    "status": snapshot.get("assessmentOutcome"), "runStatus": None,
+                    "sameScanSnapshot": True})
+    out["snapshot"] = snapshot
+    return out
+
+
+def same_scan_snapshot(found: dict, scan_id: str) -> dict:
+    """The facts' view of R-B2's `snapshot` block: what was recorded at the replaced write."""
+    snap = found.get("snapshot") or {}
+    file_row = found.get("file_row") or {}
+    basis = snap.get("comparison_basis")
+    return {
+        "scanId": scan_id,
+        "file": file_row.get("file"),
+        "historyId": snap.get("history_id"),
+        "seq": snap.get("seq"),
+        "historyTotal": snap.get("history_total"),
+        "writtenAt": snap.get("written_at"),
+        "supersededAt": snap.get("superseded_at"),
+        "contextSource": snap.get("context_source"),
+        "assessmentOutcome": snap.get("assessment_outcome"),
+        "issuesState": snap.get("issues_state"),
+        # null, never 0, unless the replaced list was recorded as the whole finding set
+        "issueCount": snap.get("issue_count") if snap.get("issues_state") == "recorded" else None,
+        "zeroFindings": snap.get("zero_findings") is True,
+        "completeness": snap.get("completeness"),
+        "rulesNotChecked": snap.get("rules_not_checked"),
+        "integrity": snap.get("integrity"),
+        "comparisonBasis": dict(basis) if isinstance(basis, dict) else None,
+    }
+
+
+def same_scan_problem(found: dict) -> tuple[str, str] | None:
+    """(reasonCode, reason) when the replaced assessment cannot be compared, else None.
+
+    Only "same" on every comparison-basis field is comparable. "not_recorded" is UNKNOWN, never
+    "different" — the owner's contract, and the reason `run` is not scope-digested here.
+    """
+    snap = found.get("snapshot") or {}
+    basis = snap.get("comparison_basis") if isinstance(snap.get("comparison_basis"), dict) else {}
+    if snap.get("context_source") != "recorded_at_write":
+        return "context_not_recorded", reason("context_not_recorded",
+                                              what="rubric and scope", was="were")
+    different = [_BASIS_WORDS[k] for k in _BASIS_WORDS if basis.get(k) == "different"]
+    if different:
+        return "same_scan_different_context", reason("same_scan_different_context",
+                                                     what=" and ".join(different))
+    unknown = [_BASIS_WORDS[k] for k in _BASIS_WORDS if basis.get(k) != "same"]
+    if unknown:
+        return "context_not_recorded", reason("context_not_recorded", what=" and ".join(unknown),
+                                              was="was" if len(unknown) == 1 else "were")
+    outcome = snap.get("assessment_outcome")
+    if outcome != "assessed":
+        return "same_scan_failed", reason("same_scan_failed", outcome=outcome or "unknown")
+    if snap.get("issues_state") != "recorded":
+        return "same_scan_issues_unavailable", reason("same_scan_issues_unavailable")
+    completeness = snap.get("completeness")
+    if completeness != "complete":
+        not_checked = snap.get("rules_not_checked")
+        rules = (f" ({len(not_checked)} rule(s) not checked)"
+                 if isinstance(not_checked, list) and not_checked else "")
+        words = {"partial": "only partly assessed", "not_assessed": "not assessed"}.get(
+            completeness, "of unrecorded completeness")
+        return "same_scan_partial", reason("same_scan_partial", completeness=words, rules=rules)
+    if "issues_changed_after_write" in str(snap.get("integrity") or "").split(";"):
+        return "same_scan_issues_changed", reason("same_scan_issues_changed")
+    return None
+
+
 def compact(comparison: dict | None) -> dict | None:
     """The per-row summary the scan index carries: counts, never lists."""
     if not comparison:
@@ -167,7 +276,31 @@ def compact(comparison: dict | None) -> dict | None:
     }
 
 
-def aggregate(rows: list[dict], *, same_scan_history: bool) -> dict:
+def aggregate_same_scan(rows: list[dict | None]) -> dict:
+    """Scan-level counts of the per-file same-scan comparisons (C6). Every file is counted in
+    exactly one files* bucket; finding counts only over files that were compared."""
+    t = {"filesCompared": 0, "filesNotRecorded": 0, "filesNotAvailable": 0,
+         "filesBaselineUnusable": 0, "filesNotComparable": 0,
+         "introduced": 0, "resolved": 0, "persisting": 0}
+    for row in rows:
+        status = (row or {}).get("status")
+        if status == COMPARED:
+            t["filesCompared"] += 1
+            for key in ("introduced", "resolved", "persisting"):
+                t[key] += row.get(key) or 0
+        elif status == SAME_SCAN_NOT_RECORDED:
+            t["filesNotRecorded"] += 1
+        elif status == BASELINE_UNUSABLE:
+            t["filesBaselineUnusable"] += 1
+        elif status == NOT_COMPARABLE:
+            t["filesNotComparable"] += 1
+        else:
+            t["filesNotAvailable"] += 1
+    return t
+
+
+def aggregate(rows: list[dict], *, same_scan_history: bool,
+              same_scan_rows: list[dict | None] | None = None) -> dict:
     """Scan-level totals from the per-file comparisons (C4). Every file is counted in exactly one
     of filesCompared / filesNoBaseline / filesBaselineUnusable / filesNotComparable."""
     totals = {"introduced": 0, "resolved": 0, "persisting": 0, "reopened": 0,
@@ -233,11 +366,32 @@ def aggregate(rows: list[dict], *, same_scan_history: bool) -> dict:
         parts.append(f"{n} {'was' if n == 1 else 'were'} not fully assessed this time, so "
                      f"{'it is' if n == 1 else 'they are'} not compared")
     notes = []
+    same_scan = aggregate_same_scan(same_scan_rows) if same_scan_rows is not None else None
     if not same_scan_history:
         notes.append("Re-assessing a document inside the same scan replaces its earlier finding "
                      "list, so changes within one scan are not compared.")
+    elif same_scan is not None and rows:
+        # ONE note (the scan summary is a single page): what was compared inside this scan, what
+        # could not be, and — always, because it is the common case — that "none recorded" is not
+        # "none happened".
+        s = same_scan
+        parts = []
+        if s["filesCompared"]:
+            parts.append(f"{s['filesCompared']} document(s) were compared with the assessment each "
+                         f"replaced ({s['introduced']} new, {s['resolved']} no longer reported, "
+                         f"{s['persisting']} still reported)")
+        unusable = s["filesBaselineUnusable"] + s["filesNotComparable"]
+        if unusable:
+            parts.append(f"{unusable} could not be compared, each document says why")
+        if s["filesNotRecorded"]:
+            parts.append(f"{s['filesNotRecorded']} have no replaced assessment recorded, which is "
+                         f"not evidence that none was replaced")
+        if parts:
+            notes.append("Re-assessments inside this scan: " + "; ".join(parts) + ".")
     if totals["notComparable"]:
         notes.append(f"{totals['notComparable']} current finding(s) have no detector location, so "
                      f"they cannot be matched one by one and are neither new nor resolved.")
     return {"status": status, "reason": "; ".join(parts) + ".", "totals": totals,
-            "complete": True, "notes": notes}
+            "complete": True, "notes": notes,
+            # C6: kept beside `totals`, not inside it — the across-scan totals are one population.
+            "sameScan": same_scan}
