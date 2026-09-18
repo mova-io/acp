@@ -242,6 +242,7 @@ export function buildScanReportModel(data = {}) {
   const facts = data.facts && typeof data.facts === 'object' ? data.facts : null
   const acc = facts?.accounting || null
   const factsFiles = facts && Array.isArray(facts.files) ? facts.files : null
+  const indexState = factsIndexState(facts, data)
   const level = data.targetLevel || 'AA'
   const total = data.totalFiles ?? files.length
   const analysed = data.analysedFiles ?? null
@@ -318,6 +319,11 @@ export function buildScanReportModel(data = {}) {
       { key: 'publication', label: 'Publication', value: ex.publishedDocuments ?? null, status: ex.publishedDocuments == null ? 'unknown' : ex.publishedDocuments ? 'done' : 'not_started', detail: ex.publishedDocuments == null ? 'Publication status not recorded in this report' : 'Documents published' },
     ],
   })
+  // S2: the server index can stop short (a page failed, the page budget ran out, the evidence
+  // changed while paging). Say so where the reader decides, not only in the appendix.
+  if (indexState.partial) {
+    T(`The per-document evidence index in this report is PARTIAL: ${indexState.loaded} of ${indexState.total ?? 'an unknown number of'} documents were loaded. ${indexState.reason || 'The reason was not recorded.'} Scan-wide counts the server computed (documents assessed, findings verified resolved, the estate comparison) cover every document; per-document rows cover only the documents loaded.`, { bold: true, color: AMBER_HEX })
+  }
   T(`Average score across scored documents: ${data.avgScore != null ? `${data.avgScore}/100` : NR} — a secondary indicator.`, { size: 9, color: MUTED_HEX })
 
   H('What this report covers')
@@ -345,16 +351,24 @@ export function buildScanReportModel(data = {}) {
   })
 
   H('Since the previous assessment')
-  let cmp
-  if (facts) {
-    // Only a real comparable snapshot the server supplied. Aggregate counts are never subtracted.
-    cmp = buildComparisonFromFacts(facts)
+  const estate = facts && facts.comparison && typeof facts.comparison === 'object' && facts.comparison.totals
+    ? facts.comparison : null
+  if (estate) {
+    // C4: the server's REAL estate comparison — every document compared finding by finding with
+    // its own most recent earlier assessment, then totalled. Nothing is inferred from scores.
+    estateComparisonBlocks(estate, { factsFiles, mode, atLeast, T, H, blocks })
   } else {
-    const current = openFiles.flatMap((f) => fileIssuesOf(f).filter((i) => i.severity !== 'REVIEW'))
-    cmp = buildComparison(data.previous, { file: null, scope: data.scope === undefined ? null : data.scope, findings: current })
-    if (!data.previous) cmp.reason = typeof data.previousReason === 'string' && data.previousReason ? data.previousReason : 'No comparable earlier estate snapshot was supplied, so no change is reported. Aggregate counts are never subtracted to imply one.'
+    let cmp
+    if (facts) {
+      // Only a real comparable snapshot the server supplied. Aggregate counts are never subtracted.
+      cmp = buildComparisonFromFacts(facts)
+    } else {
+      const current = openFiles.flatMap((f) => fileIssuesOf(f).filter((i) => i.severity !== 'REVIEW'))
+      cmp = buildComparison(data.previous, { file: null, scope: data.scope === undefined ? null : data.scope, findings: current })
+      if (!data.previous) cmp.reason = typeof data.previousReason === 'string' && data.previousReason ? data.previousReason : 'No comparable earlier estate snapshot was supplied, so no change is reported. Aggregate counts are never subtracted to imply one.'
+    }
+    blocks.push(cmp)
   }
-  blocks.push(cmp)
 
   if (atLeast('reviewer')) {
     H('Remaining work across documents')
@@ -436,7 +450,38 @@ export function buildScanReportModel(data = {}) {
     blocks.push({ k: 'pageBreak' })
     H('Complete evidence appendix')
     const index = data.index || data.appendix || []
-    blocks.push({
+    if (factsFiles) {
+      // S2: the master index comes from the SERVER's per-document index — every document in the
+      // scan, each with its own assessment state, findings, verification, reviews and comparison —
+      // not from the list this screen happened to hold. When the index stopped short, the table
+      // says how many of how many and why.
+      const screen = new Map(index.map((r) => [r.file, r]))
+      blocks.push({
+        k: 'appendixTable',
+        id: 'appendix-documents',
+        complete: !indexState.partial,
+        totalRecords: indexState.total,
+        limitNote: indexState.partial ? (indexState.reason || 'the pages of the server index that could be read') : null,
+        source: 'server-index',
+        headers: ['Document', 'Assessment', 'Findings', 'Open', 'Verified resolved', 'Saved changes (verified / not verified)', 'Reviewer decisions pending', 'Since previous assessment', 'Approvals needing recheck', 'Department', 'Recommendation'],
+        caption: 'Master index of every document (server evidence index)',
+        rows: factsFiles.map((f) => {
+          const s = screen.get(f.file) || {}
+          return [
+            f.file,
+            `${ASSESS_TXT[f.assessment?.state] || orNR(f.assessment?.state)}${f.assessment?.state && f.assessment.state !== 'assessed' && f.assessment.stateReason ? ` — ${f.assessment.stateReason}` : ''}`,
+            orNR(f.findingsTotal), orNR(f.findingsOpen), orNR(f.findingsResolvedVerified),
+            `${orNR(f.savedChangesVerified)} / ${orNR(f.savedChangesUnverified)}${f.savedChangesComplete === false ? ' (list incomplete)' : ''}`,
+            orNR(f.humanReviews?.pending),
+            rowComparisonText(f.comparison),
+            orNR(f.approvalsRecheckRequired),
+            s.dept || NR,
+            s.action ? (ROUTE_TXT[s.action] || s.action) : NR,
+          ]
+        }),
+      })
+    }
+    if (!factsFiles) blocks.push({
       k: 'appendixTable',
       id: 'appendix-documents',
       complete: index.length === total,
@@ -504,9 +549,108 @@ export function buildScanReportModel(data = {}) {
 // Palette hexes (kept local so this module does not depend on the file model's colour exports).
 const AMBER_HEX = '#854F0B', GREEN_HEX = '#3B6D11', MUTED_HEX = '#6B6670'
 
+const ASSESS_TXT = { assessed: 'Assessed', partial: 'Partly assessed', error: 'Could not be analysed', not_assessed: 'Not assessed' }
+const REVIEWER_COMPARISON_ROWS = 50
+const n0 = (v) => (Number.isFinite(v) ? v : null)
+
+// Whether the server's per-document index reached this report whole (S2). The caller's own
+// verdict (loadScanReportFacts → factsIndexComplete / factsIncompleteReason) wins; without one the
+// rows are counted against the server's filesTotal. Never "complete" by default.
+export function factsIndexState(facts, data = {}) {
+  const rows = facts && Array.isArray(facts.files) ? facts.files.length : null
+  const total = facts ? (n0(facts.snapshot?.filesTotal) ?? n0(facts.filesTotal)) : null
+  const reason = typeof data.factsIncompleteReason === 'string' && data.factsIncompleteReason.trim() ? data.factsIncompleteReason.trim() : null
+  if (!facts) return { partial: false, loaded: null, total: null, reason: null, known: false }
+  let partial
+  if (data.factsIndexComplete === false) partial = true
+  else if (data.factsIndexComplete === true) partial = total != null && rows != null && rows < total
+  else partial = total == null || rows == null || rows < total
+  return { partial, loaded: rows, total, reason: partial ? (reason || (total == null ? 'The server did not state how many documents the index holds.' : null)) : null, known: true }
+}
+
+// One document's comparison, in words, for the master index. Every status is a different fact.
+export function rowComparisonText(c) {
+  if (!c || typeof c !== 'object') return NR
+  if (c.status === 'compared') {
+    const parts = [`${orNR(c.introduced)} new`, `${orNR(c.resolved)} no longer reported`, `${orNR(c.persisting)} still present`]
+    if (c.reopened != null) parts.push(`${c.reopened} reopened`)
+    const nc = c.notComparable?.current
+    if (nc) parts.push(`${nc} not matchable (no location)`)
+    return `${parts.join(', ')}${c.renamed ? ` · renamed (was ${c.baseline?.file || 'another name'})` : ''}`
+  }
+  if (c.status === 'no_baseline') return c.reasonCode === 'no_earlier_assessment' ? 'No earlier assessment (new to the record)' : `No comparable earlier assessment — ${orNR(c.reason)}`
+  if (c.status === 'baseline_unusable') return `Earlier assessment not usable — ${orNR(c.reason)}`
+  if (c.status === 'not_comparable') return `Not compared — ${orNR(c.reason)}`
+  return NR
+}
+
+// C4: the estate comparison as blocks every renderer lays out truthfully. A `text` block carries
+// the whole answer in words (the one-page summary keeps text), and the Reviewer packet / Full
+// evidence add the table and the per-document rows. It is deliberately NOT a `comparison` block:
+// that block's renderers count their `resolved`/`introduced` LISTS, and an estate's findings are
+// not listed here — a list of zero items would print "Newly reported: 0" over a real count.
+function estateComparisonBlocks(cmp, { factsFiles, mode, atLeast, T, blocks }) {
+  const t = cmp.totals || {}
+  const docs = [
+    `${orNR(t.filesCompared)} compared with their own most recent earlier assessment`,
+    t.filesNew ? `${t.filesNew} with no earlier assessment (new to the record)` : null,
+    (t.filesNoBaseline || 0) - (t.filesNew || 0) > 0 ? `${t.filesNoBaseline - (t.filesNew || 0)} with no comparable earlier assessment` : null,
+    t.filesBaselineUnusable ? `${t.filesBaselineUnusable} whose earlier assessment did not finish or used a different rubric or scope, so it is not a baseline` : null,
+    t.filesNotComparable ? `${t.filesNotComparable} not fully assessed this time, so not compared` : null,
+  ].filter(Boolean)
+  if (cmp.status !== 'compared') {
+    T(`Change since the previous assessment: not compared. ${cmp.reason || ''}`.trim(), { color: AMBER_HEX })
+    T(`Documents: ${docs.join('; ')}.`, { size: 9, color: MUTED_HEX })
+  } else {
+    const reopened = t.reopened != null ? `${t.reopened} reopened (reported again after being recorded as resolved)`
+      : `reopened not recorded for ${t.filesReopenedUndetermined} document(s)${t.reopenedDetermined ? ` (${t.reopenedDetermined} reopened where it is recorded)` : ''}`
+    T(`Across the documents compared: ${orNR(t.introduced)} newly reported finding(s), ${orNR(t.resolved)} no longer reported, ${orNR(t.persisting)} still present; ${reopened}.${t.notComparable ? ` ${t.notComparable} current finding(s) have no detector location, so they cannot be matched one by one and are counted as neither new nor resolved.` : ''} "No longer reported" means absent from the newer assessment — it is not a verified fix.`)
+    T(`Documents: ${docs.join('; ')}.`, { size: 9, color: MUTED_HEX })
+  }
+  ;(cmp.notes || []).forEach((note) => T(note, { size: 9, color: MUTED_HEX }))
+  if (!atLeast('reviewer')) return
+  blocks.push({
+    k: 'table',
+    headers: ['Measure', 'Count'],
+    caption: 'Change since each document’s previous assessment',
+    rows: [
+      ['Newly reported findings', orNR(t.introduced)],
+      ['No longer reported', orNR(t.resolved)],
+      ['Still present', orNR(t.persisting)],
+      ['Reopened', t.reopened != null ? String(t.reopened) : `Not recorded (${orNR(t.filesReopenedUndetermined)} document(s) have no earlier per-finding ledger)`],
+      ['Findings not matchable one by one (no location)', orNR(t.notComparable)],
+      ['Documents compared', orNR(t.filesCompared)],
+      ['Documents renamed since then (matched by provider id)', orNR(t.filesRenamed)],
+      ['Documents with no earlier assessment', orNR(t.filesNew)],
+      ['Documents with no comparable earlier assessment', orNR(t.filesNoBaseline != null && t.filesNew != null ? t.filesNoBaseline - t.filesNew : null)],
+      ['Documents whose earlier assessment is not a usable baseline', orNR(t.filesBaselineUnusable)],
+      ['Documents not fully assessed this time', orNR(t.filesNotComparable)],
+    ],
+  })
+  if (!factsFiles) return
+  const moved = factsFiles.filter((f) => {
+    const c = f.comparison || {}
+    return (c.status === 'compared' && ((c.introduced || 0) + (c.resolved || 0) + (c.reopened || 0) > 0))
+      || c.status === 'baseline_unusable' || c.status === 'not_comparable'
+  })
+  const shown = mode === 'full' ? moved : moved.slice(0, REVIEWER_COMPARISON_ROWS)
+  blocks.push({
+    k: 'table',
+    headers: ['Document', 'Since previous assessment', 'Previous assessment'],
+    caption: 'Documents that changed, or could not be compared',
+    rows: shown.map((f) => [f.file, rowComparisonText(f.comparison),
+      f.comparison?.baseline ? `${orNR(f.comparison.baseline.scanId)} · ${orNR(f.comparison.baseline.generatedAt)}` : NR]),
+  })
+  if (shown.length < moved.length) T(`Showing ${shown.length} of ${moved.length} documents that changed or could not be compared; every one is in the Full evidence report.`, { bold: true })
+}
+
 // Gather every scan-scoped input, aggregate, build the model, then render the PDF server-side.
 // Both the Overview toolbar and the Assess/Transparency RuleBreakdown header call this.
-export async function generateScanReport({ scanId, files = [], org = 'your organisation', mode = 'summary', previous = null, scope, facts = null } = {}) {
+// `factsIndexComplete` / `factsIncompleteReason` are what Overview.jsx and Transparency.jsx pass
+// from loadScanReportFacts (`got.complete`, `got.incompleteReason || got.factsError`). They were
+// accepted and dropped (audit S2); the model now states them.
+export async function generateScanReport({ scanId, files = [], org = 'your organisation', mode = 'summary', previous = null, scope, facts = null,
+  factsIndexComplete = null, factsIncompleteReason = null, previousReason = null } = {}) {
   const [rowsRaw, hitlRaw, cfg, diffRaw] = await Promise.all([
     getScanTraces(scanId).catch(() => []),
     // null, not [] — a queue that could not be read is "not recorded", not "nothing pending".
@@ -518,7 +662,7 @@ export async function generateScanReport({ scanId, files = [], org = 'your organ
     scanId, files, traces: rowsRaw, hitlItems: hitlRaw, cfg, diffSummary: diffRaw,
     targetLevel: assessLevel(scanId), org, previous, scope, facts,
   })
-  const model = buildScanReportModel({ ...data, mode })
+  const model = buildScanReportModel({ ...data, mode, factsIndexComplete, factsIncompleteReason, previousReason })
   const { renderReportPdf } = await import('./reportRenderClient.js')
   // The renderer's OWN outcome is returned, not discarded. It answers {format:'html'} when the
   // server PDF is unavailable, and a caller that only sees the model reports "PDF complete" for a

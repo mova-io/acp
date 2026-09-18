@@ -64,9 +64,20 @@ def get_file_report_facts(sid: str, filename: str, request: Request):
 def get_scan_report_facts(sid: str, request: Request,
                           offset: int = Query(0, ge=0),
                           limit: int = Query(report_facts.FILE_PAGE_DEFAULT, ge=1,
-                                             le=report_facts.FILE_PAGE_MAX)):
-    facts = report_facts.build_scan_facts(core.store, sid, owner=_owner(request),
-                                          offset=offset, limit=limit)
+                                             le=report_facts.FILE_PAGE_MAX),
+                          digest: str | None = Query(None, min_length=64, max_length=64,
+                                                     pattern="^[0-9a-f]{64}$")):
+    """One page of one snapshot (contract 3).
+
+    `digest` is the first page's `factsDigest`. A later page carrying it is served from the same
+    snapshot; when the evidence has moved on the answer is 409, never a page of a different
+    snapshot. A request without `digest` always reads the evidence fresh.
+    """
+    try:
+        facts = report_facts.build_scan_facts(core.store, sid, owner=_owner(request),
+                                              offset=offset, limit=limit, digest=digest)
+    except report_facts.ScanFactsChanged:
+        raise HTTPException(409, report_facts.SNAPSHOT_CHANGED_DETAIL)
     if facts is None:
         raise HTTPException(404, "scan not found")
     return facts

@@ -205,7 +205,9 @@ describe('every finding and every change survives', () => {
   })
 
   it('structured locations survive: page, slide, sheet, cell, element', () => {
-    expect(locationOf({ page: 3 }, { fmt: 'pptx' })).toMatchObject({ slide: 3, page: null, label: 'Slide 3' })
+    // Contract 1: for a PPTX `page` is the rendered slide number (a slide renders as one page), so
+    // both are 3 — the preview route can render it. The label names the slide.
+    expect(locationOf({ page: 3 }, { fmt: 'pptx' })).toMatchObject({ slide: 3, page: 3, label: 'Slide 3', kind: 'slide' })
     expect(locationOf({ location: "Budget!B4" })).toMatchObject({ sheet: 'Budget', cell: 'B4' })
     expect(locationOf({ page: 7, location: 'word/header1.xml#Picture 1' })).toMatchObject({ page: 7, element: 'word/header1.xml#Picture 1' })
     const href = locationOf({ page: 2 }, { locationHref: () => '/scans/s1/files/a.pdf?page=2' })
@@ -427,7 +429,10 @@ describe('HTML output is safe and accessible', () => {
     expect(doc.querySelectorAll('[onerror]')).toHaveLength(0)
     const hrefs = [...doc.querySelectorAll('a[href]')].map((a) => a.getAttribute('href'))
     expect(hrefs.some((h) => /javascript:|^\/\//i.test(h))).toBe(false)
-    expect(hrefs).toContain('/scans/s1/files/a/corrected')
+    // A downloaded file has no app origin: a relative href would resolve against the reader's own
+    // disk. So no relative href is ever emitted — a non-app path prints as text only.
+    expect(hrefs.filter((h) => h.startsWith('/'))).toEqual([])
+    expect(doc.body.textContent).toContain('Corrected copy')
     expect(doc.body.textContent).toContain('bad')
     for (const img of doc.querySelectorAll('img')) expect(img.getAttribute('src')).toMatch(/^data:image\/(png|jpeg);base64,/)
     expect(doc.querySelector('figure.preview figcaption')).toBeTruthy()

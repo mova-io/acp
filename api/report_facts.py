@@ -35,9 +35,12 @@ every fetch produce a different digest and therefore every render 409.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
+import threading
+import time
 from datetime import datetime, timezone
 
 FACTS_VERSION = 1
@@ -52,7 +55,9 @@ NOTE_MAX_CHARS = 500
 SAVED_CHANGES_LIMIT = None
 FINDINGS_LIMIT = None
 FILE_PAGE_DEFAULT = 100
-FILE_PAGE_MAX = 500
+# Raised from 500 (S1): the paging memo makes every page after the first cost a slice, so a larger
+# page only saves round trips. A 1,000-row page of compact index rows is ~1 MB of JSON.
+FILE_PAGE_MAX = 1000
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SC = re.compile(r"(?:SC[_-])?([1-4])[._]([0-9]+)[._]([0-9]+)")
@@ -319,14 +324,27 @@ def build_saved_changes(store, scan_id: str, filename: str, record: dict,
     So a failure to read them makes the list INCOMPLETE and says so, rather than returning a
     shorter list that looks whole.
     """
+    import report_location
+    fmt = report_location.fmt_of_name(filename)
     rows: list[dict] = []
     for diff in (store.get_remediation_diffs(scan_id, filename) or []):
         rule_id = str(diff.get("rule_id") or "")
         before, after = diff.get("before") or "", diff.get("after") or ""
+        # R1 (accepted by the #2131 owner): remediation_diff gains optional `locator`/`page`.
+        # Read defensively — a legacy row without them is "Location not recorded", never page 1.
+        verified_locator = diff.get("locator") or None
         rows.append({
             "id": verified_change_id(filename, rule_id, diff.get("seq") or 0),
             "ruleId": rule_id, "sc": sc_of(rule_id), "seq": int(diff.get("seq") or 0),
-            "locator": None, "before": before, "after": after,
+            "locator": verified_locator,
+            "location": report_location.parse_location(verified_locator, diff.get("page"), fmt),
+            # R1 owner contract: "recorded" (stored by the writer), "legacy_note" (reconstructed
+            # at read time from an exact writer note prefix), or None (unknown).
+            # When the store states the source it is used VERBATIM; only a pre-R1 row (no key at
+            # all) is classified here.
+            "locationSource": (diff.get("location_source") if "location_source" in diff else
+                               ("recorded" if (verified_locator or diff.get("page")) else None)),
+            "before": before, "after": after,
             "note": diff.get("note") or None,
             "verification": "verified",
             "verificationDetail": ("A re-check of the saved copy confirmed this change cleared "
@@ -353,7 +371,10 @@ def build_saved_changes(store, scan_id: str, filename: str, record: dict,
         rows.append({
             "id": unverified_change_id(filename, rule_id, locator, before, after),
             "ruleId": rule_id, "sc": sc_of(rule_id), "seq": None,
-            "locator": locator, "before": before, "after": after,
+            "locator": locator,
+            "location": report_location.parse_location(locator, change.get("page"), fmt),
+            "locationSource": "recorded" if (locator or change.get("page")) else None,
+            "before": before, "after": after,
             "note": change.get("reason") or change.get("note") or None,
             "verification": "not_verified",
             "verificationDetail": ("AI applied this change and saved it; no re-check has "
@@ -399,14 +420,15 @@ def assessment_state(file_row: dict, run: dict) -> dict:
 
 # ── findings ──────────────────────────────────────────────────────────────────
 
-def _location(issue: dict) -> dict | None:
-    raw = issue.get("location")
-    page = issue.get("page")
-    if not raw and page is None:
-        return None
-    label = str(raw or "").strip() or (f"page {page}" if page is not None else "")
-    return {"label": label or None, "page": page, "slide": None, "sheet": None,
-            "cell": None, "element": str(raw or "").strip() or None}
+def _location(issue: dict, fmt: str | None = None) -> dict | None:
+    """Contract 1: the structured location (api/report_location.py is the one parser).
+
+    Before it, this copied the detector's machine string into `label` and hard-coded
+    slide/sheet/cell to None — a reviewer read "docx:paragraph:14", and PPTX shapes and XLSX
+    cells were lost (audit gap L2).
+    """
+    import report_location
+    return report_location.location_of_issue(issue or {}, fmt)
 
 
 def _recommended_action(issue: dict) -> tuple[str | None, str | None]:
@@ -441,6 +463,8 @@ def _instance_keys(issues: list[dict], sc: str, scope: str) -> list[str]:
 def build_findings(scan_id: str, filename: str, issues: list[dict], *,
                    ledger_scope: str | None = None) -> list[dict]:
     """One entry per issue row of the CURRENT assessment, each with a stable server-side id."""
+    import report_location
+    fmt = report_location.fmt_of_name(filename)
     groups: dict[str, list[dict]] = {}
     for issue in issues or []:
         sc = sc_of(issue.get("wcag")) or sc_of(issue.get("rule_id")) or sc_of(issue.get("ruleId"))
@@ -468,7 +492,7 @@ def build_findings(scan_id: str, filename: str, issues: list[dict], *,
                 "severity": issue.get("severity") or None,
                 "recommendedAction": action,
                 "recommendedActionSource": action_source,
-                "location": _location(issue),
+                "location": _location(issue, fmt),
                 # Whether this finding's identity survives a RE-ASSESSMENT, and therefore whether
                 # it can be compared with an earlier one. A real detector location does; a
                 # synthesized ordinal does not — finding_ledger.normalize_instance_key is explicit
@@ -613,35 +637,106 @@ def scope_digest(run: dict) -> str | None:
                           .encode()).hexdigest()
 
 
-def build_previous(store, scan_id: str, filename: str, run: dict, *, owner: str) -> tuple:
-    """(previous|None, reason) — an earlier assessment of THE SAME document, or why not.
+def prefetch_baselines(store, scan_id: str, names: list[str], *, owner: str,
+                       context: dict) -> str:
+    """Load every file's baseline for a scan-index build in one store read, when the store has it.
+
+    Returns 'batched' or 'per_file'. `previous_assessments_for_scan` is store request R-B1
+    (/tmp/acp-report-followup-store-requests.md): identical semantics to
+    `previous_assessment_for_file`, bounded query count. Until it exists — or if it fails — each
+    file falls back to the per-file read inside `_load_baseline`, memoised for this build, so the
+    index row and the per-file route always go through the SAME selection and the SAME digest.
+    """
+    batched = getattr(store, "previous_assessments_for_scan", None)
+    if not callable(batched):
+        return "per_file"
+    try:
+        got = batched(scan_id, owner=owner, files=list(names)) or {}
+    except Exception:
+        return "per_file"
+    memo = context.setdefault("previous_by_file", {})
+    for name in names:
+        memo[name] = (got.get(name), False)
+    return "batched"
+
+
+def _load_baseline(store, scan_id: str, filename: str, *, owner: str,
+                   context: dict | None) -> tuple[dict | None, bool]:
+    """(found|None, lookup_failed) — memoised per build so a scan index never reads twice."""
+    memo = (context or {}).get("previous_by_file")
+    if memo is not None and filename in memo:
+        return memo[filename]
+    try:
+        result = (store.previous_assessment_for_file(scan_id, filename, owner=owner), False)
+    except Exception:
+        result = (None, True)
+    if memo is not None:
+        memo[filename] = result
+    return result
+
+
+def _previous_ledger(store, run_id: str, *, owner: str, context: dict | None) -> dict | None:
+    memo = (context or {}).setdefault("prev_ledgers", {}) if context is not None else None
+    if memo is not None and run_id in memo:
+        return memo[run_id]
+    ledger = read_ledger(store, run_id, owner=owner)
+    if memo is not None:
+        memo[run_id] = ledger
+    return ledger
+
+
+def build_previous(store, scan_id: str, filename: str, run: dict, *, owner: str,
+                   context: dict | None = None, current_findings: list[dict] | None = None,
+                   current_state: dict | None = None) -> tuple:
+    """(previous|None, reason, comparison) — an earlier assessment of THE SAME document, or why not.
 
     "Same document" is source identity (the provider's own file id, or source+path when there is
     none), NOT the filename and NOT the checksum of a rewritten copy: a remediated copy has a
     different hash and a renamed file has a different name, and neither fact says anything about
     whether the two assessments are comparable. The rubric and frozen scope must match too — a
     count taken under a different criterion set is not a baseline, it is a different question.
+
+    `comparison` is contract 4 (api/report_comparison.py): the finding-by-finding classification,
+    made here from the baseline actually loaded, so no client re-derives it from ids.
     """
-    try:
-        found = store.previous_assessment_for_file(scan_id, filename, owner=owner)
-    except Exception:
-        return None, "no earlier assessment could be read for this document"
+    import report_comparison as rc
+    found, failed = _load_baseline(store, scan_id, filename, owner=owner, context=context)
+    if failed:
+        text = rc.reason("lookup_failed")
+        return None, text, rc.empty(rc.BASELINE_UNUSABLE, "lookup_failed", text)
     if not found:
-        return None, ("no earlier assessment of this same document under the same rubric and "
-                      "scope is recorded")
+        text = rc.reason("no_earlier_assessment")
+        return None, text, rc.empty(rc.NO_BASELINE, "no_earlier_assessment", text)
     previous_run = found["run"]
     previous_file = found["file_row"]
+    ref = rc.baseline_ref(found)
     if scope_digest(previous_run) != scope_digest(run):
-        return None, ("the earlier assessment of this document used a different rubric or scope, "
-                      "so its counts are not comparable")
-    previous_findings = build_findings(previous_run["id"], previous_file["file"],
-                                       found.get("issues") or [])
+        text = rc.reason("different_scope")
+        return None, text, rc.empty(rc.BASELINE_UNUSABLE, "different_scope", text, ref)
+    # C2: an earlier row that did not finish is not a baseline. Its empty finding list would make
+    # every current finding read "new since then".
+    problem = rc.baseline_problem(found, assessed_statuses=ASSESSED_STATUSES,
+                                  error_statuses=ERROR_STATUSES)
+    if problem:
+        code, text = problem
+        return None, text, rc.empty(rc.BASELINE_UNUSABLE, code, text, ref)
+
+    # The baseline scan's OWN per-finding ledger, when it has one, says which earlier findings had
+    # been resolved — the only evidence that a finding reported again was "reopened" (C5).
+    previous_ledger = _previous_ledger(store, previous_run["id"], owner=owner, context=context)
+    previous_findings = build_findings(
+        previous_run["id"], previous_file["file"], found.get("issues") or [],
+        ledger_scope=(previous_ledger or {}).get("snapshot_id") or previous_run["id"])
+    previous_kind = apply_ledger(
+        previous_findings, previous_ledger, filename=previous_file["file"],
+        document_id=_document_id(previous_run, previous_file, previous_file["file"], previous_file))
     # Ids are scan-scoped by construction, so re-key the baseline onto THIS scan's id space —
     # otherwise every finding would read as both resolved and introduced.
     for finding in previous_findings:
         finding["id"] = _finding_id(scan_id, filename, finding["ruleId"], finding["instanceKey"])
     identity = artifact_identity(previous_file)
-    return {
+    renamed = previous_file.get("file") != filename
+    previous = {
         "scanId": previous_run["id"],
         "file": previous_file["file"],
         "generatedAt": previous_run.get("assessed_at") or previous_run.get("completed_at"),
@@ -651,12 +746,39 @@ def build_previous(store, scan_id: str, filename: str, run: dict, *, owner: str)
         "scopeDigest": scope_digest(previous_run),
         "scanScope": previous_run.get("scan_scope"),
         "score": previous_file.get("score"),
+        # The server matched the two rows by source identity, so a different name is a RENAME of
+        # this document, not a different one (C3).
+        "sameDocument": True,
+        "matchedBy": "provider_file_id" if previous_file.get("drive_file_id") else "source_path",
         "findings": [{"id": f["id"], "ruleId": f["ruleId"], "sc": f["sc"],
                       "detail": f["detail"], "location": f["location"],
                       "comparable": f["comparable"]}
                      for f in previous_findings],
         "comparableFindings": sum(1 for f in previous_findings if f["comparable"]),
-    }, "an earlier assessment of the same document under the same rubric and scope"
+    }
+    previous_reason = "an earlier assessment of the same document under the same rubric and scope"
+    state = (current_state or {}).get("state", "assessed")
+    if state != "assessed":
+        text = rc.reason("current_not_assessed", state=state,
+                         why=(current_state or {}).get("stateReason") or state)
+        return previous, previous_reason, rc.empty(rc.NOT_COMPARABLE, "current_not_assessed",
+                                                   text, ref)
+    states = ({f["id"]: f["state"] for f in previous_findings}
+              if previous_kind == "per_finding" else None)
+    classified = rc.classify(current_findings or [], previous_findings, states)
+    when = previous["generatedAt"] or "an earlier date"
+    text = (f"matched finding by finding against the assessment of {when} of the same document "
+            f"({'same provider file id' if previous['matchedBy'] == 'provider_file_id' else 'same source and path'}), "
+            f"under the same rubric and scope"
+            + (f"; the document was named {previous_file.get('file')} then" if renamed else ""))
+    comparison = {
+        "status": rc.COMPARED, "reasonCode": "compared", "reason": text, "baseline": ref,
+        "renamed": renamed, **classified,
+        "reopenedReason": None if states is not None else (
+            "the earlier assessment has no per-finding resolution ledger, so whether a finding "
+            "reported again had been fixed in between is not recorded"),
+    }
+    return previous, previous_reason, comparison
 
 
 # ── the builders ──────────────────────────────────────────────────────────────
@@ -697,8 +819,95 @@ def scan_context(store, scan_id: str, *, owner: str) -> dict | None:
     if scan is None:
         return None
     return {"scan": scan, "run": scan.get("run") or {},
+            # A dict, not a list scan: build_file_facts looked each file up with `next(...)` over
+            # the whole list, which made a scan-index build quadratic in the file count (S1).
+            "files_by_name": {f.get("file"): f for f in (scan.get("files") or []) if f.get("file")},
             "records": store.get_file_records(scan_id, owner=owner) or {},
-            "ledger": read_ledger(store, scan_id, owner=owner)}
+            "ledger": read_ledger(store, scan_id, owner=owner),
+            # Filled lazily, once per build: baselines, baseline ledgers, queue approvals.
+            "previous_by_file": {}, "prev_ledgers": {}}
+
+
+# ── queue approvals that need a recheck (audit gap C11) ───────────────────────
+
+APPROVAL_RECHECK_NOTE = (
+    "Approved in the review queue against a source version or proposed value that has since "
+    "changed, so it needs a reviewer to approve it again against the current version. This "
+    "report records that state; it does not re-queue or change the approval.")
+
+
+def _approvals_by_file(store, scan_id: str, *, owner: str, context: dict) -> dict | None:
+    """{file: [queue rows]} for this scan, read ONCE per build; None when it could not be read."""
+    if "hitl_by_file" not in context:
+        try:
+            rows = store.list_hitl_queue(scan_id=scan_id, owner=owner) or []
+        except (KeyError, TypeError, ValueError):
+            context["hitl_by_file"] = None
+        else:
+            grouped: dict[str, list[dict]] = {}
+            for row in rows:
+                grouped.setdefault(row.get("file"), []).append(row)
+            context["hitl_by_file"] = grouped
+    return context["hitl_by_file"]
+
+
+def build_approvals(rows: list[dict] | None) -> dict:
+    """Queue approvals for one document, with the ones whose binding moved named individually.
+
+    `approval_recheck_required` is computed by Store.list_hitl_queue from the approval's own pin
+    (source revision, value digest, proposal snapshot). The report states it; it never implies
+    that marking something stale re-queued it — nothing here writes.
+    """
+    if rows is None:
+        return {"source": "unavailable", "approvedAwaitingWrite": None, "pending": None,
+                "recheckRequired": None, "note": APPROVAL_RECHECK_NOTE}
+    approved = [r for r in rows if str(r.get("status") or "") == "approved" and not r.get("applied")]
+    recheck = [{"id": r.get("id"), "ruleId": r.get("rule_id"), "sc": sc_of(r.get("rule_id")),
+                "ruleName": r.get("rule_name"), "reviewedAt": r.get("reviewed_at"),
+                "approvedSourceRevision": r.get("approved_source_revision"),
+                "decisionVersion": r.get("decision_version")}
+               for r in approved if r.get("approval_recheck_required") is True]
+    recheck.sort(key=lambda r: (str(r["ruleId"] or ""), str(r["id"] or "")))
+    return {"source": "ok", "approvedAwaitingWrite": len(approved),
+            "pending": sum(1 for r in rows if str(r.get("status") or "") == "pending"),
+            "recheckRequired": recheck, "note": APPROVAL_RECHECK_NOTE}
+
+
+# ── reviewer decisions recorded on EARLIER scans of this document (audit gap C7) ─
+
+PRIOR_DECISIONS_UNAVAILABLE = (
+    "Decisions recorded against earlier scans of this document are not shown: ACP cannot yet "
+    "list them by document. They are not carried forward to this scan's changes, and their "
+    "absence here is not evidence that there were none.")
+# (Store request R-B3, /tmp/acp-report-followup-store-requests.md, is what lifts this.)
+
+
+def build_prior_decisions(store, scan_id: str, filename: str, *, owner: str) -> tuple:
+    """(list|None, reason). Earlier decisions are EVIDENCE about the document, never current
+    decisions about this scan's changes — each is marked not_carried_forward."""
+    reader = getattr(store, "change_reviews_for_document", None)
+    if not callable(reader):
+        return None, PRIOR_DECISIONS_UNAVAILABLE
+    try:
+        rows = reader(scan_id, filename, owner=owner) or []
+    except (KeyError, TypeError, ValueError):
+        return None, "decisions recorded against earlier scans of this document could not be read"
+    out = []
+    for row in rows:
+        try:
+            value = json.loads(row.get("value") or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(value, dict):
+            continue
+        out.append({"scanId": row.get("scan_id"), "file": row.get("file"),
+                    "changeId": value.get("change_id"), "verdict": value.get("verdict"),
+                    "verdictLabel": VERDICT_LABELS.get(value.get("verdict"), "unknown"),
+                    "reviewer": value.get("reviewer"), "at": value.get("at") or row.get("ts"),
+                    "artifactSha256": value.get("artifact_sha256"),
+                    "status": "not_carried_forward"})
+    return out, ("decisions recorded against earlier scans of this document; they apply to the "
+                 "bytes reviewed then and are not carried forward to this scan's changes")
 
 
 def build_file_facts(store, scan_id: str, filename: str, *, owner: str,
@@ -709,8 +918,12 @@ def build_file_facts(store, scan_id: str, filename: str, *, owner: str,
     context = context or scan_context(store, scan_id, owner=owner)
     if context is None:
         return None
-    scan, run = context["scan"], context["run"]
-    file_row = next((f for f in (scan.get("files") or []) if f.get("file") == filename), None)
+    run = context["run"]
+    files_by_name = context.get("files_by_name")
+    if files_by_name is None:     # a hand-built context (tests); same answer, built once
+        files_by_name = context["files_by_name"] = {
+            f.get("file"): f for f in (context["scan"].get("files") or []) if f.get("file")}
+    file_row = files_by_name.get(filename)
     if file_row is None:
         return None
     record = context["records"].get(filename) or {}
@@ -736,12 +949,18 @@ def build_file_facts(store, scan_id: str, filename: str, *, owner: str,
                            current_sha256=decision_binding_sha256(record),
                            digests_by_id={c["id"]: c["changeDigest"] for c in changes})
     if include_previous:
-        previous, previous_reason = build_previous(store, scan_id, filename, run, owner=owner)
+        previous, previous_reason, comparison = build_previous(
+            store, scan_id, filename, run, owner=owner, context=context,
+            current_findings=findings, current_state=state)
     else:
-        # The scan-level index does not carry per-document comparisons, and looking one up for
-        # every file would be a query per document on the estate-sized scans this is bounded for.
-        previous, previous_reason = None, ("comparison is reported per document; fetch this "
-                                           "file's own report-facts for it")
+        # Only for callers that explicitly do not want the comparison. The scan index does NOT
+        # use this: contract 3a requires its rows to be the per-file route's exact projection,
+        # so row.factsDigest equals the per-file factsDigest for unchanged evidence.
+        previous, previous_reason, comparison = None, ("comparison was not requested"), None
+    by_file = _approvals_by_file(store, scan_id, owner=owner, context=context)
+    approvals = build_approvals(None if by_file is None else by_file.get(filename, []))
+    prior_decisions, prior_decisions_reason = build_prior_decisions(
+        store, scan_id, filename, owner=owner)
 
     facts = {
         "factsVersion": FACTS_VERSION,
@@ -792,6 +1011,12 @@ def build_file_facts(store, scan_id: str, filename: str, *, owner: str,
                                        saved_changes_complete=changes_complete),
         "previous": previous,
         "previousReason": previous_reason,
+        # Contract 4: the server's classification. Clients render it; they do not re-derive it.
+        "comparison": comparison,
+        # C11: review-queue approvals whose pin moved. C7: decisions on earlier scans.
+        "approvals": approvals,
+        "priorDecisions": prior_decisions,
+        "priorDecisionsReason": prior_decisions_reason,
         "limits": {"valueMaxChars": VALUE_MAX_CHARS, "noteMaxChars": NOTE_MAX_CHARS,
                    "savedChangesLimit": saved_changes_limit,
                    "findingsLimit": FINDINGS_LIMIT,
@@ -801,32 +1026,89 @@ def build_file_facts(store, scan_id: str, filename: str, *, owner: str,
     return facts
 
 
-def build_scan_facts(store, scan_id: str, *, owner: str, offset: int = 0,
-                     limit: int = FILE_PAGE_DEFAULT) -> dict | None:
-    """Scan-level totals plus a BOUNDED per-file index.
+class ScanFactsChanged(Exception):
+    """A page was requested for a snapshot digest the evidence no longer has (contract 3 → 409)."""
 
-    The digest is computed over the FULL, unpaginated index, so two clients that fetched
-    different pages agree on it and neither gets a spurious "the document changed" on render.
+    def __init__(self, requested: str, current: str | None):
+        super().__init__(SNAPSHOT_CHANGED_DETAIL)
+        self.requested = requested
+        self.current = current
+
+
+SNAPSHOT_CHANGED_DETAIL = "report evidence changed while paging; restart the export"
+
+# The memoised full index (S1). A PAGING AID ONLY (contract RESUME-2): it is served solely to a
+# page request that carries `digest=X` equal to the memo's digest, for at most this long. A request
+# with no digest always rebuilds; `verify_digest` (the render route) and the per-file route never
+# read it. So the worst a stale memo can do is hand a caller the remaining pages of the snapshot
+# they asked for by digest — which is exactly what they asked for — and the render route then
+# re-verifies against a fresh build.
+SCAN_INDEX_TTL_SECONDS = 60
+_SCAN_INDEX_CACHE_MAX = 16
+_scan_index_cache: dict = {}
+_scan_index_lock = threading.Lock()
+
+
+def _index_row(facts: dict) -> dict:
+    import report_comparison as rc
+    accounting = facts["accounting"]
+    approvals = facts.get("approvals") or {}
+    return {
+        "file": facts["identity"]["file"],
+        # Contract 3a: THE per-file route's digest. The row is built from exactly the facts that
+        # route returns (same projection, same comparison), so the two are equal for unchanged
+        # evidence and a mismatch is real drift. Counts alone cannot bind a report: notes,
+        # descriptions or before/after values can change without moving any total.
+        "factsDigest": facts["factsDigest"],
+        "assessment": {"state": facts["assessment"]["state"],
+                       "stateReason": facts["assessment"]["stateReason"]},
+        "score": facts["assessment"]["score"],
+        "findingsTotal": facts["assessment"]["findingsTotal"],
+        "findingsOpen": accounting["findingsOpen"],
+        "findingsResolvedVerified": accounting["findingsResolvedVerified"],
+        "resolutionLedger": accounting["resolutionLedger"],
+        "savedChangesVerified": accounting["savedChangesVerified"],
+        # The applied-but-unverified records could not be read: their number is UNKNOWN, and an
+        # index row saying 0 would take this document off every "needs a person" list.
+        "savedChangesUnverified": (None if facts["savedChangesUnverifiedSource"] == "unavailable"
+                                   else accounting["savedChangesUnverified"]),
+        "savedChangesComplete": facts["savedChangesComplete"],
+        "humanReviews": accounting["humanReviews"],
+        "currentArtifact": facts["identity"]["currentArtifact"],
+        "comparison": rc.compact(facts.get("comparison")),
+        "approvalsRecheckRequired": (None if approvals.get("recheckRequired") is None
+                                     else len(approvals["recheckRequired"])),
+    }
+
+
+def build_scan_index(store, scan_id: str, *, owner: str) -> dict | None:
+    """The FULL scan index and its digest, built fresh. None when the caller cannot see the scan.
+
+    Returns {"facts": <scan facts without files/paging>, "index": [rows], "digest", "builtAt",
+    "baselineRead": 'batched'|'per_file'}.
     """
+    import report_comparison as rc
     context = scan_context(store, scan_id, owner=owner)
     if context is None:
         return None
-    scan, run = context["scan"], context["run"]
-    names = [f.get("file") for f in (scan.get("files") or []) if f.get("file")]
+    run = context["run"]
+    names = list(context["files_by_name"])
+    baseline_read = prefetch_baselines(store, scan_id, names, owner=owner, context=context)
 
     index: list[dict] = []
     totals = {"documents": len(names), "assessed": 0, "notAssessed": 0, "error": 0, "partial": 0,
-              "findingsTotal": 0, "savedChangesVerified": 0, "savedChangesUnverified": 0}
+              "findingsTotal": 0, "savedChangesVerified": 0, "savedChangesUnverified": 0,
+              "approvalsRecheckRequired": 0}
+    approvals_known = True
+    unverified_known = True
     reviews_total = {"pending": 0, "accepted": 0, "correctionRequested": 0, "rejected": 0,
                      "unable": 0, "stale": 0}
     open_known = True
     open_total = 0
     resolved_known = True
     resolved_total = 0
-    for file_row in (scan.get("files") or []):
-        name = file_row.get("file")
-        facts = build_file_facts(store, scan_id, name, owner=owner, context=context,
-                                 include_previous=False)
+    for name in names:
+        facts = build_file_facts(store, scan_id, name, owner=owner, context=context)
         if facts is None:
             continue
         accounting = facts["accounting"]
@@ -835,7 +1117,6 @@ def build_scan_facts(store, scan_id: str, *, owner: str, offset: int = 0,
                 "partial": "partial"}[state]] += 1
         totals["findingsTotal"] += facts["assessment"]["findingsTotal"] or 0
         totals["savedChangesVerified"] += accounting["savedChangesVerified"]
-        totals["savedChangesUnverified"] += accounting["savedChangesUnverified"]
         for key in reviews_total:
             reviews_total[key] += accounting["humanReviews"][key]
         if accounting["findingsOpen"] is None:
@@ -846,30 +1127,28 @@ def build_scan_facts(store, scan_id: str, *, owner: str, offset: int = 0,
             resolved_known = False
         else:
             resolved_total += accounting["findingsResolvedVerified"]
-        index.append({
-            "file": name,
-            # Counts alone cannot bind a report: notes, descriptions, or before/after
-            # values can change without changing any total or the artifact hash.
-            "factsDigest": facts["factsDigest"],
-            "assessment": {"state": state, "stateReason": facts["assessment"]["stateReason"]},
-            "score": facts["assessment"]["score"],
-            "findingsTotal": facts["assessment"]["findingsTotal"],
-            "findingsOpen": accounting["findingsOpen"],
-            "findingsResolvedVerified": accounting["findingsResolvedVerified"],
-            "resolutionLedger": accounting["resolutionLedger"],
-            "savedChangesVerified": accounting["savedChangesVerified"],
-            "savedChangesUnverified": accounting["savedChangesUnverified"],
-            "humanReviews": accounting["humanReviews"],
-            "currentArtifact": facts["identity"]["currentArtifact"],
-        })
+        row = _index_row(facts)
+        if row["savedChangesUnverified"] is None:
+            unverified_known = False
+        else:
+            totals["savedChangesUnverified"] += row["savedChangesUnverified"]
+        if row["approvalsRecheckRequired"] is None:
+            approvals_known = False
+        else:
+            totals["approvalsRecheckRequired"] += row["approvalsRecheckRequired"]
+        index.append(row)
+    if not approvals_known:
+        totals["approvalsRecheckRequired"] = None
+    if not unverified_known:
+        totals["savedChangesUnverified"] = None
 
-    offset = max(0, int(offset or 0))
-    limit = max(1, min(int(limit or FILE_PAGE_DEFAULT), FILE_PAGE_MAX))
-    page = index[offset:offset + limit]
+    comparison = rc.aggregate(
+        [r["comparison"] for r in index],
+        same_scan_history=callable(getattr(store, "prior_assessment_in_scan", None)))
     facts = {
         "factsVersion": FACTS_VERSION,
         "factsDigest": None,
-        "generatedAt": _now(),
+        "generatedAt": None,
         "kind": "scan",
         "identity": {
             "scanId": scan_id, "file": None,
@@ -898,30 +1177,108 @@ def build_scan_facts(store, scan_id: str, *, owner: str, offset: int = 0,
             "savedChangesUnverified": totals["savedChangesUnverified"],
             "humanReviews": reviews_total,
         },
-        # The FULL index takes part in the digest; the response carries only one page of it.
-        "_files_all": index,
+        # C4: a REAL estate comparison, aggregated from every document's own finding-by-finding
+        # comparison against its own baseline — not inferred from scores, and not a null.
+        "comparison": comparison,
+        # Kept for older clients: there is no single estate-wide baseline snapshot. The
+        # comparison above is the answer; this says where it came from.
         "previous": None,
-        "previousReason": "scan-level comparison is reported per document",
+        "previousReason": ("the estate comparison is aggregated from each document's own "
+                           "comparison with its most recent earlier assessment"),
         "limits": {"valueMaxChars": VALUE_MAX_CHARS, "savedChangesLimit": SAVED_CHANGES_LIMIT,
                    "filePageMax": FILE_PAGE_MAX},
+        # The FULL index takes part in the digest; a response carries only one page of it.
+        "_files_all": index,
     }
-    facts["factsDigest"] = facts_digest(facts)
+    digest = facts_digest(facts)
     facts.pop("_files_all")
-    facts["files"] = page
+    facts["factsDigest"] = digest
+    return {"facts": facts, "index": index, "digest": digest, "builtAt": _now(),
+            "baselineRead": baseline_read}
+
+
+def _cache_key(store, owner: str, scan_id: str) -> tuple:
+    # id(store) keeps two stores (tests, or a store swapped at runtime) from sharing a snapshot.
+    return (id(store), owner, scan_id)
+
+
+def _cached_index(store, scan_id: str, owner: str, digest: str) -> dict | None:
+    now = time.monotonic()
+    with _scan_index_lock:
+        entry = _scan_index_cache.get(_cache_key(store, owner, scan_id))
+        if entry and entry["digest"] == digest and entry["expires"] > now:
+            return entry["built"]
+    return None
+
+
+def _remember_index(store, scan_id: str, owner: str, built: dict) -> None:
+    now = time.monotonic()
+    with _scan_index_lock:
+        for key in [k for k, v in _scan_index_cache.items() if v["expires"] <= now]:
+            _scan_index_cache.pop(key, None)
+        while len(_scan_index_cache) >= _SCAN_INDEX_CACHE_MAX:
+            _scan_index_cache.pop(min(_scan_index_cache,
+                                      key=lambda k: _scan_index_cache[k]["expires"]), None)
+        _scan_index_cache[_cache_key(store, owner, scan_id)] = {
+            "digest": built["digest"], "built": built,
+            "expires": now + SCAN_INDEX_TTL_SECONDS}
+
+
+def clear_scan_index_cache() -> None:
+    with _scan_index_lock:
+        _scan_index_cache.clear()
+
+
+def build_scan_facts(store, scan_id: str, *, owner: str, offset: int = 0,
+                     limit: int = FILE_PAGE_DEFAULT, digest: str | None = None) -> dict | None:
+    """Scan-level totals plus a BOUNDED per-file index — one page of one snapshot.
+
+    The digest is computed over the FULL, unpaginated index, so two clients that fetched
+    different pages agree on it and neither gets a spurious "the document changed" on render.
+
+    `digest` (contract 3): the snapshot the caller is paging. When it is the memo's, the page is
+    served from the memo; otherwise the index is rebuilt and, if the fresh digest differs,
+    ScanFactsChanged is raised (the route answers 409) — pages of two snapshots are never mixed.
+    Without `digest` the index is always rebuilt.
+    """
+    built = _cached_index(store, scan_id, owner, digest) if digest else None
+    served_from = "memo" if built else "fresh"
+    if built is None:
+        built = build_scan_index(store, scan_id, owner=owner)
+        if built is None:
+            return None
+        _remember_index(store, scan_id, owner, built)
+        if digest and built["digest"] != digest:
+            raise ScanFactsChanged(digest, built["digest"])
+    index = built["index"]
+    offset = max(0, int(offset or 0))
+    limit = max(1, min(int(limit or FILE_PAGE_DEFAULT), FILE_PAGE_MAX))
+    page = index[offset:offset + limit]
+    facts = copy.deepcopy(built["facts"])
+    facts["generatedAt"] = built["builtAt"]
+    facts["files"] = copy.deepcopy(page)
     facts["filesTotal"] = len(index)
     facts["offset"] = offset
     facts["limit"] = limit
     facts["complete"] = len(page) == len(index)
+    facts["snapshot"] = {"factsDigest": built["digest"], "filesTotal": len(index),
+                         "builtAt": built["builtAt"], "servedFrom": served_from,
+                         "ttlSeconds": SCAN_INDEX_TTL_SECONDS}
     return facts
 
 
 # ── the seam the render route binds a report to ───────────────────────────────
 
 def current_digest(store, scan_id: str, file: str | None, *, owner: str) -> str | None:
-    """The facts digest a report of this kind must carry, or None when there is nothing to see."""
-    facts = (build_file_facts(store, scan_id, file, owner=owner) if file
-             else build_scan_facts(store, scan_id, owner=owner))
-    return None if facts is None else facts["factsDigest"]
+    """The facts digest a report of this kind must carry, or None when there is nothing to see.
+
+    ALWAYS a fresh build — never the paging memo. This is what the render route verifies against.
+    """
+    if file:
+        facts = build_file_facts(store, scan_id, file, owner=owner)
+        return None if facts is None else facts["factsDigest"]
+    built = build_scan_index(store, scan_id, owner=owner)
+    return None if built is None else built["digest"]
 
 
 def verify_digest(store, scan_id: str, file: str | None, digest: str, *, owner: str) -> bool:

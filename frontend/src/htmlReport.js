@@ -19,6 +19,7 @@ import {
   isSafeHref, isSafeImageSrc, clampText, stableHash, locationLabel, technicalText, humanText,
   verificationText, clippedNote, RESPONSE_OPTIONS, RESPONSE_NOTICE, LOCATION_NOT_RECORDED,
 } from './reportEvidence.js'
+import { absoluteAppHref } from './evidenceLink.js'
 
 const esc = (s) => String(s ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -45,9 +46,23 @@ const textClasses = (o = {}) => {
   return cls.join(' ')
 }
 
-const linkOrText = (text, href) => (isSafeHref(href)
-  ? `<a href="${esc(href)}">${esc(text || href)}</a>`
-  : esc(text || ''))
+// A DOWNLOADED file has no app origin of its own: an href like "/?view=evidence&…" in it resolves
+// against file:// — the reader's own disk — not against ACP. So the model's app-relative hrefs are
+// made ABSOLUTE here with evidenceLink.absoluteAppHref (a trusted https origin, or http on
+// localhost), and when no trusted origin exists the location prints as text with no link at all.
+// External https links pass through unchanged; any other relative href is text.
+// `renderOrigin` is set per render by reportHtmlFromModel; null means "no trusted origin".
+let renderOrigin = null
+export function exportHref(href, origin = renderOrigin) {
+  if (typeof href !== 'string' || !isSafeHref(href)) return null
+  if (/^https:\/\//i.test(href)) return href
+  if (href.startsWith('/?')) return absoluteAppHref(href, { origin })
+  return null
+}
+const linkOrText = (text, href) => {
+  const abs = exportHref(href)
+  return abs ? `<a href="${esc(abs)}">${esc(text || abs)}</a>` : esc(text || '')
+}
 
 // ── Ring (score dial) as inline SVG — only when a legacy model still carries one ──
 function ringSvg(score, hex) {
@@ -185,7 +200,7 @@ function changeCard(b, hl, ctx) {
 <h${hl} id="${hid}">${esc(b.title)}</h${hl}>
 <dl class="facts">
 <div><dt>Record</dt><dd><code>${esc(b.id)}</code></dd></div>
-<div><dt>Location</dt><dd>${locationHtml(b.location)}</dd></div>
+<div><dt>Location</dt><dd>${locationHtml(b.location)}${b.locationSource === 'legacy_note' && b.location ? ' <span class="c-muted">(read from the saving step’s own note; no structured location was stored)</span>' : ''}</dd></div>
 <div><dt>Reason</dt><dd>${esc(b.reason || 'Reason not recorded')}</dd></div>
 <div><dt>Technical verification</dt><dd>${esc(b.verification ? verificationText(b.verification) : technicalText(b.technical?.status))}${b.verificationDetail || b.technical?.detail ? ` — ${esc(b.verificationDetail || b.technical.detail)}` : ''}</dd></div>
 <div><dt>Human confirmation</dt><dd>${esc(humanLine)}${human.loaded === false ? ' (decisions not loaded)' : ''}${human.note ? ` — “${esc(human.note)}”` : ''}</dd></div>
@@ -223,19 +238,40 @@ ${steps ? `<p class="lead">Steps</p><ol class="steps">${steps}</ol>` : ''}
 </article>`
 }
 
+// Why a comparison was not made, by the server's own status (contract 4) — each is a different
+// fact about the evidence and none of them is "nothing changed".
+const NOT_COMPARED_TXT = {
+  no_baseline: 'No earlier assessment to compare with.',
+  baseline_unusable: 'The earlier assessment is not a usable baseline.',
+  not_comparable: 'This assessment is not complete enough to compare.',
+}
+
 function comparison(b) {
+  const p = b.previous || {}
+  const baselineLine = p.scanId || p.generatedAt
+    ? `<p class="small c-muted">Previous assessment: ${esc(val(p.scanId))} · ${esc(val(p.generatedAt))}${p.file ? ` · recorded as ${esc(p.file)}` : ''}${b.baselineStatus ? ` · status ${esc(b.baselineStatus)}` : ''}${b.baselineRunStatus ? ` (scan ${esc(b.baselineRunStatus)})` : ''} · SHA-256 ${esc(val(p.sha256))}</p>`
+    : ''
   if (b.status !== 'compared') {
-    return `<p class="callout warn"><strong>Not compared.</strong> ${esc(b.reason || 'No comparable earlier snapshot exists.')}</p>`
+    const head = NOT_COMPARED_TXT[b.serverStatus] || 'Not compared.'
+    return `<p class="callout warn"><strong>${esc(head)}</strong> ${esc(b.reason || 'No comparable earlier snapshot exists.')}</p>${baselineLine}`
   }
   const list = (items, empty) => (items || []).length
     ? `<ul class="bullets">${items.map((x) => `<li><code>${esc(x.id)}</code> ${esc(x.title)} — ${esc(x.location || LOCATION_NOT_RECORDED)}</li>`).join('')}</ul>`
     : `<p class="c-muted">${esc(empty)}</p>`
-  const p = b.previous || {}
+  const nc = b.notComparable
+  const reopened = Array.isArray(b.reopened)
+    ? `<p class="lead">Reported again after being recorded as resolved (${esc(b.reopened.length)})</p>${list(b.reopened, 'None.')}`
+    : b.source === 'server' ? `<p class="small c-muted">Reopened: not recorded${b.reopenedReason ? ` — ${esc(b.reopenedReason)}` : ''}.</p>` : ''
+  const ncLine = nc && (nc.current || nc.previous)
+    ? `<p class="small">Not matched one by one (no detector location): ${esc(nc.current)} now, ${esc(nc.previous)} before${(b.notComparableByCriterion || []).length ? ` — ${esc(b.notComparableByCriterion.map((g) => `${g.sc || g.ruleId}: ${g.previous} before, ${g.current} now`).join('; '))}` : ''}. These are neither new nor resolved.</p>`
+    : ''
   return `<p>${esc(b.reason)}</p>
-<p class="small c-muted">Previous assessment: ${esc(val(p.scanId))} · ${esc(val(p.generatedAt))} · SHA-256 ${esc(val(p.sha256))}</p>
+${baselineLine}
 <p class="lead">Resolved since then (${esc((b.resolved || []).length)})</p>${list(b.resolved, 'None.')}
 <p class="lead">New since then (${esc((b.introduced || []).length)})</p>${list(b.introduced, 'None.')}
-<p>Still present: ${esc(val(b.persisting))}</p>`
+${reopened}
+<p>Still present: ${esc(val(b.persisting))}</p>
+${ncLine}`
 }
 
 function beforeAfterItems(items) {
@@ -444,7 +480,13 @@ const STYLE = `
 
 // Build the complete standalone HTML document string from a report model.
 // `logo` (optional) is a data: URI for the mova.io mark; omitted in tests.
-export function reportHtmlFromModel(model, { logo } = {}) {
+export function reportHtmlFromModel(model, { logo, origin = (typeof window !== 'undefined' ? window.location?.origin : null) } = {}) {
+  const previousOrigin = renderOrigin
+  renderOrigin = origin ?? null
+  try { return renderDocument(model, { logo }) } finally { renderOrigin = previousOrigin }
+}
+
+function renderDocument(model, { logo } = {}) {
   const c = model.cover || {}
   const coverMeta = (c.meta || []).map((m) => `<li>${esc(m)}</li>`).join('')
   const logoImg = logo && isSafeImageSrc(logo) ? `<img class="logo" src="${esc(logo)}" alt="mova.io Accessibility Platform">` : ''
