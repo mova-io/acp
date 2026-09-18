@@ -6,6 +6,7 @@ import RemediationInbox from './RemediationInbox.jsx'
 import BatchReviewSelection from './BatchReviewSelection.jsx'
 import { progress, WORKFLOW_LABELS, WORKFLOW_TABS } from './remediationInboxModel.js'
 import { remediationReviewCounts } from './remediationCountSummary.js'
+import { explainReviewPopulation } from './reviewPopulationExplanation.js'
 
 // The HITL panel's numbers, held to one rule: EVERY count on screen must be reconcilable with the
 // list it sits on, by reading. The screen that prompted this had four denominators visible at once —
@@ -111,11 +112,19 @@ it('the header progress and the inbox pane counter are the same two numbers', as
   // What the pane prints, and what Remediate's header now derives — the same call on the same pair.
   const p = progress(RUN, decisions)
   expect(p).toEqual({ resolved: 5, total: 13 })    // 3 verified + 2 decided
-  expect(v.container.textContent).toContain(`${p.resolved} of ${p.total} reviewed`)
+  // Wording changed deliberately (finding/review reconciliation, scan b3eba56d4d5d): "N of M
+  // reviewed" and "N of M actions complete" were two definitions of done over one denominator.
+  // Both surfaces now print the SAME explanation's two labels; the decided count is still `p`'s.
+  const e = explainReviewPopulation({ rows: RUN, decisions })
+  expect(e.progress.decided).toBe(p.resolved)
+  expect(e.progress.total).toBe(p.total)
+  expect(v.container.textContent).toContain(`${e.progress.decidedLabel} · ${e.progress.finishedLabel}`)
+  expect(e.progress.decidedLabel).toBe('5 of 13 tasks have a recorded decision')
 
   const page = readFileSync('src/Remediate.jsx', 'utf8')
-  expect(page).toContain('const reviewProgress = progress(inboxQueue, inboxDecisions)')
-  expect(page).toContain('{reviewProgress.resolved} of {reviewProgress.total} reviewed')
+  expect(page).toContain('const reviewProgress = reviewExplanation.progress')
+  expect(page).toContain('{reviewProgress.decidedLabel} · {reviewProgress.finishedLabel}')
+  expect(page).not.toMatch(/\{reviewProgress\.resolved\} of \{reviewProgress\.total\} reviewed/)
   // The session tally that used to fill this slot answered a different question against a different
   // denominator. It survives in the Advanced block; it must not come back to the review header.
   const header = page.slice(page.indexOf('<h2 style={{ margin: 0 }}>Review queue</h2>'))

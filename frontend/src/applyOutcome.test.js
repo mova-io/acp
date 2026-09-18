@@ -43,7 +43,7 @@ describe('reviewableInPlace — what the FileDrawer mounts a card for', () => {
 describe('verificationLadder with an apply outcome — stopped at re-scan, and says "working copy"', () => {
   it('still_failing: draft, review and the working-copy write are done; re-scan failed; not certified', () => {
     const l = verificationLadder(buildEvidenceCard(refused()))
-    expect(l.map((s) => s.label)).toEqual(['AI draft generated', 'Human review', 'Written to a working copy', 'Re-scan verified', 'Certified'])
+    expect(l.map((s) => s.label)).toEqual(['AI draft generated', 'Human review', 'Written to a working copy', 'Re-scan verified', 'Outcome recorded'])
     expect(l.map((s) => s.state)).toEqual(['done', 'done', 'done', 'failed', 'todo'])
     // never a green "Written to document": the document the reviewer has is unchanged
     expect(l.some((s) => s.label === 'Written to document')).toBe(false)

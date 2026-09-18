@@ -61,3 +61,13 @@ it('wires the six cells into the actual canonical remediation activity card',asy
  expect(rows[1].textContent).toContain('Review workspace2')
  expect(container.querySelector('#actual-automation details').open).toBe(false)
 })
+it('says status checks exist beside a zero review count, as tasks rather than findings',async()=>{
+ const {root,container}=createTestRoot()
+ await act(async()=>root.render(<Layout progressHostId="none" scanId="scan" batchId="run" policy={{enabled:true}} reviewCount={0} statusCheckCount={2}/>))
+ const tile=container.querySelector('.remediation-review-workspace')
+ expect(tile.textContent).toContain('Review workspace0')
+ expect(tile.textContent).toContain('Review tasks needing your input')
+ expect(tile.textContent).toContain('+ 2 status checks ACP is tracking')
+ await act(async()=>root.render(<Layout progressHostId="none" scanId="scan" batchId="run" policy={{enabled:true}} reviewCount={0} statusCheckCount={0}/>))
+ expect(container.querySelector('.remediation-review-workspace').textContent).not.toContain('status check')
+})

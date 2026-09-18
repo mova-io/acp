@@ -103,9 +103,19 @@ def hitl_auto_queue(scan_id: str, request: Request):
     if core.store.get_scan(scan_id, owner=_request_owner(request)) is None:
         raise HTTPException(404, "scan not found")
     created = core.store.queue_hitl_items(scan_id)
-    created.extend(core.store.reconcile_completed_remediation_reviews(scan_id))
+    # Also retires rows whose targets a different verified fix removed, from persisted saved-copy
+    # evidence on the current corrected artifact (decision_log + finding_disposition only).
+    removals: dict = {}
+    created.extend(core.store.reconcile_completed_remediation_reviews(scan_id, report=removals))
     core.fire_webhook(created)
-    return {"queued": len(created), "items": created}
+    return {"queued": len(created), "items": created,
+            "target_removals": {
+                "superseded": sorted({s["item_id"] for r in removals.values()
+                                      for s in r.get("superseded", [])}),
+                "unchanged": sorted({s["item_id"] for r in removals.values()
+                                     for s in r.get("unchanged", [])}),
+                "skipped": [{"file": f, **s} for f, r in sorted(removals.items())
+                            for s in r.get("skipped", [])]}}
 
 
 @router.post("/hitl/queue/{scan_id}/verify")

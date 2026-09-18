@@ -1579,10 +1579,17 @@ export const listAllHitl = (status = null) => (SIM
 const _pendingActs = new Map()
 
 // List HITL items for a scan, optionally filtered by status.
+//
+// `includeTargetReplaced` asks for superseded rows too, then keeps ONLY those whose target was
+// removed by another verified fix (superseded_reason 'target_removed_by_verified_fix'). The review
+// workspace needs them to show that terminal result; without the flag the server drops them and
+// the finding the ledger now reports as replaced has no row to explain it. Every other superseded
+// row stays filtered, exactly as the server's default read does.
 export const listHitlQueue = (scanId, status = null, options = {}) => (SIM
   ? sim([])
-  : fetch(`${BASE}/hitl/queue?scan_id=${encodeURIComponent(scanId)}${status ? `&status=${status}` : ''}`, { headers: headers(), cache: 'no-store', signal: options.signal }).then(j)
-      .then((items) => (items || []).filter((it) => !_pendingActs.has(it.id))))
+  : fetch(`${BASE}/hitl/queue?scan_id=${encodeURIComponent(scanId)}${status ? `&status=${status}` : ''}${options.includeTargetReplaced ? '&include_superseded=true' : ''}`, { headers: headers(), cache: 'no-store', signal: options.signal }).then(j)
+      .then((items) => (items || []).filter((it) => !_pendingActs.has(it.id)
+        && (!it.superseded || it.superseded_reason === 'target_removed_by_verified_fix'))))
 // Update a HITL item (approved / rejected / skipped) with an optional reviewer note
 // and/or the reviewer's final (AI-drafted or hand-edited) approved_value.
 // opts (optional) carries review telemetry for the Intelligent Review Workspace:

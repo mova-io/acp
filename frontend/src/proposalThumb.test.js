@@ -103,7 +103,7 @@ describe('the review screens render the proposal, not a template', () => {
     expect(src).toMatch(/queue=\{inboxQueue\}/)
     // …plus the rejected-fix handoff rows (W2) and the rows that already carry a decision, so a
     // decided item stays accounted for instead of leaving the page (hitlDecidedTracking).
-    expect(src).toContain('inboxQueue = automaticReviewQueue(reviewQueue, runAiApproval.policy')
+    expect(src).toContain('inboxQueue = automaticReviewQueue(reviewTasks, runAiApproval.policy')
     expect(src).toMatch(/reviewQueue = reviewableRemediationItems\(dedupeById\(\[\.\.\.queue, \.\.\.rejectedItems, \.\.\.decidedItems, \.\.\.autoFixItems\]\)/)
     expect(src).toMatch(/proposals: it\.proposals/)   // dbItemToUi still carries proposals through
   })

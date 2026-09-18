@@ -307,7 +307,8 @@ describe('RemediationInbox — workflow-status queue', () => {
     // run-approval ledger and on the approve button; see hitlPanelCounts.test.jsx.
     expect(container.textContent).toContain('Approve AI suggestions 2')
     expect(container.textContent).toContain('Fix manually 1')
-    expect(container.textContent).toContain('0 of 3 reviewed')        // progress is a separate lens
+    // Progress is a separate lens, over the same three tasks: decisions and final outcomes.
+    expect(container.querySelector('.rinbox-progress').textContent).toContain('0 of 3 tasks have a recorded decision')
   })
 
   it('partitions findings across the workflow tabs by pipeline stage', async () => {
@@ -356,7 +357,12 @@ describe('RemediationInbox — workflow-status queue', () => {
     await render({ queue: QUEUE, decisions: { 2: { state: 'accepted' }, 3: { state: 'rejected' } } })
     expect(container.textContent).toContain('Awaiting verification 1')
     expect(container.textContent).toContain('Results 1')           // id3 (rejected → terminal)
-    expect(container.textContent).toContain('2 of 3 reviewed')       // id2 + id3 reviewed (id1 auto-fix still needs review)
+    // id2 + id3 are decided (id1 auto-fix still needs review); only the rejection (id3) is a final
+    // outcome — the approval (id2) is awaiting its outcome, never counted as done.
+    const progress = container.querySelector('.rinbox-progress').textContent
+    expect(progress).toContain('2 of 3 tasks have a recorded decision')
+    expect(progress).toContain('1 of 3 tasks has a final outcome')
+    expect(progress).toContain('1 awaiting outcome')
   })
 
   it('marks a finding "Not applicable" (out of scope), resolving it without a fix', async () => {
@@ -392,16 +398,16 @@ describe('RemediationInbox — workflow-status queue', () => {
     // The ambiguous bare "Reject" button is gone.
     const bareReject = [...container.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Reject')
     expect(bareReject).toBe(false)
-    // Verification (Written → Re-scan → Certified) is not shown before the decision is saved.
+    // Verification (Written → Re-scan) is not shown before the decision is saved.
     expect(container.textContent).not.toContain('Re-scan')
   })
 
-  it('shows the verification path (Written → Re-scan → Certified) once a finding is saved', async () => {
+  it('shows the verification path (Approved → Re-scan) once a finding is saved, without certifying it', async () => {
     await render({ queue: QUEUE, decisions: { 2: { state: 'accepted' } } })
     await click(btnByText('Awaiting verification'))
     await click(btnByText('Image needs alt text'))
     expect(container.textContent).toContain('Re-scan')
-    expect(container.textContent).toContain('Certified')
+    expect(container.textContent).not.toMatch(/certif/i)
   })
 
   it('always renders exactly the inbox and review panes', async () => {

@@ -160,7 +160,7 @@ describe('Guided pane — preserves the #412/#415 behaviours', () => {
     expect(results.violations).toEqual([])
   })
 
-  it('hides verification until saved, then shows Written → Re-scan → Certified', async () => {
+  it('hides verification until saved, then shows Re-scan without a certification claim', async () => {
     await renderInbox({ queue: [CONTRAST_APPLY], decisions: {} })
     expect(container.textContent).not.toContain('Re-scan')                    // capital-R only after save
     await unmountAll(); ({ container, root } = createTestRoot())
@@ -168,7 +168,7 @@ describe('Guided pane — preserves the #412/#415 behaviours', () => {
     await click(btnByText('Awaiting verification'))
     await click(btnByText('Heading contrast is too low'))
     expect(container.textContent).toContain('Re-scan')
-    expect(container.textContent).toContain('Certified')
+    expect(container.textContent).not.toMatch(/certif/i)
   })
 })
 
@@ -241,7 +241,10 @@ it('shows admitted automatic checking as Processing while retaining manual human
  expect(container.textContent).toContain('not yet an applied or verified fix')
  await renderInbox({queue:[{...proposal,status:'verification_failed'},manual],autoApprove:true,automaticApprovalPolicy:policy})
  expect(container.querySelector('[aria-label="Review queues"]').textContent).toContain('Needs your input1')
- expect(container.querySelector('[aria-label="Review queues"]').textContent).toContain('Status checks1')
+ // Contract C3: a failed row whose exact-scope marker says a job is running ('checking') is ACP's
+ // retry — one task, in Processing — not also a status check.
+ expect(container.querySelector('[aria-label="Review queues"]').textContent).toMatch(/Processing✓?1/)
+ expect(container.querySelector('[aria-label="Review queues"]').textContent).toContain('Status checks0')
  expect(container.querySelector('[aria-label="Review queues"]').textContent).toContain('Results0')
 })
 it('does not claim review decisions or verified fixes when only automatic checks are queued', async () => {

@@ -4676,7 +4676,12 @@ class Store:
                 "AND state IN ('accepted','queued','processing','processing_complete','succeeded'))",
                 (blob_url, corrected_sha256, corrected_bytes, scan_id, file, previous_sha256, scan_id, owner,
                  run_id, scan_id, owner, source_revision))
-            return cur.rowcount == 1
+            advanced = cur.rowcount == 1
+        if advanced and corrected_sha256 != previous_sha256:
+            # Same rule as record_remediation: removal evidence bound to the old artifact lapses.
+            from review_target_reconciliation import reopen_lapsed
+            reopen_lapsed(self, scan_id, file)
+        return advanced
 
     def lifecycle_source_item(self, scan_id: str, file: str, owner: str) -> dict | None:
         """Resolve an inventory item with its provider namespace, never just an opaque id."""
@@ -8562,6 +8567,36 @@ class Store:
                 "AND finding_id=%s", (scan_id, batch_id, finding_id))
             return self._db.fetchone(cur)
 
+    UNRESOLVED_FINDING_DISPOSITIONS = ("awaiting_review", "approved_pending_verification",
+                                       "unchanged_no_fix", "remediation_failed")
+    UNRESOLVED_FINDINGS_CAP = 200
+
+    def _unresolved_findings(self, scan_id: str, batch_id: str) -> tuple[list[dict], int]:
+        """The individual findings behind the unresolved buckets, capped, plus the full count.
+
+        So a surface that shows "N unresolved findings" can name WHICH, and join each to the
+        review row that owns it (review_item_id), instead of leaving the reader to reconcile a
+        finding count against a task count by hand. rule_name comes from that row when there is
+        one. A truncated list says so through the returned total, never silently."""
+        marks = ",".join(["%s"] * len(self.UNRESOLVED_FINDING_DISPOSITIONS))
+        with self._db.cursor() as cur:
+            self._db.execute(cur,
+                f"SELECT COUNT(*) AS n FROM finding_disposition WHERE scan_id=%s AND batch_id=%s "
+                f"AND disposition IN ({marks})",
+                (scan_id, batch_id, *self.UNRESOLVED_FINDING_DISPOSITIONS))
+            total = int((self._db.fetchone(cur) or {}).get("n") or 0)
+            self._db.execute(cur,
+                f"SELECT f.finding_id,f.file,f.rule_id,f.disposition,f.review_item_id,h.rule_name "
+                f"FROM finding_disposition f LEFT JOIN hitl_queue h ON h.id=f.review_item_id "
+                f"WHERE f.scan_id=%s AND f.batch_id=%s AND f.disposition IN ({marks}) "
+                f"ORDER BY f.file,f.rule_id,f.instance_key,f.finding_id LIMIT %s",
+                (scan_id, batch_id, *self.UNRESOLVED_FINDING_DISPOSITIONS,
+                 self.UNRESOLVED_FINDINGS_CAP))
+            rows = self._db.fetchall(cur)
+        return ([{"finding_id": r["finding_id"], "file": r["file"], "rule_id": r["rule_id"],
+                  "rule_name": r.get("rule_name") or None, "disposition": r["disposition"],
+                  "review_item_id": r.get("review_item_id") or None} for r in rows], total)
+
     def finding_reconciliation(self, scan_id: str, batch_id: str) -> dict:
         from finding_ledger import reconcile
         with self._db.cursor() as cur:
@@ -8627,6 +8662,14 @@ class Store:
             rows = self._db.fetchall(cur)
         if disposition != "resolved_verified":
             rows = [row for row in rows if row.get("disposition") != "resolved_verified"]
+        if (disposition != "superseded_by_reassessment"
+                and any(row.get("disposition") == "superseded_by_reassessment" for row in rows)):
+            # A finding a verified fix removed from the document stays retired while that
+            # evidence is current. Without this a re-sync of its pending review row (proposal
+            # refresh, queue reconciliation) would project it straight back to awaiting_review.
+            from review_target_reconciliation import protected_findings
+            protected = protected_findings(self, scan_id, file, batch_id)
+            rows = [row for row in rows if row["finding_id"] not in protected]
         if limit is not None:
             rows = rows[:max(0, int(limit))]
         moved = 0
@@ -8813,14 +8856,16 @@ class Store:
         return [str(x) for x in v] if isinstance(v, list) else None
 
     def approved_unapplied_item_locators(self, scan_id: str, file: str, rule_ids, *,
-                                         item_id: str | None = None) -> dict[str, list[str]]:
+                                         item_id: str | None = None,
+            exclude_item_ids=()) -> dict[str, list[str]]:
         """{item_id: [locator, …]} for the approved-but-unapplied rows of `rule_ids` — exactly
         the locators the applier hands the writer for each row (_row_approved_values), so a
         locator the writer could not resolve can be attributed back to the review item, and
         through it to the model call, that approved it."""
         wanted = {str(r).strip() for r in (rule_ids or ()) if r}
         out: dict[str, list[str]] = {}
-        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id):
+        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id,
+                                                   exclude_item_ids=exclude_item_ids):
             if str(row.get("rule_id") or "").strip() in wanted:
                 out[str(row["id"])] = list(self._row_approved_values(row).keys())
         return out
@@ -10397,6 +10442,24 @@ class Store:
         """
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()
+        previous_sha = None
+        if corrected_sha256 is not None:
+            with self._db.cursor() as cur:
+                self._db.execute(cur,
+                    "SELECT corrected_sha256 FROM file_records WHERE scan_id=%s AND file=%s",
+                    (scan_id, file))
+                previous_sha = (self._db.fetchone(cur) or {}).get("corrected_sha256")
+        result = self._record_remediation(scan_id, file, now, drive_write_url, blob_url,
+                                          corrected_sha256, corrected_bytes)
+        if corrected_sha256 is not None and corrected_sha256 != previous_sha:
+            # A new corrected artifact: any target-removal evidence bound to the old one has
+            # lapsed, and the ledger must not go on reporting those findings retired.
+            from review_target_reconciliation import reopen_lapsed
+            reopen_lapsed(self, scan_id, file)
+        return result
+
+    def _record_remediation(self, scan_id, file, now, drive_write_url, blob_url,
+                            corrected_sha256, corrected_bytes) -> str:
         with self._db.cursor() as cur:
             if blob_url is not None:
                 self._db.execute(cur,
@@ -11146,7 +11209,8 @@ class Store:
                 self.sync_hitl_finding_dispositions(item_id, item["status"], batch_id=batch_id)
         return created
 
-    def reconcile_completed_remediation_reviews(self, scan_id: str) -> list[dict]:
+    def reconcile_completed_remediation_reviews(self, scan_id: str, *,
+                                                report: dict | None = None) -> list[dict]:
         """Repair missing review routing on an authorized queue reconciliation.
 
         Only completed documents in the current successful batch are eligible. This writes
@@ -11184,6 +11248,18 @@ class Store:
             rules = [row for row in groups if row['file'] == file]
             if rules:
                 created.extend(self.queue_hitl_review_for_file(scan_id, file, rules, batch_id=batch_id))
+        # Retire rows whose targets a DIFFERENT verified fix removed, from the persisted saved-copy
+        # assessment of the CURRENT corrected artifact and the stored bytes. Same promise as the
+        # routing above: decision_log + finding_disposition only, no model call, no document
+        # write, no approval. Best-effort: routing already happened and must not be undone by it.
+        try:
+            from review_target_reconciliation import reconcile_scan
+            outcome = reconcile_scan(self, scan_id)
+            if report is not None:
+                report.update(outcome)
+        except Exception:
+            swallowed("store.reconcile_completed_remediation_reviews: target reconciliation failed",
+                      scan_id)
         return created
 
     def enqueue_proposals(self, scan_id: str, file: str, sc: str, proposals: list[dict],
@@ -11549,8 +11625,13 @@ class Store:
         return codes is None or sc in codes
 
     def _approved_unapplied_rows(self, scan_id: str, file: str, *,
-                                 item_id: str | None = None) -> list[dict]:
-        """Read writable approved rows, optionally narrowed to the one approval being retried."""
+                                 item_id: str | None = None,
+                                 exclude_item_ids=()) -> list[dict]:
+        """Read writable approved rows, optionally narrowed to the one approval being retried.
+
+        `exclude_item_ids` is the WRITER's narrowing: rows whose targets a different verified fix
+        removed (review_target_reconciliation) must never reach a writer, so the approved-value
+        job passes them here. The counters deliberately do not — see the report on that gate."""
         with self._db.cursor() as cur:
             self._db.execute(cur,
                 "SELECT * FROM hitl_queue WHERE scan_id=%s AND file=%s AND status='approved' "
@@ -11558,7 +11639,8 @@ class Store:
             rows = self._db.fetchall(cur)
         return [self._decode_proposals(r) for r in rows
                 if self._selected_sc(scan_id, file, r.get("rule_id") or "")
-                and (item_id is None or str(r.get("id")) == str(item_id))]
+                and (item_id is None or str(r.get("id")) == str(item_id))
+                and str(r.get("id")) not in {str(x) for x in (exclude_item_ids or ())}]
 
     def count_unapplied_approved_values(self, scan_id: str, file: str) -> int:
         """Approved items holding content the document does not yet carry.
@@ -11607,7 +11689,8 @@ class Store:
         return counts
 
     def approved_alt_values(self, scan_id: str, file: str, *,
-                            item_id: str | None = None) -> dict[str, str]:
+                            item_id: str | None = None,
+            exclude_item_ids=()) -> dict[str, str]:
         """{locator: alt text} awaiting a write into `file`, from its approved 1.1.1 rows.
 
         Scoped to Non-text Content because apply_alt.py writes alt text and nothing else.
@@ -11626,13 +11709,15 @@ class Store:
         """
         wanted = {"1.1.1", f"1.1.1{self.DESCRIBED_RULE_SUFFIX}"}
         out: dict[str, str] = {}
-        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id):
+        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id,
+                                                   exclude_item_ids=exclude_item_ids):
             if str(row.get("rule_id") or "").strip() in wanted:
                 out.update(self._row_approved_values(row))
         return out
 
     def approved_decorative_locators(self, scan_id: str, file: str, *,
-                                     item_id: str | None = None) -> list[str]:
+                                     item_id: str | None = None,
+            exclude_item_ids=()) -> list[str]:
         """The images a reviewer marked DECORATIVE on `file`'s approved 1.1.1 rows.
 
         A decorative image is not undescribed — it is deliberately undescribed, and WCAG 1.1.1
@@ -11658,40 +11743,46 @@ class Store:
         clears the finding, and this write is what stops the next scan asking again.
         """
         out: list[str] = []
-        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id):
+        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id,
+                                                   exclude_item_ids=exclude_item_ids):
             if (str(row.get("rule_id") or "").strip() == "1.1.1"
                     and (row.get("resolution") or "").strip() == "decorative"):
                 out.extend(loc for loc in self._row_proposal_locators(row) if loc not in out)
         return out
 
     def approved_link_values(self, scan_id: str, file: str, *,
-                             item_id: str | None = None) -> dict[str, str]:
+                             item_id: str | None = None,
+            exclude_item_ids=()) -> dict[str, str]:
         """{locator: link text} awaiting a write into `file`, from its approved 2.4.4/2.4.9 rows.
 
         Both criteria share proposals.propose_link_texts' locator scheme (the link's resolved
         HREF — see apply_link_text.py's module docstring for why), so one map serves both.
         """
         out: dict[str, str] = {}
-        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id):
+        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id,
+                                                   exclude_item_ids=exclude_item_ids):
             if str(row.get("rule_id") or "").strip() in ("2.4.4", "2.4.9"):
                 out.update(self._row_approved_values(row))
         return out
 
     def approved_field_values(self, scan_id: str, file: str, *,
-                              item_id: str | None = None) -> dict[str, str]:
+                              item_id: str | None = None,
+            exclude_item_ids=()) -> dict[str, str]:
         """{locator: accessible name} awaiting a write into `file`, from its approved 4.1.2 rows.
 
         Scoped to Name, Role, Value because the only writer behind it (remediate_pdf's
         `pdf:field:…` → /TU lane) writes form-field accessible names and nothing else.
         """
         out: dict[str, str] = {}
-        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id):
+        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id,
+                                                   exclude_item_ids=exclude_item_ids):
             if str(row.get("rule_id") or "").strip() == "4.1.2":
                 out.update(self._row_approved_values(row))
         return out
 
     def approved_sensory_values(self, scan_id: str, file: str, *,
-                                item_id: str | None = None) -> dict[str, str]:
+                                item_id: str | None = None,
+            exclude_item_ids=()) -> dict[str, str]:
         """{locator: rewrite} awaiting a write into `file`, from its approved 1.3.3 rows.
 
         The locator is a sentence prefix, not a part#rId or an href — see
@@ -11699,13 +11790,15 @@ class Store:
         writer of their own.
         """
         out: dict[str, str] = {}
-        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id):
+        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id,
+                                                   exclude_item_ids=exclude_item_ids):
             if str(row.get("rule_id") or "").strip() == "1.3.3":
                 out.update(self._row_approved_values(row))
         return out
 
     def approved_language_values(self, scan_id: str, file: str, *,
-                                 item_id: str | None = None) -> dict[str, str]:
+                                 item_id: str | None = None,
+            exclude_item_ids=()) -> dict[str, str]:
         """{locator: ISO language code} awaiting a write into `file`, from approved 3.1.2 rows.
 
         Kept apart from the sensory map even though both are text-span keyed: the value is a
@@ -11713,13 +11806,15 @@ class Store:
         and each lane may only credit the criterion its own re-scan verified.
         """
         out: dict[str, str] = {}
-        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id):
+        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id,
+                                                   exclude_item_ids=exclude_item_ids):
             if str(row.get("rule_id") or "").strip() == "3.1.2":
                 out.update(self._row_approved_values(row))
         return out
 
     def approved_structure_label_values(self, scan_id: str, file: str, *,
-                                        item_id: str | None = None) -> dict[str, str]:
+                                        item_id: str | None = None,
+            exclude_item_ids=()) -> dict[str, str]:
         """{locator: label} awaiting a write into `file`, from approved 2.4.6 xlsx rows.
 
         Locators are 'sheet:<tab name>' and 'table:<displayName>#col:<colName>', written by
@@ -11727,14 +11822,16 @@ class Store:
         sheet tabs and table column headers — a different write target from link text or alt.
         """
         out: dict[str, str] = {}
-        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id):
+        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id,
+                                                   exclude_item_ids=exclude_item_ids):
             if str(row.get("rule_id") or "").strip() == "2.4.6":
                 out.update(self._row_approved_values(row))
         return out
 
     def approved_images_of_text_values(self, scan_id: str, file: str,
                                        rule_ids: tuple[str, ...] = ("1.4.5", "1.4.9"),
-                                       *, item_id: str | None = None) -> dict[str, str]:
+                                       *, item_id: str | None = None,
+            exclude_item_ids=()) -> dict[str, str]:
         """{locator: OCR'd text} awaiting a write into `file`, from approved image-of-text rows.
 
         Locator format depends on the source format:
@@ -11754,20 +11851,23 @@ class Store:
         """
         wanted = {str(r).strip() for r in (rule_ids or ()) if r}
         out: dict[str, str] = {}
-        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id):
+        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id,
+                                                   exclude_item_ids=exclude_item_ids):
             if str(row.get("rule_id") or "").strip() in wanted:
                 out.update(self._row_approved_values(row))
         return out
 
     def approved_pdf_structure_values(self, scan_id: str, file: str, rule_id: str, *,
-                                      item_id: str | None = None) -> dict[str, str]:
+                                      item_id: str | None = None,
+            exclude_item_ids=()) -> dict[str, str]:
         """Exact approved tag plans, scoped by criterion, operation and locator."""
         if not file.lower().endswith('.pdf'):
             return {}
         allowed = {'2.4.6': {'heading'}, '1.3.1': {'header-scope', 'table-headers'},
                    '1.3.2': {'reading-order'}}.get(rule_id, set())
         out, conflicts = {}, set()
-        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id):
+        for row in self._approved_unapplied_rows(scan_id, file, item_id=item_id,
+                                                   exclude_item_ids=exclude_item_ids):
             if str(row.get('rule_id') or '').strip() != rule_id:
                 continue
             for locator, value in self._row_approved_values(row).items():
@@ -11877,8 +11977,10 @@ class Store:
             self._db.execute(cur, "UPDATE hitl_queue SET applied=1 WHERE id=%s", (item_id,))
 
     def approved_unapplied_item_ids(self, scan_id: str, file: str, rule_id: str, *,
-                                    item_id: str | None = None) -> list[str]:
-        return [r["id"] for r in self._approved_unapplied_rows(scan_id, file, item_id=item_id)
+                                    item_id: str | None = None,
+            exclude_item_ids=()) -> list[str]:
+        return [r["id"] for r in self._approved_unapplied_rows(scan_id, file, item_id=item_id,
+                                                   exclude_item_ids=exclude_item_ids)
                 if str(r.get("rule_id") or "").strip() == rule_id]
 
     def mark_file_compliant_if_reviewed(self, scan_id: str, file: str) -> bool:
@@ -11988,7 +12090,8 @@ class Store:
             for sid in {r["scan_id"] for r in rows}:
                 shadowed.update((sid, f) for f in self._shadowed_files(cur, sid))
             rows = [r for r in rows if (r["scan_id"], r["file"]) not in shadowed]
-            superseded = self._superseded_items(cur, rows)
+            reasons: dict[str, tuple[str, dict | None]] = {}
+            superseded = self._superseded_items(cur, rows, detail=reasons)
             unverified = self._apply_unverified_decisions(cur, rows)
         # An approved row whose write was attempted and refused credit gets `apply_outcome`, so
         # the review card can say why nothing changed. Pending rows are untouched (no key).
@@ -11996,13 +12099,24 @@ class Store:
         annotate_apply_outcomes(rows, unverified)
         for row in rows:
             if row.get('status') == 'approved' and not row.get('applied'):
-                _, refusal = self.approved_write_binding(row)
+                if row["id"] in superseded:
+                    # Its target was removed by a different verified fix: the approval stays on
+                    # record, nothing is left to save it into, and nothing needs re-approval.
+                    row['approval_recheck_required'] = False
+                    continue
+                _, refusal = self.approved_write_binding(row, check_target_removal=False)
                 row['approval_recheck_required'] = refusal in {
                     self.RETRY_SOURCE_MOVED, self.RETRY_VALUES_CHANGED,
                     self.RETRY_PROPOSALS_SUPERSEDED}
         if include_superseded:
             for r in rows:
                 r["superseded"] = r["id"] in superseded
+                if r["superseded"]:
+                    reason, evidence = reasons.get(r["id"], (None, None))
+                    if reason:
+                        r["superseded_reason"] = reason
+                    if evidence is not None:
+                        r["superseded_evidence"] = evidence
             return rows
         return [r for r in rows if r["id"] not in superseded]
 
@@ -12020,8 +12134,20 @@ class Store:
             f"WHERE action=%s AND scan_id IN ({marks})", ("apply.unverified", *scans))
         return [dict(r) for r in self._db.fetchall(cur)]
 
-    def _superseded_items(self, cur, rows: list[dict]) -> set[str]:
+    def _superseded_items(self, cur, rows: list[dict], *,
+                          detail: dict | None = None) -> set[str]:
         """The ids of queue rows whose finding has stopped being work.
+
+        TWO independent routes, and `detail` (when given) receives {id: (reason, evidence)}:
+
+          * 'criterion_reassessed' — the trace rule below.
+          * 'target_removed_by_verified_fix' — review_target_reconciliation.current_removals:
+            a DIFFERENT, verified fix removed every target of this row (the 1.4.5 replacement
+            that deleted the picture a pending 1.1.1 row asked a human to describe). This is the
+            one route that also covers an APPROVED-but-unapplied row, because its approval now
+            describes content the document no longer has; the approval stays recorded. Its
+            evidence is bound to the row's decision version and proposals and to the current
+            corrected sha, batch and scope, so it lapses the moment any of them moves.
 
         queue_hitl_items is additive and idempotent, and nothing in api/ ever withdrew a row.
         scan_rule_traces, meanwhile, refresh: save_file_result upserts them ON CONFLICT
@@ -12052,16 +12178,24 @@ class Store:
         trace cannot drift, and it self-heals: a criterion that regresses to FAIL reappears in
         the inbox with no sweep to run."""
         pending = [r for r in rows if (r.get("status") or "pending") == "pending"]
-        if not pending:
-            return set()
-        outcomes: dict[tuple[str, str, str], str] = {}
-        for sid in {r["scan_id"] for r in pending}:
-            self._db.execute(cur,
-                "SELECT file, rule_id, outcome FROM scan_rule_traces WHERE scan_id=%s", (sid,))
-            for t in self._db.fetchall(cur):
-                outcomes[(sid, t["file"], t["rule_id"])] = t["outcome"]
-        return {r["id"] for r in pending
-                if outcomes.get((r["scan_id"], r["file"], r["rule_id"])) in _SUPERSEDING_OUTCOMES}
+        traced: set[str] = set()
+        if pending:
+            outcomes: dict[tuple[str, str, str], str] = {}
+            for sid in {r["scan_id"] for r in pending}:
+                self._db.execute(cur,
+                    "SELECT file, rule_id, outcome FROM scan_rule_traces WHERE scan_id=%s", (sid,))
+                for t in self._db.fetchall(cur):
+                    outcomes[(sid, t["file"], t["rule_id"])] = t["outcome"]
+            traced = {r["id"] for r in pending
+                      if outcomes.get((r["scan_id"], r["file"], r["rule_id"])) in _SUPERSEDING_OUTCOMES}
+        from review_target_reconciliation import REASON, TRACE_REASON, current_removals
+        removed = current_removals(self, rows)
+        if detail is not None:
+            for item_id in traced:
+                detail[item_id] = (TRACE_REASON, None)
+            for item_id, evidence in removed.items():
+                detail[item_id] = (REASON, evidence)
+        return traced | set(removed)
 
     def _shadowed_files(self, cur, scan_id: str) -> set[str]:
         """The files in this scan that are ACP's own output shadowing their source."""
@@ -12196,6 +12330,15 @@ class Store:
                 if current.get("last_decision_fingerprint") != fingerprint:
                     raise ValueError("decision request id was reused with a different payload")
                 return current, True
+            if status in ("approved", "rejected", "skipped"):
+                # A different verified fix removed every target of this row. Approving it would
+                # enqueue a writer for content the document no longer has (or, through a shared
+                # docPr name, for a different picture); rejecting/skipping it would re-open a
+                # finding the fresh assessment proved gone. Refused under the row lock, before
+                # any job exists — the same 409 a batch selection of a superseded row gets.
+                from review_target_reconciliation import removal_for
+                if removal_for(self, current) is not None:
+                    raise ValueError("stale proposal selection")
             if standing_approval_run_id is not None:
                 from ai_standing_approval import authorization, eligible_item
                 if status != 'approved' or resolution is not None or release_intent_id is not None:
@@ -12332,6 +12475,9 @@ class Store:
     RETRY_PROPOSALS_SUPERSEDED = ("A newer remediation run replaced the suggestions on this "
                                   "item, so the approval no longer describes what is on it. "
                                   "Review the current suggestion before saving.")
+    RETRY_TARGET_REMOVED = ("A different verified change already removed the content this "
+                            "suggestion was written for, so there is nothing left to save it "
+                            "into. The approval stays on record; no further action is needed.")
     RETRY_WRITER_BUSY = ("Another approved change is being saved into this document right now. "
                          "Try this one again once that finishes.")
     RETRY_NO_FILE_RECORD = ("This document has no assessment record in this scan, so there is "
@@ -12360,14 +12506,24 @@ class Store:
         return hashlib.sha256(json.dumps(values, separators=(",", ":"),
                                          ensure_ascii=False).encode()).hexdigest()
 
-    def approved_write_binding(self, item: dict | None) -> tuple[dict | None, str | None]:
-        """Require a current source, proposal snapshots, approved values and saved artifact."""
+    def approved_write_binding(self, item: dict | None, *,
+                               check_target_removal: bool = True) -> tuple[dict | None, str | None]:
+        """Require a current source, proposal snapshots, approved values and saved artifact.
+
+        And a target that still exists: a row whose every target a different verified fix
+        removed is refused with RETRY_TARGET_REMOVED — by retry admission and by the writer's
+        own re-check alike. `check_target_removal=False` only for a caller that has already
+        answered that question for the row (list_hitl_queue)."""
         if not item:
             return None, self.RETRY_GONE
         scan_id, file = item.get("scan_id"), item.get("file")
         if (str(item.get("status") or "") != "approved" or item.get("applied")
                 or not scan_id or not file):
             return None, self.RETRY_NOT_APPROVED
+        if check_target_removal:
+            from review_target_reconciliation import removal_for
+            if removal_for(self, item) is not None:
+                return None, self.RETRY_TARGET_REMOVED
         # decision_version 0 means no decision was ever recorded through
         # complete_hitl_decision, so none of the binding columns below were written by it.
         decision_version = int(item.get("decision_version") or 0)
@@ -15498,12 +15654,16 @@ class Store:
                 "failed": findings["failed"], "excluded": findings["excluded"],
                 "superseded": findings["superseded"],
             }
+            unresolved, unresolved_total = self._unresolved_findings(scan_id, execution_id)
             return {
                 "unit": "assessed findings", "scope": "current Remediate execution",
                 "equation": "assessed findings = sum(current disposition buckets)",
                 "total": findings["assessed"], "accounted": findings["accounted"],
                 "unaccounted": findings["unaccounted"], "buckets": buckets,
                 "exact": findings["exact"], "violations": findings["violations"],
+                "unresolved_findings": unresolved,
+                "unresolved_findings_total": unresolved_total,
+                "unresolved_findings_truncated": unresolved_total > len(unresolved),
             }
 
         if stage == "release":

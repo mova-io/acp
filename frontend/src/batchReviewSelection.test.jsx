@@ -142,3 +142,24 @@ it('distinguishes proposal values from covered findings in the primary approval 
   await click(v.button('Approve all ready'))
   expect(v.container.querySelector('[aria-label="Approval summary"]').textContent).toContain('1 findings · 1 review item · 2 proposals · 1 file')
 })
+
+it('a row whose target a verified fix removed is settled work: never selectable, explained, not "not included"', async () => {
+  const replaced = finding(7, { _raw: { ...finding(7)._raw, superseded: true, superseded_reason: 'target_removed_by_verified_fix',
+    superseded_evidence: { removed_by_rule_id: '1.4.5', targets: ['docx:drawing:1:paragraph:32'] } } })
+  expect(exclusionReason(replaced)).toBe('Replaced by a verified change — nothing left to approve')
+  expect(() => batchDecision(snapshotFinding(replaced))).toThrow(/Replaced by a verified change/)
+  const onDecide = vi.fn()
+  const v = await mount({ visible: [replaced, finding(8)], onDecide })
+  const summary = v.container.querySelector('.batch-review-exclusions summary').textContent
+  expect(summary).toBe('0 pending review items not included · 1 already resolved')
+  expect(v.container.querySelector('.batch-review-why')?.textContent ?? '')
+    .not.toContain('pending review items')
+  expect(onDecide).not.toHaveBeenCalled()
+})
+
+it('explains a target-replaced exclusion when it is the reason nothing can be approved', async () => {
+  const replaced = finding(9, { _raw: { ...finding(9)._raw, superseded: true, superseded_reason: 'target_removed_by_verified_fix' } })
+  const v = await mount({ visible: [replaced] })
+  expect(v.container.querySelector('.batch-review-why').textContent)
+    .toContain('replaced by a verified change — nothing left to approve — another verified fix removed what this item described')
+})

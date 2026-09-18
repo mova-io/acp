@@ -74,8 +74,15 @@ export function reviewEmptyLine(files, { totalHitl = 0, acted = {} } = {}) {
  * Returns null when there ARE findings — the caller renders its own count sentence then, and a
  * helper that answered anyway would give the page two competing leads.
  */
-export function reviewLeadLine(files, reviewCount = 0) {
+export function reviewLeadLine(files, reviewCount = 0, explanation = undefined) {
   if (reviewCount > 0) return null
+  // THE SECOND BUG, seen on scan b3eba56d4d5d: this line was gated on human-pending rows alone, so
+  // it said "All clear" while two tasks sat in Status checks and the server still listed an
+  // unresolved finding. With the population explanation (reviewPopulationExplanation.js) the lead
+  // is its headline, and "All clear" appears only when that explanation is all clear — no task in
+  // any tab, nothing awaiting an outcome, no unresolved finding reported, no unreadable document.
+  // The headline carries the unreadable caveat itself.
+  if (explanation) return explanation.headline
   // "All clear" is withheld, not qualified. A reader who sees it stops reading, so appending a
   // caveat after it would be read by nobody who needed it.
   return unreadableCaveat(files) || 'All clear — nothing needs your review.'

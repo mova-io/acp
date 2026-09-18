@@ -5,6 +5,21 @@ import { useEffect, useState } from 'react'
 import LiveHeartbeatBars from './LiveHeartbeatBars.jsx'
 import { canonicalStageCardModel, alignRemediationAssessment } from './canonicalStageCard.js'
 import { releaseBatchProgress, releaseBatchDomain } from './releaseBatchProgress.js'
+import { requestOpenReviewItem } from './openReviewItem.js'
+
+// The snapshot's unresolved findings (contract C2) that name a review item, attached to the file
+// rows of the Unresolved findings queue so each can be opened directly. Findings without a
+// review_item_id have nothing to open and are left to the file row's own count.
+function withReviewItems(files, snapshot, bucket) {
+  const findings = bucket === 'attention' && Array.isArray(snapshot?.domain_reconciliation?.unresolved_findings)
+    ? snapshot.domain_reconciliation.unresolved_findings.filter(f => f?.review_item_id != null) : []
+  if (!findings.length) return files
+  return files.map(row => {
+    const items = findings.filter(f => f.file === row.file)
+      .map(f => ({ itemId: String(f.review_item_id), criterion: f.rule_id || null, name: f.rule_name || null }))
+    return items.length ? { ...row, reviewItems: items } : row
+  })
+}
 
 const terminal = (state) => ['processing_complete', 'succeeded', 'failed', 'cancelled', 'superseded', 'integrity_failed'].includes(state)
 const shown = (value) => value == null ? '—' : Number(value).toLocaleString()
@@ -102,6 +117,11 @@ export default function WorkflowStageActivityCard({ snapshot, receivedAt, onOpen
     {!model.integrityOk && <p className="workflow-sse-card__notice"><b>Accounting is reconciling.</b> {missingOutcomes > 0 ? `${missingOutcomes} assessed finding${missingOutcomes === 1 ? '' : 's'} still lack a recorded outcome. This is not a count of fixes completed.` : 'Durable totals remain visible while ACP verifies this snapshot.'}</p>}
     {queue && <ProgressQueueDrawer title={tile?.label || 'File queue'}
       scopeLabel={model.stage === 'remediate' ? `${expected ?? '—'} findings · this remediation run` : `${expected ?? '—'} requested files · this release`}
-      {...(queueView.identity === queueIdentity ? queueView : { files: [], loading: true })} onClose={() => setSelection(null)} />}
+      {...(queueView.identity === queueIdentity ? { ...queueView, files: withReviewItems(queueView.files, snapshot, queue) } : { files: [], loading: true })} onClose={() => setSelection(null)}
+      onOpenItem={model.stage === 'remediate' ? item => {
+        setSelection(null)
+        onOpen?.()
+        requestOpenReviewItem({ itemId: item.itemId, scanId: snapshot?.scan_id || progressScanId || null })
+      } : undefined} />}
   </section>
 }

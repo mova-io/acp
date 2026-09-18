@@ -29,8 +29,10 @@ function Comparison({ proposal, verified }) {
   }
   return <>
     <p className="waterfall-change-diff-key"><del>Removed</del> / <ins>Added</ins>{!comparable ? ' · Preview only; comparison unavailable for missing, structured, or large values.' : before === after ? ' · Saved values are identical.' : ' · Highlight shows the changed span.'}</p>
-    <div className="waterfall-change-comparison"><section><h5>Before · saved excerpt</h5><pre>{preview(before, true)}</pre></section><section><h5>{verified ? 'After · verified value' : 'Proposed value'}</h5><pre>{preview(after, false)}</pre></section></div>
-    <details className="waterfall-change-full-values"><summary>Read full saved values</summary><h5>Before</h5><pre>{saved(before)}</pre><h5>{verified ? 'After' : 'Proposed'}</h5><pre>{saved(after)}</pre></details>
+    {/* A verified change reads Original / Corrected: "Proposed" would describe a saved value as a
+        suggestion, and "Before" invites reading the old text as what the document holds now. */}
+    <div className="waterfall-change-comparison"><section><h5>{verified ? 'Original · saved excerpt' : 'Before · saved excerpt'}</h5><pre>{preview(before, true)}</pre></section><section><h5>{verified ? 'Corrected · verified value' : 'Proposed value'}</h5><pre>{preview(after, false)}</pre></section></div>
+    <details className="waterfall-change-full-values"><summary>Read full saved values</summary><h5>{verified ? 'Original' : 'Before'}</h5><pre>{saved(before)}</pre><h5>{verified ? 'Corrected' : 'Proposed'}</h5><pre>{saved(after)}</pre></details>
   </>
 }
 

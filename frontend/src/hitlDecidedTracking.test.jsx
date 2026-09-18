@@ -79,8 +79,9 @@ it('shows the decided item in the Results tab of the inbox', async () => {
 })
 
 it.each([
-  ['a verified approval', { status: 'approved', applied: 1, validated: 1 }, 'a fresh scan confirmed this fix'],
-  ['an approval awaiting its re-scan', { status: 'approved', applied: 1 }, 'a fresh scan confirms it before it'],
+  // Contract C6: the verified line says the fresh scan no longer reports this item — never "Certified".
+  ['a verified approval', { status: 'approved', applied: 1, validated: 1 }, 'the fresh scan of the corrected copy no longer reports this item'],
+  ['an approval awaiting its re-scan', { status: 'approved', applied: 1 }, 'a fresh scan of the corrected copy has not confirmed it yet'],
   ['a rejection', { status: 'rejected' }, 'nothing was written to the document'],
 ])('states the recorded outcome of %s without claiming a write that did not happen', async (_l, extra, copy) => {
   const { root, container } = createTestRoot()
@@ -90,6 +91,7 @@ it.each([
     initialTab: workflowStatusOf(item) === 'completed' ? 'completed' : 'awaiting-validation',
   })))
   expect(container.textContent).toContain(copy)
+  expect(container.textContent).not.toMatch(/Certified/)
   if (extra.status === 'rejected') expect(container.textContent).not.toContain('Written → Re-scan')
 })
 
@@ -123,7 +125,9 @@ it('loads every status for the run and folds decided items into the inbox and it
   // The page reads the durable queue for the run, not only its pending slice.
   expect(page).not.toMatch(/listHitlQueue\(runId, 'pending'\)/)
   expect(page).toContain('applyHitlRows')
-  expect(page).toContain('const inboxQueue = automaticReviewQueue(reviewQueue, runAiApproval.policy')
+  // Every review task once: proven af:/HITL duplicates are collapsed before classification.
+  expect(page).toContain('const reviewTasks = dedupeReviewTasks(reviewQueue)')
+  expect(page).toContain('const inboxQueue = automaticReviewQueue(reviewTasks, runAiApproval.policy')
   expect(page).toContain('const reviewQueue = reviewableRemediationItems(dedupeById([...queue, ...rejectedItems, ...decidedItems, ...autoFixItems])')
   expect(page).toContain('const totalHitl = queue.length + decidedItems.length + selfOnly.length')
 })

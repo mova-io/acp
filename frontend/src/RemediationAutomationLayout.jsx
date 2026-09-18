@@ -8,7 +8,7 @@ import './remediation-automation-status.css'
 
 // Current-run portals share the existing document-progress host identity. They
 // never contribute review ITEM counts to the canonical finding partition.
-export default function RemediationAutomationLayout({ progressHostId, scanId, batchId, policy, error, saving, reviewCount=0, onOpenReview, onRetry, authorization, publicationPending, publicationError, destinationLabel }) {
+export default function RemediationAutomationLayout({ progressHostId, scanId, batchId, policy, error, saving, reviewCount=0, statusCheckCount=0, onOpenReview, onRetry, authorization, publicationPending, publicationError, destinationLabel }) {
   const [hosts,setHosts]=useState({review:null,automation:null})
   useLayoutEffect(()=>{
     const find=suffix=>{
@@ -28,9 +28,14 @@ export default function RemediationAutomationLayout({ progressHostId, scanId, ba
   const review=<div className="workflow-outcome-tiles__cell tone-amber remediation-review-workspace">
     <button type="button" className="workflow-outcome-tiles__tile" onClick={onOpenReview} disabled={!onOpenReview}>
       <span className="workflow-outcome-tiles__label">Review workspace</span><strong>{reviewCount.toLocaleString()}</strong>
-      <span className="workflow-outcome-tiles__definition">{enabled ? 'Items needing your input' : 'Unresolved review items'}</span><span className="workflow-outcome-tiles__definition">Open review items →</span>
+      <span className="workflow-outcome-tiles__definition">{enabled ? 'Review tasks needing your input' : 'Open review tasks'}</span>
+      {/* A zero here beside "Unresolved findings 1" read as a contradiction when the open work sat in
+          Status checks. Those tasks are not the reviewer's to decide, so they stay out of the count,
+          but the tile says they exist rather than leaving the reader to reconcile two numbers. */}
+      {statusCheckCount > 0 && <span className="workflow-outcome-tiles__definition">+ {statusCheckCount.toLocaleString()} status check{statusCheckCount === 1 ? '' : 's'} ACP is tracking</span>}
+      <span className="workflow-outcome-tiles__definition">Open review tasks →</span>
     </button>
-    <InfoTip label="Review workspace">{enabled ? 'Review items requiring your input.' : 'Unresolved review items available for approval or manual work.'} One item can cover multiple findings. This count is separate from the finding totals and is never added to their partition.</InfoTip>
+    <InfoTip label="Review workspace">{enabled ? 'Review tasks requiring your input.' : 'Open review tasks available for approval or manual work.'} Status checks ACP is tracking are listed separately. Tasks and findings are different units: one task can cover several findings and a finding can have no task, so this count is never added to the finding totals.</InfoTip>
   </div>
   const settings=<details className="panel remediation-automation-combined" aria-label="Approval and publication settings">
     <summary><b>Automation settings</b> · AI approval {error ? 'unavailable' : saving ? 'saving' : !policy ? 'checking' : enabled ? 'on' : 'individual'} · publication {publicationPending ? 'checking' : authorization?.id ? authorization.status==='stopped' ? 'stopped' : 'automatic' : 'manual'}</summary>

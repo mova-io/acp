@@ -1,11 +1,16 @@
 import { isPdfStructuralRow, pdfStructuralSummary, proposalsFor, requiresPdfSourceEditing } from './pdfStructuralProposal.js'
-import { isResolved, laneOf } from './remediationInboxModel.js'
+import { isResolved, isTargetReplaced, laneOf } from './remediationInboxModel.js'
+
+// A row whose target was removed by a verified fix. Named first because `isResolved` is also true
+// for it, and "Already reviewed" would claim a person decided something nobody was asked about.
+export const TARGET_REPLACED_EXCLUSION = 'Replaced by a verified change — nothing left to approve'
 
 export function proposalValues(f) {
   const proposals = f.proposals || f._raw?.proposals || []
   return proposals.length ? proposals.map(p => p.proposed_value) : [f.after]
 }
 export function exclusionReason(f, decisions = {}, drafts = {}) {
+  if (isTargetReplaced(f)) return TARGET_REPLACED_EXCLUSION
   if (isResolved(f, decisions)) return 'Already reviewed'
   if (requiresPdfSourceEditing(f)) return 'Manual PDF tagging — use a source or PDF accessibility editor'
   if (f.stale || f.superseded || f._raw?.superseded) return 'Stale — refresh and review'
@@ -40,6 +45,13 @@ export function selectionProblem(entry, visible, decisions, drafts) {
 }
 export function batchDecision(entry) {
   const f = entry.finding
+  // Last gate before a request is built: a superseded or target-replaced row can never be approved,
+  // even if it reached here without passing selectionProblem.
+  if (isTargetReplaced(f) || f.superseded || f._raw?.superseded || f.stale) {
+    // status/changes mark it a definite refusal (nothing sent), not an uncertain transport failure.
+    throw Object.assign(new Error(isTargetReplaced(f) ? TARGET_REPLACED_EXCLUSION : 'Stale — refresh and review'),
+      { status: 409, changes: 'none' })
+  }
   return { state: 'accepted', value: proposalValues(f)[0], approvedValues: proposalValues(f),
     requestId: entry.requestId, expectedVersion: f._raw.decision_version,
     expectedProposalSnapshotIds: [...f._raw.proposal_snapshot_ids], expectedSourceRevision: f._raw.source_revision,

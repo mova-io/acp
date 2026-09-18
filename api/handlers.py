@@ -5304,15 +5304,18 @@ def _apply_one_value_kind(
     # `only_item_id` narrows this lane to ONE approved row — a retry re-attempts one reviewer's
     # decision, so nothing else on the file may be written or credited by it. None (the ordinary
     # approval path) leaves the lane file-wide, exactly as before.
+    # Rows whose targets a different verified fix removed are never written or credited here
+    # (review_target_reconciliation); the job computed them once, before reading any value.
+    excluded = tuple((residual_state or {}).get('exclude_item_ids') or ())
     review_item_ids = []
     for rule_id in credit_rule_ids:
         review_item_ids.extend(core.store.approved_unapplied_item_ids(
-            scan_id, filename, rule_id, item_id=only_item_id))
+            scan_id, filename, rule_id, item_id=only_item_id, exclude_item_ids=excluded))
     # The locators each item hands the writer, so an unresolved locator can be attributed to the
     # item — and through its HITL event, the model call — that approved it.
     try:
         item_locators = core.store.approved_unapplied_item_locators(
-            scan_id, filename, credit_rule_ids, item_id=only_item_id)
+            scan_id, filename, credit_rule_ids, item_id=only_item_id, exclude_item_ids=excluded)
     except Exception:
         swallowed("_apply_one_value_kind: reading the approved items' locators failed", scan_id)
         item_locators = {}
@@ -5733,28 +5736,45 @@ def _apply_approved_values(payload: dict, job: dict, *, _retry_locked=False) -> 
     # `item_id=only_item_id` is None on the ordinary path (every approved value the file owes)
     # and one row's id on a retry. It is threaded into every map rather than filtered
     # afterwards so there is one place the narrowing happens and no kind can be missed.
-    alt_values = core.store.approved_alt_values(scan_id, filename, item_id=only_item_id)
+    # A row whose every target a DIFFERENT verified fix already removed (1.1.1 alt text for the
+    # picture a 1.4.5 replacement deleted) must never reach a writer: its locator names content
+    # the document no longer has, and name-based resolution could land on a different picture.
+    # Computed once here, re-checked before upload and again under the commit locks below.
+    from review_target_reconciliation import removed_item_ids
+    target_removed = removed_item_ids(core.store, scan_id, filename)
+    candidate_items = {str(r['id']) for r in core.store._approved_unapplied_rows(
+        scan_id, filename, item_id=only_item_id)} - target_removed
+    alt_values = core.store.approved_alt_values(scan_id, filename, item_id=only_item_id,
+                                                exclude_item_ids=target_removed)
     # Images a reviewer resolved as DECORATIVE. Office only: the marking is an OOXML extLst
     # marker (apply_alt), and the PDF equivalent — re-tagging the figure as an /Artifact — is a
     # structure edit no writer here performs, so on PDF the exception stays a recorded judgement.
-    deco_locators = (core.store.approved_decorative_locators(scan_id, filename, item_id=only_item_id)
+    deco_locators = (core.store.approved_decorative_locators(scan_id, filename, item_id=only_item_id,
+                                                exclude_item_ids=target_removed)
                      if ext in _OFFICE_ALT_MIME else [])
-    link_values = (core.store.approved_link_values(scan_id, filename, item_id=only_item_id)
+    link_values = (core.store.approved_link_values(scan_id, filename, item_id=only_item_id,
+                                                exclude_item_ids=target_removed)
                    if ext in _OFFICE_LINK_EXTS else {})
-    field_values = (core.store.approved_field_values(scan_id, filename, item_id=only_item_id)
+    field_values = (core.store.approved_field_values(scan_id, filename, item_id=only_item_id,
+                                                exclude_item_ids=target_removed)
                     if ext in _FIELD_NAME_EXTS else {})
-    sensory_values = (core.store.approved_sensory_values(scan_id, filename, item_id=only_item_id)
+    sensory_values = (core.store.approved_sensory_values(scan_id, filename, item_id=only_item_id,
+                                                exclude_item_ids=target_removed)
                       if ext in _SENSORY_EXTS else {})
-    language_values = (core.store.approved_language_values(scan_id, filename, item_id=only_item_id)
+    language_values = (core.store.approved_language_values(scan_id, filename, item_id=only_item_id,
+                                                exclude_item_ids=target_removed)
                        if ext in _LANGUAGE_EXTS else {})
     structure_label_values = (core.store.approved_structure_label_values(
-                                  scan_id, filename, item_id=only_item_id)
+                                  scan_id, filename, item_id=only_item_id,
+                                                exclude_item_ids=target_removed)
                               if ext in _STRUCTURE_LABEL_EXTS else {})
     image_of_text_values = (core.store.approved_images_of_text_values(
-                                scan_id, filename, _IMAGE_OF_TEXT_SCS, item_id=only_item_id)
+                                scan_id, filename, _IMAGE_OF_TEXT_SCS, item_id=only_item_id,
+                                                exclude_item_ids=target_removed)
                             if ext in _IMAGE_OF_TEXT_EXTS else {})
     pdf_structure_groups = ({sc: core.store.approved_pdf_structure_values(
-                                 scan_id, filename, sc, item_id=only_item_id)
+                                 scan_id, filename, sc, item_id=only_item_id,
+                                                exclude_item_ids=target_removed)
         for sc in _PDF_STRUCTURE_SCS} if ext in _PDF_STRUCTURE_EXTS else {})
     if not (alt_values or deco_locators or link_values or field_values
             or sensory_values or language_values or structure_label_values
@@ -5765,6 +5785,7 @@ def _apply_approved_values(payload: dict, job: dict, *, _retry_locked=False) -> 
     owner = (core.store.get_scan(scan_id) or {}).get("run", {}).get("owner_email")
     _phase(job, "fetching the corrected copy")
     working = _blob.download_remediated(owner, scan_id, filename)
+    prior_record_sha = (core.store.get_file_record(scan_id, filename) or {}).get('corrected_sha256')
     if not working:
         record = core.store.get_file_record(scan_id, filename) or {}
         # An approval may precede the first Remediate run. Start a new corrected
@@ -5797,8 +5818,10 @@ def _apply_approved_values(payload: dict, job: dict, *, _retry_locked=False) -> 
     # its bytes are what the next lane writes on top of. `_verify_residual` never raises (a
     # re-scan that cannot run is Verification(ok=False)), so this cannot block the write.
     _phase(job, "re-scanning the copy before writing (regression baseline)")
+    prior_working = working
     residual_state = {"verification": _verify_residual(working, filename, scan_id=scan_id),
-                      "retain_unverified": bool(payload.get("standing_approval"))}
+                      "retain_unverified": bool(payload.get("standing_approval")),
+                      "exclude_item_ids": tuple(sorted(target_removed))}
     pending_credits = []
     residual_state['office_retry_allowed'] = bool(
         payload.get('standing_approval') and ext in _OFFICE_ALT_MIME
@@ -6031,6 +6054,15 @@ def _apply_approved_values(payload: dict, job: dict, *, _retry_locked=False) -> 
         from ai_standing_approval import check_application as check_standing_application
         check_standing_application(core.store, payload)
     check_file_approvals(core.store, scan_id, filename)
+    def _removed_since_read():
+        # A reconciliation that committed while this job was writing: never save or credit a
+        # value for a row whose target it proved gone. Raised (retryable), so the next attempt
+        # re-reads the rows and simply leaves that one out.
+        late = removed_item_ids(core.store, scan_id, filename) & candidate_items
+        if late:
+            raise RuntimeError('review target removed by a verified fix during this write: '
+                               + ', '.join(sorted(late)))
+    _removed_since_read()
     _phase(job, "storing the corrected copy")
     retry_proof = residual_state.get('office_retry')
     blob_url = (_blob.upload_immutable_retry(owner, scan_id, filename, working,
@@ -6042,7 +6074,15 @@ def _apply_approved_values(payload: dict, job: dict, *, _retry_locked=False) -> 
     # Upload first: failed storage must leave every approval retryable. The database commit
     # then binds its evidence to these exact bytes; no credit survives a metadata failure.
     record = core.store.get_remediation_urls(scan_id, filename) or {}
+    from review_target_reconciliation import begin_write, lock_file, lock_rows
     with core.store.transaction():
+        # Documented lock order: review rows (id order), THEN the file. Retry admission and
+        # target reconciliation take the same order, so none of them can deadlock another.
+        begin_write(core.store)
+        lock_rows(core.store, candidate_items | {str(item['id']) for item in
+                  ((payload.get('standing_approval') or {}).get('items') or []) if item.get('id')})
+        lock_file(core.store, scan_id, filename)
+        _removed_since_read()
         if retry_proof:
             # The upload is outside SQL: an intervening review/revocation must not
             # advance its pointer or inherit credit. Match decide_hitl's review-before-
@@ -6095,6 +6135,17 @@ def _apply_approved_values(payload: dict, job: dict, *, _retry_locked=False) -> 
             core.store.log_decision(
                 "system", "revalidate.certified", scan_id=scan_id, file=filename,
                 detail="all findings resolved (auto-fixed + approved values written) — advanced to Publish")
+
+    # Trigger (a): with the new copy committed, retire review rows whose targets THIS job's
+    # verified write removed, against its own complete re-scan of exactly these bytes. Writes
+    # decision_log + finding_disposition only; best-effort, the saved copy is already durable.
+    try:
+        from review_target_reconciliation import reconcile_after_apply
+        reconcile_after_apply(core.store, scan_id, filename, owner=owner, prior=prior_working,
+                              prior_sha256=prior_record_sha, corrected=working,
+                              verification=residual_state.get('verification'))
+    except Exception:
+        swallowed("_apply_approved_values: reconciling removed review targets failed", scan_id)
 
 
 @handler("deliver_corrected_copy")

@@ -441,7 +441,7 @@ export function verificationLadder(card) {
       { label: 'Human review', state: 'done' },
       { label: 'Write blocked', state: 'failed' },
       { label: 'Re-scan verified', state: 'todo' },
-      { label: 'Certified', state: 'todo' },
+      { label: 'Outcome recorded', state: 'todo' },
     ]
   }
   if (c.applyOutcome) {
@@ -451,7 +451,7 @@ export function verificationLadder(card) {
       { label: 'Written to a working copy', state: 'done' },
       { label: c.applyOutcome.state === 'could_not_verify' ? 'Re-scan could not verify' : 'Re-scan verified',
         state: 'failed' },
-      { label: 'Certified', state: 'todo' },
+      { label: 'Outcome recorded', state: 'todo' },
     ]
   }
   // Judgement finding (contrast accepted, link text deemed adequate): nothing is written and nothing
@@ -460,7 +460,7 @@ export function verificationLadder(card) {
     return [
       { label: 'Detected', state: 'done' },
       { label: 'Human review', state: 'current' },
-      { label: 'Certified', state: 'todo' },
+      { label: 'Decision recorded', state: 'todo' },
     ]
   }
   // Value-fix pipeline: generate → human review → write → re-scan → certify. When the proposal was
@@ -472,7 +472,7 @@ export function verificationLadder(card) {
       { label: 'Written to document', state: 'done' },
       { label: 'Re-scan verified', state: 'done' },
       { label: 'Human review', state: 'current' },
-      { label: 'Certified', state: 'todo' },
+      { label: 'Outcome recorded', state: 'todo' },
     ]
   }
   return [
@@ -480,7 +480,7 @@ export function verificationLadder(card) {
     { label: 'Human review', state: 'current' },
     { label: 'Written to document', state: 'todo' },
     { label: 'Re-scan verified', state: 'todo' },
-    { label: 'Certified', state: 'todo' },
+    { label: 'Outcome recorded', state: 'todo' },
   ]
 }
 

@@ -47,3 +47,24 @@ it('does not substitute a different population when membership disagrees with th
   expect(document.querySelector('[role="dialog"]').textContent).toContain('queue changed')
   expect(document.querySelector('[role="dialog"]').textContent).not.toContain('other.docx')
 })
+it('offers "Open item" for an unresolved finding the server links to a review item, and asks for it', async()=> {
+  getStageProgressQueue.mockResolvedValue({execution_id:'run',bucket:'attention',available:true,count:2,
+    files:[{file:'synthetic.docx',status:'attention',label:'Needs attention',findingCount:2}]})
+  const requests=[]
+  const listener=event=>requests.push(event.detail)
+  window.addEventListener('acp:open-review-item',listener)
+  await render({ ...snapshot(), scan_id:'scan', domain_reconciliation:{total:4,accounted:4,exact:true,
+    buckets:{resolved_verified:2,awaiting_review:2},
+    unresolved_findings:[{finding_id:'f-111',file:'synthetic.docx',rule_id:'1.1.1',rule_name:'Images have alt text',disposition:'awaiting_review',review_item_id:'item-111'},
+      {finding_id:'f-999',file:'synthetic.docx',rule_id:'2.4.2',rule_name:'Title',disposition:'awaiting_review',review_item_id:null}]} })
+  const tile=[...host.querySelectorAll('button')].find(b=>b.textContent.includes('Unresolved findings'))
+  await act(async()=>tile.click())
+  const drawer=document.querySelector('[role="dialog"]')
+  const open=[...drawer.querySelectorAll('button')].filter(b=>b.textContent.startsWith('Open '))
+  // Only the finding that names its review item can be opened; the other has nothing to open.
+  expect(open.map(b=>b.textContent)).toEqual(['Open 1.1.1 item — Images have alt text'])
+  await act(async()=>open[0].click())
+  window.removeEventListener('acp:open-review-item',listener)
+  expect(requests).toEqual([{itemId:'item-111',scanId:'scan',tab:null}])
+  expect(document.querySelector('[role="dialog"]')).toBeNull()
+})

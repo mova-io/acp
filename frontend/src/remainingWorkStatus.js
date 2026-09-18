@@ -1,6 +1,7 @@
 import { reviewWorkBreakdown } from './reviewWorkBreakdown.js'
 import { unresolvedWorkSummary } from './unresolvedWorkSummary.js'
 import { pendingReviewRows } from './remediationCountSummary.js'
+import { matchesAutomaticReview } from './automaticReviewResponsibility.js'
 
 // Recent event evidence is narration, never a substitute for the reconciled counters.
 const VISION = new Set(['remediate.vision_retry_pending', 'remediate.vision_retry_blocked', 'remediate.vision_retry_recovered', 'remediate.delivered'])
@@ -61,12 +62,19 @@ export function remainingWorkStatus({ events = [], rows = [], decisions = {}, sn
     ['status-checks', 'Recorded status needs checking', 'have a blocker without a confirmed failure reason. Check saved evidence; these are not automatically classified as human decisions.', 'waiting'],
     ['review', 'Your review needed', 'need a decision on an available suggestion. Auto-apply does not bypass requirements for individual judgment.', 'review'],
     ['manual', 'Manual document edit needed', 'need a person to edit or resolve the document. These do not drain through AI automatically.', 'manual'],
+    ['processing', 'Saved change awaiting its check', 'have a saved change that has not been re-checked yet. The corrected copy still has to be assessed; no further approval is needed.', 'waiting'],
   ]
   // The human population is exactly the one used by the review tab badge.
   // Status checks are a separate population, not additional human decisions.
   const humanRows = pendingReviewRows(rows, decisions, automatic)
   const humanIds = new Set(humanRows)
-  const statusRows = pendingReviewRows(rows, decisions, false).filter(row => !humanIds.has(row))
+  // Under automatic approval the status population is exactly the Status checks pill's — including
+  // a saved change awaiting its re-check, which the pill lists and the old pending-only filter did
+  // not (production: pill 2, this panel 1, for the same two tasks). Optional inspection of an
+  // already-applied change stays out, as it does from every pending count (#1888).
+  const statusRows = automatic
+    ? rows.filter(row => !humanIds.has(row) && !row.autoApplied && matchesAutomaticReview(row, 'status-check', decisions, true))
+    : pendingReviewRows(rows, decisions, false).filter(row => !humanIds.has(row))
   const humanCounts = reviewWorkBreakdown(humanRows, decisions, blockedCaptionFiles)
   const statusCounts = reviewWorkBreakdown(statusRows, decisions, blockedCaptionFiles)
   for (const [population, breakdown] of [['human', humanCounts], ['status', statusCounts]]) {

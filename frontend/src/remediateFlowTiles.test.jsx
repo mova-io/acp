@@ -11,7 +11,11 @@ it('orders verified progress before separate unresolved outcomes and counts unkn
  await mount(<Tiles stage="remediate" domain={domain}/>);
  const groups=container.querySelectorAll('[role="group"]')
  expect([...groups[0].querySelectorAll('.workflow-outcome-tiles__label')].map(el=>el.textContent)).toEqual(['Awaiting outcome','Applying & checking','Verified fixes'])
- expect([...groups[1].querySelectorAll('.workflow-outcome-tiles__label')].map(el=>el.textContent)).toEqual(['Unresolved findings','Excluded'])
+ // Label changed deliberately (finding/review reconciliation): the gray tile holds policy exclusions AND
+ // findings whose target was replaced by a verified change, so "Excluded" alone misnamed the second.
+ expect([...groups[1].querySelectorAll('.workflow-outcome-tiles__label')].map(el=>el.textContent)).toEqual(['Unresolved findings','Excluded or replaced'])
+ const gray=groups[1].querySelector('.tone-gray .workflow-outcome-tiles__definition')
+ expect(gray.textContent).toBe('0 replaced or superseded · 1 excluded by policy')
  const model=outcomeTileModel('remediate',domain)
  expect(model.tiles.find(tile=>tile.key==='attention').value).toBe(3)
  expect(model.tiles.reduce((sum,tile)=>sum+tile.value,0)).toBe(10)

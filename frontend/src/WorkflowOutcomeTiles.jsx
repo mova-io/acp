@@ -8,8 +8,15 @@ const FINDING = [
   ['processing', 'Applying & checking', 'purple', ['approved_pending_verification', 'approved_awaiting_verification']],
   ['verified', 'Verified fixes', 'green', ['resolved_verified']],
   ['attention', 'Unresolved findings', 'amber', ['awaiting_review', 'unchanged_no_fix', 'failed']],
-  ['excluded', 'Excluded', 'gray', ['excluded', 'superseded']],
+  // One gray tile (its key is the server's queue-drawer and baseline bucket), but two different
+  // facts inside it, and the tile names both. `excluded` is excluded_by_policy — a saved scope
+  // decision. `superseded` is superseded_by_reassessment — the finding's target was replaced or
+  // removed (e.g. an image replaced by real text in a verified 1.4.5 change), or a re-assessment
+  // retired it. Labelling the whole tile "Excluded" told a reviewer a policy had set aside a finding
+  // that a verified change had in fact made moot.
+  ['excluded', 'Excluded or replaced', 'gray', ['excluded', 'superseded']],
 ]
+const PARTS = { excluded: [['superseded', 'replaced or superseded'], ['excluded', 'excluded by policy']] }
 const PUBLICATION = [
   ['queued', 'Waiting for delivery', 'blue', ['waiting', 'queued']],
   ['processing', 'Publishing', 'purple', ['processing']],
@@ -31,6 +38,7 @@ export function outcomeTileModel(stage, domain) {
   return { balanced, total: domain.total, tiles: configuration.map(([key, label, tone, group]) => ({
     key, label, tone, value: balanced ? group.reduce((sum, name) => sum + (buckets[name] || 0), 0)
       + ((stage === 'remediate' && key === 'attention') || (stage === 'release' && key === 'unclassified') ? keys.filter(name => !known.has(name)).reduce((sum, name) => sum + buckets[name], 0) : 0) : null,
+    parts: stage === 'remediate' && balanced && PARTS[key] ? PARTS[key].map(([name, text]) => ({ key: name, label: text, value: buckets[name] || 0 })) : null,
   })) }
 }
 
@@ -40,7 +48,7 @@ const descriptions = {
     processing: ['Changes awaiting verification', 'Approved work awaiting application or independent checking. Each item shows its precise step.'],
     verified: ['Saved changes passed checks', 'Fixes independently verified against corrected files and durably recorded. Approval alone never counts as a verified fix.'],
     attention: ['Not yet verified as fixed', 'Includes review-required, unchanged, failed and unclassified outcomes. Check each item for automatic recovery, your review or manual repair. This count can rise as remaining issues are recorded; it does not mean new issues were introduced.'],
-    excluded: ['Outside the current result set', 'Deliberately excluded or superseded records. These are not successful fixes.'],
+    excluded: ['Not counted as fixes', 'Replaced or superseded: the finding\'s target no longer exists in the corrected copy — for example an image replaced by real text in a verified change — or a re-assessment retired it; no change was written for that finding and no approval is needed. Excluded by policy: the saved policy deliberately left the finding out of remediation. Neither counts as a verified fix.'],
   },
   release: {
     queued: ['Delivery has not started', 'Authorized copies waiting for publication. Blocked or unclassified copies are identified separately.'],
@@ -76,7 +84,7 @@ export default function WorkflowOutcomeTiles({ stage, domain, baseline = null, e
         const content = <>
           <span className="workflow-outcome-tiles__label">{tile.label}</span>
           <strong aria-label={`${tile.label}: ${tile.value ?? 'unavailable'}`}>{tile.value == null ? '—' : <BidirectionalKpiCounter value={tile.value} positiveDirection={positiveDirections[tile.key]} />}</strong>
-          <span className="workflow-outcome-tiles__definition">{descriptions[stage][tile.key][0]}</span>
+          <span className="workflow-outcome-tiles__definition">{tile.parts ? tile.parts.map(part => `${part.value.toLocaleString()} ${part.label}`).join(' · ') : descriptions[stage][tile.key][0]}</span>
           {old != null && <span className="workflow-outcome-tiles__before">Before: {old.toLocaleString()}</span>}
           {delta != null && <span className="workflow-outcome-tiles__net">{delta > 0 ? '+' : delta < 0 ? '−' : ''}{Math.abs(delta).toLocaleString()} since starting</span>}
           <span className="workflow-outcome-tiles__fill" aria-hidden="true" style={{ transform: `scaleX(${model.total > 0 && tile.value != null ? tile.value / model.total : 0})` }} />
@@ -92,7 +100,7 @@ export default function WorkflowOutcomeTiles({ stage, domain, baseline = null, e
       </div>
     </div>)}
     <p className="workflow-outcome-tiles__note">{!model.balanced ? 'Updating: outcome totals are being reconciled.' : stage === 'remediate'
-      ? 'Unresolved findings may need your review, manual repair or recovery. Check each item for its next step. Only checked fixes count as verified.'
+      ? 'These tiles count findings. Review workspace counts review tasks — a different unit: one task can cover several findings and a finding can have no task, so the two are never added. Unresolved findings may need your review, manual repair or recovery; only checked fixes count as verified.'
       : 'Published includes delivered copies with remaining issues. Publication does not certify accessibility; see Outcome details.'}</p>
   </section>
 }
