@@ -30,29 +30,41 @@ const SID = REC.scanId
 const scOfWcag = (v) => ((v || '').replace(/^SC_/, '').replace(/_/g, '.').match(/^\d+\.\d+\.\d+/) || [''])[0]
 
 // The recorded server, answering exactly what it answered, and checking it is asked the same way.
-function replay() {
+// `finalRead` picks which recorded answer the exporter's ONE final fresh read gets (contract 7):
+// 'unchanged' (recorded after every per-file read) or 'mutated' (recorded after a reviewer
+// decision was saved through the real PUT).
+// `scan` is a recorded scan section: REC itself (the main scan) or REC.clean.
+function replay({ finalRead = 'unchanged', scan = REC } = {}) {
   const asked = []
   const api = {
-    getScanReportFacts: async (sid, { offset = 0, limit, digest } = {}) => {
+    getScanReportFacts: async (sid, { offset = 0, limit, digest, signal } = {}) => {
+      expect(sid).toBe(scan.scanId)
       asked.push({ offset, limit, digest })
-      const page = REC.scanFactsPages.find((p) => p.offset === offset)
+      if (limit === 1) {
+        expect(offset).toBe(0)
+        expect(digest ?? null).toBeNull()                 // never the memoised snapshot
+        expect(signal).toBeInstanceOf(AbortSignal)
+        if (!scan.finalCheck[finalRead]) throw new Error(`no recorded final read "${finalRead}"`)
+        return structuredClone(scan.finalCheck[finalRead])
+      }
+      const page = scan.scanFactsPages.find((p) => p.offset === offset)
       if (!page) throw new Error(`no recorded page at offset ${offset}`)
       expect(digest ?? null).toBe(page.digest)
       return structuredClone(page.response)
     },
     getFileReportFacts: async (sid, file) => {
-      expect(sid).toBe(SID)
-      if (!(file in REC.fileFacts)) throw new Error(`no recorded facts for ${file}`)
-      return structuredClone(REC.fileFacts[file])
+      expect(sid).toBe(scan.scanId)
+      if (!(file in scan.fileFacts)) throw new Error(`no recorded facts for ${file}`)
+      return structuredClone(scan.fileFacts[file])
     },
-    getScan: async () => structuredClone(REC.scan),
+    getScan: async () => structuredClone(scan.scan),
     getRules: async () => structuredClone(REC.rules),
     getRubric: async () => structuredClone(REC.rubric),
     getCapability: async () => structuredClone(REC.capability),
     getConfig: async () => ({ version: '2026.9.17.9' }),
-    getDecisions: async () => structuredClone(REC.decisions),
-    getFileRemediationState: async (sid, f) => structuredClone(REC.remediationState[f] ?? []),
-    listDispositions: async (sid, f) => structuredClone(REC.dispositions[f] ?? []),
+    getDecisions: async () => structuredClone(scan.decisions),
+    getFileRemediationState: async (sid, f) => structuredClone(scan.remediationState[f] ?? []),
+    listDispositions: async (sid, f) => structuredClone(scan.dispositions[f] ?? []),
     getFileRemediationDiffs: async () => { throw new Error('facts carry the saved changes; this must not be read') },
     getFileArtifactPage: async () => null,
     getFilePage: async () => null,
@@ -62,25 +74,27 @@ function replay() {
   return { api, asked }
 }
 
-async function run({ renderBlob, files = [] } = {}) {
-  const { api, asked } = replay()
+async function run({ renderBlob, files = [], finalRead = 'unchanged', scan = REC, finalCheck = true } = {}) {
+  const { api, asked } = replay({ finalRead, scan })
+  const sid = scan.scanId
   const downloads = []
   const renders = []
   const buildFileData = makeFileDataBuilder({
-    scanId: SID, api, computeCoverageRows, buildFileReportData, isDispositionable, normalizeDisposition,
+    scanId: sid, api, computeCoverageRows, buildFileReportData, isDispositionable, normalizeDisposition,
     scOf, inScope: (i) => SCOPE_SCS.has(scOfWcag(i.wcag)), capabilityFallback: CAPABILITY_FALLBACK,
   })
   const res = await exportScanPackets({
-    scanId: SID, mode: 'full', files,
+    scanId: sid, mode: 'full', files,
     deps: {
-      loadIndex: ({ onProgress }) => loadScanReportFacts(SID, { getScanReportFacts: api.getScanReportFacts, limit: REC.pageLimit, onProgress }),
+      loadIndex: ({ onProgress }) => loadScanReportFacts(sid, { getScanReportFacts: api.getScanReportFacts, limit: REC.pageLimit, onProgress }),
+      ...(finalCheck ? { getScanReportFacts: api.getScanReportFacts } : {}),
       loadScanFiles: async () => (await api.getScan())?.files || [],
       buildFileData,
       buildModel: buildFileReportModel,
       renderBlob: renderBlob || (async (a) => { renders.push(a); return { ok: true, format: 'pdf', blob: new Blob([`%PDF-1.7 ${a.file}`], { type: 'application/pdf' }) } }),
       download: (blob, filename) => downloads.push({ blob, filename }),
       JSZip,
-      appLink: (file) => appLinkFor(SID, file, { origin: 'https://acp.example.com' }),
+      appLink: (file) => appLinkFor(sid, file, { origin: 'https://acp.example.com' }),
       statusOf,
     },
   })
@@ -103,7 +117,7 @@ describe('per-file packets over the recorded real-store responses', () => {
 
   it('every document in the index gets a row, with the digest the index and a fresh read agree on', async () => {
     const { res, downloads, renders, asked } = await run()
-    expect(asked.map((a) => a.offset)).toEqual(REC.scanFactsPages.map((p) => p.offset))
+    expect(asked.filter((a) => a.limit !== 1).map((a) => a.offset)).toEqual(REC.scanFactsPages.map((p) => p.offset))
     const names = indexRows().map((r) => r.file)
     expect(res.rows.map((r) => r.file)).toEqual(names)
 
@@ -186,6 +200,58 @@ describe('per-file packets over the recorded real-store responses', () => {
     expect(packed.every((r) => r.Format === 'html-fallback' && r['Packet (in archive)'].endsWith('.html'))).toBe(true)
     expect(Object.keys(zip.files).some((n) => n.endsWith('.pdf.pdf'))).toBe(false)
     expect(res.message).toMatch(/7 of them as HTML|INCOMPLETE/)
+  })
+
+  // ── Contract 7 over the real recording ───────────────────────────────────────────────────────
+  it('unchanged evidence: the final fresh read equals the snapshot, and an all-analysable scan is COMPLETE (verified current)', async () => {
+    const clean = REC.clean
+    const snap = clean.scanFactsPages[0].response.factsDigest
+    expect(clean.finalCheck.unchanged.factsDigest).toBe(snap)            // what the server really answered
+    const { res, downloads, asked } = await run({ scan: clean })
+    expect(asked.filter((a) => a.limit === 1)).toHaveLength(1)           // once, after the pages
+    expect(asked.at(-1)).toMatchObject({ offset: 0, limit: 1 })
+    expect(res.rows.every((r) => r.status === 'included' && r.format === 'pdf')).toBe(true)
+    expect(res.finalCheck).toMatchObject({ status: 'verified', digest: snap, snapshotDigest: snap })
+    expect(res.complete).toBe(true)
+    const zip = await JSZip.loadAsync(await downloads[0].blob.arrayBuffer())
+    const html = await zip.file('index.html').async('string')
+    expect(html).toMatch(/COMPLETE \(verified current\)/)
+    expect(html).toContain(clean.scanFactsPages[0].response.snapshot.builtAt)
+    const rows = csvRows(await zip.file('index.csv').async('string'))
+    expect(rows.every((r) => r['Final check'] === 'verified current' && r['Final check digest'] === snap)).toBe(true)
+    // …and the main scan's unchanged read verifies too; only its unanalysable document keeps it incomplete
+    const main = await run()
+    expect(main.res.finalCheck.status).toBe('verified')
+    expect(main.res.complete).toBe(false)
+    expect(main.res.state).toBe('incomplete')
+    expect(main.res.message).not.toMatch(/final check/i)
+  })
+
+  it('a reviewer decision saved through the real PUT after every packet was made: "evidence changed during export", both digests', async () => {
+    const snap = REC.scanFactsPages[0].response.factsDigest
+    const moved = REC.finalCheck.mutated.factsDigest
+    expect(moved).not.toBe(snap)                                           // the real server moved it
+    const { res, downloads } = await run({ finalRead: 'mutated' })
+    // every per-file read matched its row — the per-document checks could not see this change
+    expect(res.rows.filter((r) => r.status === 'changed')).toHaveLength(0)
+    expect(res.finalCheck).toMatchObject({ status: 'changed', digest: moved, snapshotDigest: snap })
+    expect(res.complete).toBe(false)
+    expect(res.message).toContain(snap)
+    expect(res.message).toContain(moved)
+    const zip = await JSZip.loadAsync(await downloads[0].blob.arrayBuffer())
+    const html = await zip.file('index.html').async('string')
+    expect(html).toMatch(/evidence changed during export/)
+    expect(html).toContain(moved)
+    const rows = csvRows(await zip.file('index.csv').async('string'))
+    expect(rows.every((r) => r['Final check'] === 'evidence changed during export')).toBe(true)
+  })
+
+  it('without the final read an all-analysable scan is a snapshot, never COMPLETE', async () => {
+    const { res } = await run({ scan: REC.clean, finalCheck: false })
+    expect(res.rows.every((r) => r.status === 'included')).toBe(true)
+    expect(res.finalCheck.status).toBe('not_performed')
+    expect(res.complete).toBe(false)
+    expect(res.snapshotOnly).toBe(true)
   })
 
   it('the "Open in ACP" column links only when a document-level evidence route exists', () => {

@@ -117,6 +117,16 @@ describe('ReportModeMenu', () => {
     expect([...c.querySelectorAll('.reportmode-downloads button')].map((b) => b.textContent)).toEqual(['Download Master index (CSV)'])
   })
 
+  it('a snapshot-only export (every packet made, final check not current) is not called current or incomplete', async () => {
+    const run = async () => ({ ok: false, incomplete: true, snapshotOnly: true, message: 'All 8 documents exported, but this archive is a SNAPSHOT ONLY (evidence changed during export).', downloads: [] })
+    const c = await mount({ formats: [{ key: 'zip', label: 'ZIP', cancellable: true, run }] })
+    await act(async () => { btn(c, 'Summary — ZIP').click() })
+    await flush()
+    const text = c.querySelector('[role="alert"]').textContent
+    expect(text).toBe('Summary (ZIP) was downloaded as a SNAPSHOT, not verified current. All 8 documents exported, but this archive is a SNAPSHOT ONLY (evidence changed during export).')
+    expect(c.querySelector('[role="status"]').textContent).toBe('')
+  })
+
   it('a format can be limited to some modes', async () => {
     const c = await mount({ formats: [{ key: 'pdf', label: 'PDF', run: vi.fn() }, { key: 'zip', label: 'ZIP', modes: ['full'], run: vi.fn() }] })
     expect(btn(c, 'Full evidence — ZIP')).toBeTruthy()

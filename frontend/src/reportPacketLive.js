@@ -52,6 +52,8 @@ export async function runScanPacketExport({ scanId, mode, files = [], signal = n
     scanId, mode, files, signal, onProgress,
     deps: {
       loadIndex: ({ onProgress: p }) => loadScanReportFacts(scanId, { getScanReportFacts: api.getScanReportFacts, onProgress: p }),
+      // The ONE final fresh read (contract 7): same transport, offset 0, limit 1, no digest.
+      getScanReportFacts: api.getScanReportFacts,
       loadScanFiles: async () => (await api.getScan(scanId))?.files || [],
       buildFileData,
       buildModel: buildFileReportModel,

@@ -24,7 +24,7 @@
 // tab never holds the whole estate at once. The master index (index.html + index.csv) goes into
 // the LAST part and is also returned for download on its own.
 import {
-  assignArchiveStems, packetPath, indexCsv, indexHtml, completeness, summaryCounts,
+  assignArchiveStems, packetPath, indexCsv, indexHtml, completeness, summaryCounts, finalCheckLabel,
   PART_MAX_BYTES, PART_MAX_FILES,
 } from './reportPacketArchive.js'
 
@@ -91,6 +91,79 @@ export function makeFileDataBuilder({ scanId, api, computeCoverageRows, buildFil
   }
 }
 
+// ── The final fresh check (contract 7) ────────────────────────────────────────────────────────
+// Every packet is checked against a fresh per-file read when it is made, and a PDF again by the
+// render route — but those checks happen at different moments, one document at a time. Evidence
+// that moves AFTER a document is packed (a reviewer decision, a new corrected copy, a file added to
+// or removed from the scan) is seen by none of them. So, once every worker has finished and before
+// the master index is written, the scan index is read ONE more time: offset 0, limit 1, and no
+// `digest` — the request the server always rebuilds from the store — and its full-index factsDigest
+// is compared with the snapshot's. Once. No polling, no retry: a bounded wait, then a stated result.
+export const FINAL_CHECK_TIMEOUT_MS = 20000
+
+const STOPPED = Symbol('stopped')
+
+/**
+ * Resolves (never rejects) {
+ *   status: 'verified' | 'changed' | 'failed' | 'not_performed',
+ *   reason,                     // null when verified
+ *   snapshotDigest, digest,     // digest = what the final read returned (null when none)
+ *   snapshotFilesTotal, filesTotal,
+ *   startedAt, checkedAt,       // ISO; checkedAt null when the read was never made
+ *   timeoutMs,
+ * }
+ */
+export async function finalDigestCheck({
+  scanId, snapshotDigest, snapshotFilesTotal = null, getScanReportFacts, signal = null,
+  timeoutMs = FINAL_CHECK_TIMEOUT_MS, now = () => new Date(),
+}) {
+  const base = {
+    snapshotDigest: snapshotDigest ?? null, digest: null,
+    snapshotFilesTotal: Number.isFinite(snapshotFilesTotal) ? snapshotFilesTotal : null, filesTotal: null,
+    startedAt: now().toISOString(), checkedAt: null, timeoutMs,
+  }
+  const notPerformed = (reason) => ({ ...base, status: 'not_performed', reason })
+  if (signal?.aborted) return notPerformed('the export was cancelled, so the final check was not run')
+  if (typeof getScanReportFacts !== 'function') return notPerformed('this export had no way to re-read the scan index, so the final check was not run')
+  if (!snapshotDigest) return notPerformed('the scan index snapshot named no evidence digest, so there was nothing to compare the current evidence with')
+
+  const ctl = new AbortController()
+  let why = null
+  const onCancel = () => { why ||= 'cancelled'; ctl.abort() }
+  signal?.addEventListener?.('abort', onCancel, { once: true })
+  const timer = setTimeout(() => { why ||= 'timeout'; ctl.abort() }, timeoutMs)
+  const stopped = new Promise((resolve) => ctl.signal.addEventListener('abort', () => resolve(STOPPED), { once: true }))
+  const secs = `${Math.round(timeoutMs / 100) / 10} s`
+  const whyStopped = () => (why === 'cancelled'
+    ? notPerformed('the export was cancelled while the final check was running, so it was abandoned before it answered')
+    : { ...base, status: 'failed', checkedAt: now().toISOString(), reason: `the scan index did not answer within ${secs}, so the read was abandoned` })
+  let res
+  try {
+    res = await Promise.race([
+      Promise.resolve().then(() => getScanReportFacts(scanId, { offset: 0, limit: 1, signal: ctl.signal })),
+      stopped,
+    ])
+  } catch (e) {
+    if (why) return whyStopped()
+    return { ...base, status: 'failed', checkedAt: now().toISOString(), reason: `the scan index could not be re-read (${errText(e)})` }
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener?.('abort', onCancel)
+  }
+  if (res === STOPPED) return whyStopped()
+  const checkedAt = now().toISOString()
+  if (!res || typeof res !== 'object') return { ...base, status: 'failed', checkedAt, reason: 'the server returned no scan index to compare' }
+  const digest = typeof res.factsDigest === 'string' && res.factsDigest ? res.factsDigest : null
+  const filesTotal = Number.isFinite(res.filesTotal) ? res.filesTotal : Number.isFinite(res.snapshot?.filesTotal) ? res.snapshot.filesTotal : null
+  if (!digest) return { ...base, filesTotal, status: 'failed', checkedAt, reason: "the server's answer named no evidence digest, so it could not be compared with the snapshot" }
+  if (digest === base.snapshotDigest) return { ...base, digest, filesTotal, status: 'verified', checkedAt, reason: null }
+  const count = filesTotal != null && base.snapshotFilesTotal != null && filesTotal !== base.snapshotFilesTotal
+    ? `The scan index now lists ${filesTotal} documents; the snapshot listed ${base.snapshotFilesTotal}. `
+    : ''
+  // Both digests are fields of the result; the reason says what they cannot.
+  return { ...base, digest, filesTotal, status: 'changed', checkedAt, reason: `${count}This check does not say which documents changed.` }
+}
+
 // A tiny FIFO mutex: part finalisation is async and must not interleave.
 function serial() {
   let tail = Promise.resolve()
@@ -111,16 +184,19 @@ function serial() {
  *   JSZip                         → the jszip constructor
  *   appLink(fileName)             → { href: absolute URL | null, note } for "Open in ACP"
  *   statusOf(fileRecord)          → docStatus.statusOf
+ *   getScanReportFacts(sid, opts) → api.getScanReportFacts; used ONCE, for the final fresh check
+ *                                   (contract 7). Absent → the check is 'not_performed' and the
+ *                                   export can never call itself complete.
  *
  * Resolves {
- *   ok, complete, cancelled, message, rows, parts: [{ n, filename, packets }],
- *   indexHtml, indexCsv, downloads: [{ label, blob, filename }]
+ *   ok, complete, cancelled, incomplete, snapshotOnly, state, message, finalCheck,
+ *   rows, parts: [{ n, filename, packets }], indexHtml, indexCsv, downloads: [{ label, blob, filename }]
  * }
  */
 export async function exportScanPackets({
   scanId, mode = 'full', files = [], signal = null, onProgress = null, deps,
   concurrency = PACKET_CONCURRENCY, partMaxFiles = PART_MAX_FILES, partMaxBytes = PART_MAX_BYTES,
-  now = () => new Date(),
+  now = () => new Date(), finalCheckTimeoutMs = FINAL_CHECK_TIMEOUT_MS,
 } = {}) {
   const modeLabel = MODE_LABEL[mode] || mode
   const report = (p) => { try { onProgress?.(p) } catch { /* progress is advisory */ } }
@@ -147,6 +223,8 @@ export async function exportScanPackets({
   const snapshot = idx.facts.snapshot && typeof idx.facts.snapshot === 'object' ? idx.facts.snapshot : null
   const platformVersion = idx.facts.identity?.platformVersion ?? null
   const exportedAt = now().toISOString()
+  const indexReadAt = exportedAt
+  const snapshotFilesTotal = Number.isFinite(snapshot?.filesTotal) ? snapshot.filesTotal : Number.isFinite(idx.filesTotal) ? idx.filesTotal : null
 
   // 2. One row per index entry, then the on-screen documents the index does not list.
   const rows = []
@@ -213,7 +291,9 @@ export async function exportScanPackets({
     const n = partN
     if (!final) {
       zip.file(`README-part-${n}.txt`, `Part ${n} of a per-file packet export for scan ${scanId} (${modeLabel}).\r\n`
-        + 'The master index (index.html and index.csv) is in the LAST part. Extract every part into the same folder so its links resolve.\r\n')
+        + 'The master index (index.html and index.csv) is in the LAST part. Extract every part into the same folder so its links resolve.\r\n'
+        + `The packets in this part reflect the evidence snapshot ${indexDigest || '(digest not recorded)'}${snapshot?.builtAt ? ` built ${snapshot.builtAt}` : ''}. `
+        + 'This part was made before the final check; the master index in the last part states whether that snapshot was still current when the export finished.\r\n')
     }
     report({ phase: 'zipping', part: n })
     const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } })
@@ -253,6 +333,8 @@ export async function exportScanPackets({
       row.status = 'failed'; row.reason = `the report could not be assembled (${errText(e)})`; return
     }
     if (aborted()) return
+    // When THIS document's evidence was read (and compared with its snapshot row, below).
+    row.factsReadAt = now().toISOString()
     const facts = d?.facts
     if (!facts) { row.status = 'failed'; row.reason = `the report evidence could not be read (${d?.factsError || 'no facts returned'})`; return }
     const id = facts.identity || {}
@@ -299,33 +381,51 @@ export async function exportScanPackets({
   for (const r of rows) if (r.status === 'pending') { r.status = 'cancelled'; r.reason = 'cancelled before this document was exported' }
   // A packet that raced the cancel into the ZIP is still in it, and says so (included).
 
-  // 6. The master index — last part, and on its own.
+  // 6. The final fresh check (contract 7): once, bounded, after every worker and before the index.
+  //    Parts already downloaded cannot be recalled; the index names them.
+  const partsBeforeFinalCheck = parts.map((p) => p.n)
+  if (!cancelled) report({ phase: 'final-check' })
+  const finalCheck = {
+    ...await finalDigestCheck({
+      scanId, snapshotDigest: indexDigest, snapshotFilesTotal, getScanReportFacts: deps.getScanReportFacts,
+      signal, timeoutMs: finalCheckTimeoutMs, now,
+    }),
+    partsBeforeFinalCheck,
+  }
+
+  // 7. The master index — last part, and on its own.
   const header = {
-    scanId, modeLabel, indexDigest, snapshotBuiltAt: snapshot?.builtAt ?? null,
+    scanId, modeLabel, indexDigest, snapshotBuiltAt: snapshot?.builtAt ?? null, indexReadAt,
     filesTotal: Number.isFinite(idx.filesTotal) ? idx.filesTotal : indexed, exportedAt, platformVersion,
     indexComplete: idx.complete === true, indexIncompleteReason: idx.incompleteReason || idx.factsError || null,
-    cancelled, partsTotal: partN || 1,
+    cancelled, partsTotal: partN || 1, finalCheck,
   }
-  const verdict = completeness({ rows, ...header })
-  const csv = indexCsv(rows)
   await lock(async () => {
     if (!zip) freshZip()
     header.partsTotal = partN
     zip.file('index.html', indexHtml({ rows, header }))
-    zip.file('index.csv', csv)
+    zip.file('index.csv', indexCsv(rows, { header }))
     await closePart(true)
   })
+  const verdict = completeness({ rows, ...header })
+  const csv = indexCsv(rows, { header })
   const finalHtml = indexHtml({ rows, header })
   const c = verdict.counts
   const partsNote = parts.length > 1 ? ` in ${parts.length} ZIP parts (the master index is in the last)` : ''
+  const htmlNote = c.html ? `, ${c.html} of them as HTML because the PDF could not be produced` : ''
+  const complete = verdict.complete && !cancelled
+  const snapshotOnly = !cancelled && verdict.packetsComplete && !verdict.complete
   const message = cancelled
-    ? `Cancelled. ${c.included} of ${c.total} documents were exported${partsNote}; ${c.cancelled} were not (listed as skipped:cancelled in the index). This archive is INCOMPLETE.`
-    : verdict.complete
-      ? `${c.included} of ${c.total} documents exported${partsNote}${c.html ? `, ${c.html} of them as HTML because the PDF could not be produced` : ''}.`
-      : `Exported ${c.included} of ${c.total} documents${partsNote}. INCOMPLETE: ${verdict.reasons.join(' ')}`
+    ? `Cancelled. ${c.included} of ${c.total} documents were exported${partsNote}; ${c.cancelled} were not (listed as skipped:cancelled in the index). This archive is INCOMPLETE. Final check not performed: ${finalCheck.reason}.`
+    : complete
+      ? `${c.included} of ${c.total} documents exported${partsNote}${htmlNote}; verified current at ${finalCheck.checkedAt} (the scan's evidence digest was unchanged from the snapshot).`
+      : snapshotOnly
+        ? `All ${c.total} documents exported${partsNote}${htmlNote}, but this archive is a SNAPSHOT ONLY (${finalCheckLabel(finalCheck)}): ${verdict.reasons.join(' ')}`
+        : `Exported ${c.included} of ${c.total} documents${partsNote}. INCOMPLETE: ${verdict.reasons.join(' ')}`
   return {
-    ok: verdict.complete && !cancelled, complete: verdict.complete && !cancelled, cancelled,
-    incomplete: !cancelled && !verdict.complete, message,
+    ok: complete, complete, cancelled,
+    incomplete: !cancelled && !complete, snapshotOnly, state: cancelled ? 'cancelled' : verdict.state,
+    finalCheck, message,
     rows, parts, indexHtml: finalHtml, indexCsv: csv,
     downloads: [
       { label: 'Master index (HTML)', blob: new Blob([finalHtml], { type: 'text/html;charset=utf-8' }), filename: `accessibility-packets-${mode}-${slug(scanId)}-index.html` },
@@ -368,6 +468,7 @@ export function packetProgressText(p) {
   if (!p) return null
   if (p.phase === 'index') return `Reading the scan index… ${p.done ?? 0}${p.total != null ? ` of ${p.total}` : ''} document(s)`
   if (p.phase === 'zipping') return `Packing ZIP part ${p.part}…`
+  if (p.phase === 'final-check') return 'Checking once that the evidence has not changed since the export began…'
   if (p.phase === 'packets') {
     const c = p.counts || {}
     const extra = [c.html ? `${c.html} as HTML` : null, c.failed ? `${c.failed} failed` : null, c.changed ? `${c.changed} changed` : null].filter(Boolean)

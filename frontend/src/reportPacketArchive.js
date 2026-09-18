@@ -240,7 +240,55 @@ export function comparisonText(c) {
   return [status, counts.join(', '), c.status !== 'compared' && c.reason ? c.reason : ''].filter(Boolean).join(' — ')
 }
 
-// The index columns, in order. `value(row)` is plain text; the HTML adds a link for two of them.
+// ── Final check (contract 7) ──────────────────────────────────────────────────────────────────
+// After every packet is made the exporter reads the scan index ONCE more, fresh and uncached, and
+// compares its digest with the snapshot it packed. Only 'verified' lets an export call itself
+// current; the other three are stated, with their reason, in the index and on screen.
+export const FINAL_CHECK_LABEL = {
+  verified: 'verified current',
+  changed: 'evidence changed during export',
+  failed: 'final check failed',
+  not_performed: 'final check not performed',
+}
+export const finalCheckLabel = (fc) => FINAL_CHECK_LABEL[fc?.status] || FINAL_CHECK_LABEL.not_performed
+
+export const VERDICT_HEADLINE = {
+  complete: 'COMPLETE (verified current)',
+  incomplete: 'INCOMPLETE',
+  changed: 'SNAPSHOT ONLY — EVIDENCE CHANGED DURING EXPORT',
+  failed: 'SNAPSHOT ONLY — FINAL CHECK FAILED',
+  not_performed: 'SNAPSHOT ONLY — FINAL CHECK NOT PERFORMED',
+}
+
+// One sentence on what the final check found, for any outcome but 'verified'.
+export function finalCheckSentence(fc, { snapshotBuiltAt = null } = {}) {
+  const snap = `the snapshot${fc?.snapshotDigest ? ` (digest ${fc.snapshotDigest}` : ' (digest not recorded'}${snapshotBuiltAt ? `, built ${snapshotBuiltAt})` : ')'}`
+  const status = fc?.status || 'not_performed'
+  if (status === 'verified') return null
+  if (status === 'changed') {
+    return `The evidence changed during the export: the final check at ${nr(fc.checkedAt)} found the scan's evidence digest ${nr(fc.digest)}, not ${snap}. ${fc.reason || ''}`.trim()
+      + ' Every packet reflects the snapshot, not the current evidence; export again for a current archive.'
+  }
+  const what = status === 'failed' ? `The final check failed${fc?.checkedAt ? ` at ${fc.checkedAt}` : ''}` : 'The final check was not performed'
+  return `${what}: ${fc?.reason || 'no final check was recorded'}. The packets reflect ${snap} and are not shown to be current.`
+}
+
+// The export-level values every CSV row repeats, so a row copied out of the index keeps them.
+const ctxVerdict = (ctx) => (ctx?.verdict?.headline ?? NOT_RECORDED)
+const ctxCheck = (ctx) => (ctx?.header ? finalCheckLabel(ctx.header.finalCheck) : NOT_RECORDED)
+
+// Did the SERVER re-check this document's digest when it drew the packet? Only a PDF says yes: the
+// render route verifies the digest before it draws. The HTML fallback is built in this browser and
+// no server looked at it.
+export function serverVerifiedText(row) {
+  if (row.status !== 'included') return 'no packet'
+  if (row.format === 'pdf') return 'yes — the render route re-verified the per-file digest before drawing the PDF'
+  if (row.format === 'html') return "no — HTML fallback: built in the browser from the facts read at the time shown; the server did not re-check this document when the packet was made"
+  return NOT_RECORDED
+}
+
+// The index columns, in order. `value(row, ctx)` is plain text (ctx = { header, verdict } for the
+// export-level columns); the HTML adds a link for two of them.
 export const INDEX_COLUMNS = [
   ['Original name', (r) => r.file],
   ['Packet (in archive)', (r) => r.archivePath || ''],
@@ -257,6 +305,8 @@ export const INDEX_COLUMNS = [
   ['Scan id', (r) => nr(r.scanId)],
   ['Per-file facts digest', (r) => nr(r.factsDigest)],
   ['Index snapshot digest', (r) => nr(r.indexDigest)],
+  ['Facts read at', (r) => nr(r.factsReadAt)],
+  ['Server re-verified at render', serverVerifiedText],
   ['Source checksum', (r) => nr(r.sourceChecksum)],
   ['Source checksum kind', (r) => nr(r.sourceChecksumKind)],
   ['Source SHA-256', (r) => nr(r.sourceSha256)],
@@ -264,6 +314,11 @@ export const INDEX_COLUMNS = [
   ['Generated at', (r) => nr(r.generatedAt)],
   ['Platform version', (r) => nr(r.platformVersion)],
   ['Open in ACP', (r) => r.appHref || (r.appHrefNote || 'link not available')],
+  ['Export verdict', (r, ctx) => ctxVerdict(ctx)],
+  ['Snapshot built at', (r, ctx) => nr(ctx?.header?.snapshotBuiltAt)],
+  ['Final check', (r, ctx) => ctxCheck(ctx)],
+  ['Final check at', (r, ctx) => nr(ctx?.header?.finalCheck?.checkedAt)],
+  ['Final check digest', (r, ctx) => nr(ctx?.header?.finalCheck?.digest)],
 ]
 
 // CSV: RFC 4180 quoting, and a leading ' on anything a spreadsheet would run as a formula.
@@ -272,9 +327,12 @@ const csvCell = (v) => {
   if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`
   return `"${s.replace(/"/g, '""')}"`
 }
-export function indexCsv(rows) {
+// `header` (the export's identity and final check) fills the export-level columns on every row;
+// without it they read "not recorded" \u2014 never a verdict nobody reached.
+export function indexCsv(rows, { header = null } = {}) {
+  const ctx = header ? { header, verdict: completeness({ rows, ...header }) } : null
   const lines = [INDEX_COLUMNS.map(([h]) => csvCell(h)).join(',')]
-  for (const r of rows) lines.push(INDEX_COLUMNS.map(([, f]) => csvCell(f(r))).join(','))
+  for (const r of rows) lines.push(INDEX_COLUMNS.map(([, f]) => csvCell(f(r, ctx))).join(','))
   return `\ufeff${lines.join('\r\n')}\r\n`
 }
 
@@ -291,11 +349,17 @@ export function summaryCounts(rows) {
 }
 
 /**
- * Is this export complete, and if not, EXACTLY why. Complete means: the scan index was read to
- * the end, every document in it has a packet, and none of them fell back or was skipped. An HTML
- * fallback still counts as included — it is the same evidence — but is named.
+ * Is this export complete AND current, and if not, EXACTLY why. Complete (current) means all of:
+ * the scan index was read to the end, every document in it has a packet, and the final fresh
+ * check (contract 7) found the scan's evidence digest unchanged from the snapshot. An HTML
+ * fallback still counts as included — it is the same evidence — but is named, and it never
+ * stands in for the final check.
+ *
+ * state: 'complete' | 'incomplete' (a packet or part of the index is missing) | 'changed' |
+ * 'failed' | 'not_performed' (every packet is there, but the final check did not verify it).
+ * A missing finalCheck is 'not_performed': no check recorded is no check made.
  */
-export function completeness({ rows, indexComplete, indexIncompleteReason, cancelled }) {
+export function completeness({ rows, indexComplete, indexIncompleteReason, cancelled, finalCheck = null, snapshotBuiltAt = null }) {
   const c = summaryCounts(rows)
   const reasons = []
   if (!indexComplete) reasons.push(`The scan index was not read completely: ${indexIncompleteReason || 'reason not recorded'}.`)
@@ -303,9 +367,14 @@ export function completeness({ rows, indexComplete, indexIncompleteReason, cance
   if (c.failed) reasons.push(`${c.failed} document(s) have no packet because they failed (see Status).`)
   if (c.changed) reasons.push(`${c.changed} document(s) changed while the export ran, so no packet was made for them — export again to include them.`)
   if (c.notInIndex) reasons.push(`${c.notInIndex} document(s) listed on screen are not in the scan index, so no packet was made for them.`)
-  const complete = reasons.length === 0 && c.included === c.total && c.total > 0
-  if (!complete && !reasons.length) reasons.push(c.total === 0 ? 'The scan index lists no documents.' : 'Not every document has a packet.')
-  return { complete, reasons, counts: c }
+  const packetsComplete = reasons.length === 0 && c.included === c.total && c.total > 0
+  if (!packetsComplete && !reasons.length) reasons.push(c.total === 0 ? 'The scan index lists no documents.' : 'Not every document has a packet.')
+  const check = FINAL_CHECK_LABEL[finalCheck?.status] ? finalCheck.status : 'not_performed'
+  const checkSentence = finalCheckSentence(finalCheck, { snapshotBuiltAt })
+  if (checkSentence) reasons.push(checkSentence)
+  const complete = packetsComplete && check === 'verified'
+  const state = complete ? 'complete' : !packetsComplete ? 'incomplete' : check
+  return { complete, state, headline: VERDICT_HEADLINE[state], packetsComplete, finalCheckStatus: check, reasons, counts: c }
 }
 
 /**
@@ -315,7 +384,25 @@ export function completeness({ rows, indexComplete, indexIncompleteReason, cance
  * are ABSOLUTE and only present when a trusted origin was available.
  */
 export function indexHtml({ rows, header }) {
-  const { complete, reasons, counts } = completeness({ rows, ...header })
+  const verdictInfo = completeness({ rows, ...header })
+  const { complete, reasons, counts, state, headline } = verdictInfo
+  const ctx = { header, verdict: verdictInfo }
+  const fc = header.finalCheck || null
+  const before = Array.isArray(fc?.partsBeforeFinalCheck) ? fc.partsBeforeFinalCheck : []
+  const currency = [
+    ['Snapshot digest (the evidence packed)', header.indexDigest],
+    ['Snapshot built (server)', header.snapshotBuiltAt],
+    ['Index read (this browser)', header.indexReadAt],
+    ['Final check status', finalCheckLabel(fc)],
+    ['Final check started', fc?.startedAt],
+    ['Final check at', fc?.checkedAt],
+    ['Final check digest', fc?.digest],
+    ['Documents listed at the final check', fc?.filesTotal],
+    ['Final check note', fc?.status === 'verified' ? "the scan's evidence digest was unchanged from the snapshot" : fc?.reason],
+  ]
+  const partsNote = before.length
+    ? `<p>${esc(before.length === 1 ? `Part ${before[0]} was` : `Parts ${before[0]}–${before[before.length - 1]} were`)} generated and downloaded before the final check and cannot be withdrawn. They, and every packet in this part, were made before the final check and reflect the snapshot named here${state === 'complete' ? ', which the final check found still current' : ', which the final check did NOT show to be current'}.</p>`
+    : `<p>Every packet in this archive was made before the final check and reflects the snapshot named here${state === 'complete' ? ', which the final check found still current' : ', which the final check did NOT show to be current'}.</p>`
   const meta = [
     ['Scan', header.scanId],
     ['Report mode', header.modeLabel],
@@ -329,7 +416,7 @@ export function indexHtml({ rows, header }) {
   const th = INDEX_COLUMNS.map(([h]) => `<th scope="col">${esc(h)}</th>`).join('')
   const body = rows.map((r) => {
     const cells = INDEX_COLUMNS.map(([h, f], i) => {
-      const text = f(r)
+      const text = f(r, ctx)
       if (i === 0) return `<th scope="row">${esc(text)}</th>`
       if (h === 'Packet (in archive)' && r.archivePath && r.status === 'included') {
         return `<td><a href="${esc(archiveHref(r.archivePath))}">${esc(text)}</a></td>`
@@ -340,8 +427,10 @@ export function indexHtml({ rows, header }) {
     return `<tr>${cells}</tr>`
   }).join('\n')
   const verdict = complete
-    ? `<p class="verdict ok"><strong>COMPLETE.</strong> Every one of the ${counts.total} documents in the scan index has a packet in this export${counts.html ? ` (${counts.html} as HTML because the PDF could not be produced)` : ''}.</p>`
-    : `<p class="verdict bad"><strong>INCOMPLETE.</strong> ${counts.included} of ${counts.total} documents have a packet in this export.</p><ul>${reasons.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`
+    ? `<p class="verdict ok"><strong>${esc(headline)}.</strong> Every one of the ${counts.total} documents in the scan index has a packet in this export${counts.html ? ` (${counts.html} as HTML because the PDF could not be produced)` : ''}, and the final check at ${esc(nr(fc?.checkedAt))} found the scan's evidence unchanged from the snapshot.</p>`
+    : state === 'incomplete'
+      ? `<p class="verdict bad"><strong>INCOMPLETE.</strong> ${counts.included} of ${counts.total} documents have a packet in this export.</p><ul>${reasons.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`
+      : `<p class="verdict bad"><strong>${esc(headline)}.</strong> All ${counts.total} documents have a packet, but this archive is a snapshot: it is not shown to match the current evidence.</p><ul>${reasons.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`
   const multi = header.partsTotal > 1
     ? `<p>This export is split into ${esc(header.partsTotal)} ZIP parts. Extract every part into the SAME folder so the packet links below resolve; the Part column says which ZIP holds each packet.</p>`
     : ''
@@ -367,7 +456,11 @@ a{color:#4B3460}a:focus{outline:3px solid #4B3460;outline-offset:2px}
 ${verdict}
 ${multi}
 <p>Counts: ${counts.included} included (${counts.pdf} PDF, ${counts.html} HTML fallback) · ${counts.failed} failed · ${counts.changed} changed during export · ${counts.cancelled} cancelled · ${counts.notInIndex} not in index.</p>
-<p>Numbers read "${NOT_RECORDED}" where the evidence does not record them; they are never shown as 0. Each packet is bound to its per-file facts digest, which the server re-verified when it rendered the PDF.</p>
+<p>Numbers read "${NOT_RECORDED}" where the evidence does not record them; they are never shown as 0. Each packet is bound to its per-file facts digest, which was compared with the snapshot row when the document's facts were read (Facts read at). For a PDF the render route re-verified that digest before drawing it; an HTML fallback was built in the browser and was not re-checked by the server.</p>
+</section>
+<section aria-labelledby="cu"><h2 id="cu">Evidence currency</h2>
+${partsNote}
+<dl>${currency.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(nr(v))}</dd>`).join('')}</dl>
 </section>
 <section aria-labelledby="id"><h2 id="id">Identity</h2>
 <dl>${meta.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(nr(v))}</dd>`).join('')}</dl>

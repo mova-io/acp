@@ -17,11 +17,16 @@ const digestOf = (name, v = 1) => {
   return h.toString(16).padStart(8, '0').repeat(8)
 }
 
-// A paged server over `names`, in the contract-3 shape.
-function server(names, { indexDigest = 'f'.repeat(64), failPageAt = null } = {}) {
+// A paged server over `names`, in the contract-3 shape. `state` is live: a test may move the
+// evidence (digest, document list) mid-export, or make the final fresh read fail or hang.
+function server(initialNames, { indexDigest = 'f'.repeat(64), failPageAt = null } = {}) {
   const calls = []
-  const getScanReportFacts = async (sid, { offset = 0, limit = 200, digest } = {}) => {
-    calls.push({ offset, limit, digest })
+  const state = { names: initialNames, digest: indexDigest, finalRead: null }
+  const getScanReportFacts = async (sid, { offset = 0, limit = 200, digest, signal } = {}) => {
+    calls.push({ offset, limit, digest, signal: signal ?? null })
+    const names = state.names
+    const indexDigest = state.digest
+    if (limit === 1 && state.finalRead) return state.finalRead({ signal })
     if (failPageAt != null && offset >= failPageAt) throw Object.assign(new Error('HTTP 502'), { status: 502 })
     const files = names.slice(offset, offset + limit).map((file) => ({
       file, factsDigest: digestOf(file), assessment: { state: 'assessed' }, score: 70,
@@ -35,8 +40,10 @@ function server(names, { indexDigest = 'f'.repeat(64), failPageAt = null } = {})
       filesTotal: names.length, offset, limit, files, complete: offset + files.length >= names.length,
     }
   }
-  return { getScanReportFacts, calls }
+  return { getScanReportFacts, calls, state }
 }
+// The one fresh final read (contract 7): offset 0, limit 1, no digest.
+const finalReads = (srv) => srv.calls.filter((c) => c.offset === 0 && c.limit === 1 && !c.digest)
 
 const factsFor = (file, v = 1) => ({
   factsDigest: digestOf(file, v), generatedAt: '2026-09-17T10:00:01Z',
@@ -49,6 +56,7 @@ function harness(names, over = {}) {
   const renders = []
   const deps = {
     loadIndex: ({ onProgress }) => loadScanReportFacts(SID, { getScanReportFacts: srv.getScanReportFacts, limit: 200, onProgress }),
+    getScanReportFacts: srv.getScanReportFacts,
     loadScanFiles: async () => names.map((file) => ({ file, status: 'uncertain', score: 70, issues: [] })),
     buildFileData: async ({ file, mode }) => ({ mode, file: file.file, facts: factsFor(file.file), factsDigest: digestOf(file.file) }),
     buildModel: (d) => ({ docTitle: d.file, blocks: [{ k: 'heading', text: d.file }], identity: { factsDigest: d.factsDigest } }),
@@ -80,8 +88,11 @@ describe('exportScanPackets — a large scan across index pages and ZIP parts', 
     const h = harness(names)
     const progress = []
     const res = await exportScanPackets({ scanId: SID, mode: 'full', files: [], deps: h.deps, onProgress: (p) => progress.push(p), partMaxFiles: 200 })
-    expect(h.srv.calls.map((c) => c.offset)).toEqual([0, 200, 400])
-    expect(h.srv.calls.slice(1).every((c) => c.digest === 'f'.repeat(64))).toBe(true)
+    const paging = h.srv.calls.filter((c) => c.limit === 200)
+    expect(paging.map((c) => c.offset)).toEqual([0, 200, 400])
+    expect(paging.slice(1).every((c) => c.digest === 'f'.repeat(64))).toBe(true)
+    expect(finalReads(h.srv)).toHaveLength(1)                  // …and exactly one fresh final read
+    expect(h.srv.calls.at(-1)).toMatchObject({ offset: 0, limit: 1 })
     expect(res.complete).toBe(true)
     expect(res.rows).toHaveLength(450)
     expect(res.rows.every((r) => r.status === 'included' && r.format === 'pdf')).toBe(true)
@@ -231,5 +242,199 @@ describe('exportScanPackets — cancellation', () => {
     const res = await exportScanPackets({ scanId: SID, deps: h.deps, signal: ac.signal })
     expect(res).toMatchObject({ ok: false, cancelled: true })
     expect(h.downloads).toHaveLength(0)
+  })
+})
+
+// ── Contract 7: ONE fresh, uncached read of the scan index after every packet is made ─────────
+// Parent review item 9: the exporter read the index once, packed, and then called the archive
+// complete with no look at whether the evidence was still the snapshot it packed. These pin the
+// final check and what the master index says about it.
+describe('exportScanPackets — the final fresh check (contract 7)', () => {
+  const three = ['a.pdf', 'b.docx', 'c.xlsx']
+  const SNAP = 'f'.repeat(64)
+  const MOVED = 'e'.repeat(64)
+  const clock = () => { let t = Date.parse('2026-09-18T09:00:00Z'); return () => new Date((t += 1000)) }
+  const indexOf = async (h) => {
+    const zip = await readZip(h.downloads.at(-1).blob)
+    return { csv: csvRows(await zip.file('index.csv').async('string')), html: await zip.file('index.html').async('string') }
+  }
+
+  it('(a) unchanged evidence: COMPLETE, verified current at the check time', async () => {
+    const h = harness(three)
+    const res = await exportScanPackets({ scanId: SID, deps: h.deps, now: clock() })
+    expect(finalReads(h.srv)).toHaveLength(1)
+    expect(finalReads(h.srv)[0].signal).toBeInstanceOf(AbortSignal)      // bounded, abortable
+    expect(h.srv.calls.at(-1)).toMatchObject({ offset: 0, limit: 1 })   // after every per-document read
+    expect(res.finalCheck).toMatchObject({ status: 'verified', digest: SNAP, snapshotDigest: SNAP })
+    expect(res.finalCheck.checkedAt).toMatch(/^2026-09-18T09:00:\d\d\.\d{3}Z$/)
+    expect(res.complete).toBe(true)
+    expect(res.ok).toBe(true)
+    expect(res.message).toContain(`verified current at ${res.finalCheck.checkedAt}`)
+    const { csv, html } = await indexOf(h)
+    expect(html).toMatch(/COMPLETE \(verified current\)/)
+    expect(html).toMatch(/Final check status<\/dt><dd>verified current/)
+    expect(html).toContain(res.finalCheck.checkedAt)
+    expect(csv.every((r) => r['Final check'] === 'verified current' && r['Final check digest'] === SNAP)).toBe(true)
+    expect(csv.every((r) => r['Export verdict'] === 'COMPLETE (verified current)')).toBe(true)
+  })
+
+  it('(b) evidence moved after the first packet while the last was pending: not complete, "changed during export", both digests', async () => {
+    const h = harness(three)
+    const inner = h.deps.renderBlob
+    let n = 0
+    h.deps.renderBlob = async (a) => {
+      n += 1
+      // a reviewer decision on a.pdf, recorded after its packet was drawn: the scan digest moves,
+      // but no per-file check can see it any more (a.pdf is done; b and c are untouched)
+      if (n === 1) h.srv.state.digest = MOVED
+      return inner(a)
+    }
+    const res = await exportScanPackets({ scanId: SID, deps: h.deps, concurrency: 1, now: clock() })
+    expect(res.rows.every((r) => r.status === 'included')).toBe(true)   // every packet is still there
+    expect(res.finalCheck).toMatchObject({ status: 'changed', digest: MOVED, snapshotDigest: SNAP })
+    expect(res.complete).toBe(false)
+    expect(res.ok).toBe(false)
+    expect(res.incomplete).toBe(true)
+    expect(res.snapshotOnly).toBe(true)
+    expect(res.message).toMatch(/SNAPSHOT ONLY/)
+    expect(res.message).toMatch(/changed during the export/)
+    expect(res.message).toContain(SNAP)
+    expect(res.message).toContain(MOVED)
+    const { csv, html } = await indexOf(h)
+    expect(html).toMatch(/SNAPSHOT ONLY — EVIDENCE CHANGED DURING EXPORT/)
+    expect(html).not.toMatch(/COMPLETE \(verified current\)/)
+    expect(html).toContain(SNAP)
+    expect(html).toContain(MOVED)
+    expect(html).toContain('2026-09-17T10:00:00Z')                       // the snapshot's own time
+    expect(csv.every((r) => r['Final check'] === 'evidence changed during export' && r['Final check digest'] === MOVED)).toBe(true)
+    expect(csv[0]['Snapshot built at']).toBe('2026-09-17T10:00:00Z')
+    // the standalone index says the same
+    expect(await res.downloads[0].blob.text()).toMatch(/SNAPSHOT ONLY — EVIDENCE CHANGED DURING EXPORT/)
+  })
+
+  it('(c) a document added or deleted after the snapshot: the new document count is stated', async () => {
+    const cases = [
+      [(s) => { s.names = [...three, 'late.pdf'] }, /now lists 4 documents; the snapshot listed 3/],
+      [(s) => { s.names = three.slice(0, 2) }, /now lists 2 documents; the snapshot listed 3/],
+    ]
+    for (const [change, want] of cases) {
+      const h = harness(three)
+      const inner = h.deps.renderBlob
+      h.deps.renderBlob = async (a) => { change(h.srv.state); h.srv.state.digest = MOVED; return inner(a) }
+      const res = await exportScanPackets({ scanId: SID, deps: h.deps, now: clock() })
+      expect(res.finalCheck.status).toBe('changed')
+      expect(res.complete).toBe(false)
+      expect(res.message).toMatch(want)
+      expect((await indexOf(h)).html).toMatch(want)
+    }
+  })
+
+  it('(d) the final read fails on the network: "final check failed", and the archive is still downloaded', async () => {
+    const h = harness(three)
+    h.srv.state.finalRead = async () => { throw new TypeError('Failed to fetch') }
+    const res = await exportScanPackets({ scanId: SID, deps: h.deps, now: clock() })
+    expect(res.finalCheck).toMatchObject({ status: 'failed', digest: null })
+    expect(res.finalCheck.reason).toMatch(/Failed to fetch/)
+    expect(res.complete).toBe(false)
+    expect(res.message).toMatch(/SNAPSHOT ONLY/)
+    expect(res.message).toMatch(/final check failed/i)
+    expect(h.downloads).toHaveLength(1)
+    expect(res.rows.every((r) => r.status === 'included')).toBe(true)
+    expect(res.downloads).toHaveLength(2)
+    const { html, csv } = await indexOf(h)
+    expect(html).toMatch(/SNAPSHOT ONLY — FINAL CHECK FAILED/)
+    expect(csv[0]['Final check']).toBe('final check failed')
+    expect(csv[0]['Final check digest']).toBe('not recorded')
+  })
+
+  it('(d) the final read hangs: it is abandoned after the bounded timeout (20 s), never polled', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const h = harness(three)
+      let seen = null
+      h.srv.state.finalRead = ({ signal }) => { seen = signal; return new Promise(() => {}) }
+      const res = await exportScanPackets({
+        scanId: SID, deps: h.deps, now: clock(),
+        onProgress: (p) => { if (p.phase === 'final-check') queueMicrotask(() => vi.advanceTimersByTime(20000)) },
+      })
+      expect(res.finalCheck.status).toBe('failed')
+      expect(res.finalCheck.reason).toMatch(/did not answer within 20 s/)
+      expect(seen?.aborted).toBe(true)                                   // the request itself was aborted
+      expect(finalReads(h.srv)).toHaveLength(1)                          // one attempt, no retry loop
+      expect(res.complete).toBe(false)
+      expect(h.downloads).toHaveLength(1)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('(e) HTML fallback after a transport failure never stands in for the final check', async () => {
+    const htmlOnly = async (a) => ({ ok: false, status: 0, fallback: 'html', format: 'html', htmlBlob: new Blob([`<html>${a.file}</html>`], { type: 'text/html' }), message: 'The PDF service could not be reached, so the report was produced as accessible HTML instead of PDF.' })
+    // the network is down for the final read too
+    const h = harness(three, { deps: { renderBlob: htmlOnly } })
+    h.srv.state.finalRead = async () => { throw new TypeError('Failed to fetch') }
+    const res = await exportScanPackets({ scanId: SID, deps: h.deps, now: clock() })
+    expect(res.rows.every((r) => r.status === 'included' && r.format === 'html')).toBe(true)
+    expect(res.complete).toBe(false)
+    expect(res.finalCheck.status).toBe('failed')
+    const { csv } = await indexOf(h)
+    for (const r of csv) {
+      expect(r['Server re-verified at render']).toMatch(/^no — HTML fallback/)
+      expect(r['Facts read at']).toMatch(/^2026-09-18T09:/)             // when THIS document's facts were read
+      expect(r['Per-file facts digest']).toBe(digestOf(r['Original name']))
+    }
+    // and an exporter with no way to re-read the index cannot call HTML-only packets current either
+    const h2 = harness(three, { deps: { renderBlob: htmlOnly, getScanReportFacts: undefined } })
+    const res2 = await exportScanPackets({ scanId: SID, deps: h2.deps, now: clock() })
+    expect(res2.finalCheck.status).toBe('not_performed')
+    expect(res2.complete).toBe(false)
+    expect((await indexOf(h2)).html).toMatch(/SNAPSHOT ONLY — FINAL CHECK NOT PERFORMED/)
+    // PDFs the server accepted say so
+    const h3 = harness(three)
+    await exportScanPackets({ scanId: SID, deps: h3.deps, now: clock() })
+    expect((await indexOf(h3)).csv[0]['Server re-verified at render']).toMatch(/^yes/)
+  })
+
+  it('(f) a cancelled export does not run (or wait on) the final check, and says not_performed', async () => {
+    const names = Array.from({ length: 12 }, (_, i) => `doc-${i}.pdf`)
+    const ac = new AbortController()
+    const h = harness(names)
+    const inner = h.deps.renderBlob
+    let n = 0
+    h.deps.renderBlob = async (a) => { if (++n === 3) ac.abort(); return inner(a) }
+    const res = await exportScanPackets({ scanId: SID, deps: h.deps, signal: ac.signal, concurrency: 1, now: clock() })
+    expect(res.cancelled).toBe(true)
+    expect(res.finalCheck.status).toBe('not_performed')
+    expect(res.finalCheck.reason).toMatch(/cancelled/)
+    expect(finalReads(h.srv)).toHaveLength(0)
+    expect(res.message).toMatch(/final check not performed/i)
+    expect((await indexOf(h)).html).toMatch(/Final check status<\/dt><dd>final check not performed/)
+  })
+
+  it('(f) cancel while the final read is in flight: abandoned at once, not awaited', async () => {
+    const ac = new AbortController()
+    const h = harness(three)
+    h.srv.state.finalRead = () => new Promise(() => {})                // would hang forever
+    const res = await exportScanPackets({
+      scanId: SID, deps: h.deps, signal: ac.signal, now: clock(),
+      onProgress: (p) => { if (p.phase === 'final-check') queueMicrotask(() => ac.abort()) },
+    })
+    expect(res.finalCheck.status).toBe('not_performed')
+    expect(res.finalCheck.reason).toMatch(/cancelled while the final check was running/)
+    expect(res.complete).toBe(false)
+    expect(h.downloads).toHaveLength(1)
+  })
+
+  it('parts downloaded before the final check are named in the final index as snapshot evidence', async () => {
+    const names = Array.from({ length: 5 }, (_, i) => `p${i}.pdf`)
+    const h = harness(names)
+    const inner = h.deps.renderBlob
+    h.deps.renderBlob = async (a) => { h.srv.state.digest = MOVED; return inner(a) }
+    const res = await exportScanPackets({ scanId: SID, deps: h.deps, partMaxFiles: 2, concurrency: 1, now: clock() })
+    expect(res.parts.map((p) => p.n)).toEqual([1, 2, 3])
+    expect(res.finalCheck.partsBeforeFinalCheck).toEqual([1, 2])
+    const { html } = await indexOf(h)
+    expect(html).toMatch(/Parts 1–2 were generated and downloaded before the final check/)
+    expect(html).toMatch(/reflect the snapshot/)
+    const first = await readZip(h.downloads[0].blob)
+    expect(await first.file('README-part-1.txt').async('string')).toMatch(/master index .*states whether/i)
   })
 })

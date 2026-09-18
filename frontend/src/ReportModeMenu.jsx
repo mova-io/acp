@@ -50,6 +50,10 @@ export default function ReportModeMenu({ label = 'Report', formats = [], disable
       const downloads = Array.isArray(res?.downloads) ? res.downloads : null
       if (res && res.cancelled) {
         setStatus({ ok: false, text: `${modeLabel} (${fmt.label}) was cancelled. ${res.message || ''}`.trim(), downloads })
+      } else if (res && res.snapshotOnly) {
+        // Every document was exported, but the final fresh check could not confirm the evidence
+        // is still current (it changed, or the check failed). Not "incomplete" — not "current".
+        setStatus({ ok: false, text: `${modeLabel} (${fmt.label}) was downloaded as a SNAPSHOT, not verified current. ${res.message || ''}`.trim(), downloads })
       } else if (res && res.incomplete) {
         // Something WAS downloaded, but it does not cover everything it was asked to. Neither
         // "generated" nor "not generated" is true; say what it is.

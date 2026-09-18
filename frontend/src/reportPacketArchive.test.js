@@ -5,7 +5,7 @@ import { describe, it, expect } from 'vitest'
 import {
   safeSegment, safeStem, assignArchiveStems, packetPath, archiveHref, pathSegments,
   indexCsv, indexHtml, completeness, statusLabel, comparisonText, reviewsText, extractionConflicts,
-  MAX_SEGMENT_BYTES, MAX_PATH_CHARS, PACKET_ROOT, LONG_PATH_DIR, NOT_RECORDED,
+  serverVerifiedText, MAX_SEGMENT_BYTES, MAX_PATH_CHARS, PACKET_ROOT, LONG_PATH_DIR, NOT_RECORDED,
 } from './reportPacketArchive.js'
 
 const utf8 = (s) => new TextEncoder().encode(s).length
@@ -180,6 +180,13 @@ describe('master index', () => {
     ...over,
   })
 
+  const csvHead = (csv) => {
+    const [head, line] = csv.replace(/^﻿/, '').trim().split('\r\n')
+    const cols = head.split(',').map((c) => c.replace(/"/g, ''))
+    const cells = line.match(/"(?:[^"]|"")*"/g).map((c) => c.slice(1, -1))
+    return Object.fromEntries(cols.map((h, i) => [h, cells[i]]))
+  }
+
   it('a null count is "not recorded", never 0', () => {
     const csv = indexCsv([row()])
     const [head, line] = csv.replace(/^\ufeff/, '').trim().split('\r\n')
@@ -212,7 +219,8 @@ describe('master index', () => {
   })
 
   it('never calls an export complete when a document is missing, and says exactly why', () => {
-    const header = { indexComplete: true, indexIncompleteReason: null, cancelled: false }
+    const verified = { status: 'verified', snapshotDigest: 'b'.repeat(64), digest: 'b'.repeat(64), checkedAt: '2026-09-18T09:00:05.000Z', reason: null }
+    const header = { indexComplete: true, indexIncompleteReason: null, cancelled: false, finalCheck: verified }
     expect(completeness({ rows: [row(), row({ file: 'b', format: 'html' })], ...header }).complete).toBe(true)
     const partial = completeness({ rows: [row(), row({ file: 'b', status: 'failed', reason: 'x' })], ...header })
     expect(partial.complete).toBe(false)
@@ -224,6 +232,35 @@ describe('master index', () => {
     expect(cancelled.complete).toBe(false)
     expect(cancelled.reasons[0]).toMatch(/cancelled: 1 document/)
     expect(completeness({ rows: [], ...header }).complete).toBe(false)
+  })
+
+  it('every packet present is still not COMPLETE unless the final check verified the snapshot (contract 7)', () => {
+    const base = { indexComplete: true, indexIncompleteReason: null, cancelled: false, snapshotBuiltAt: '2026-09-17T10:00:00Z' }
+    const rows = [row(), row({ file: 'b' })]
+    // no check recorded is no check made
+    const none = completeness({ rows, ...base })
+    expect(none).toMatchObject({ complete: false, state: 'not_performed', packetsComplete: true, headline: 'SNAPSHOT ONLY — FINAL CHECK NOT PERFORMED' })
+    const changed = completeness({ rows, ...base, finalCheck: { status: 'changed', snapshotDigest: 'b'.repeat(64), digest: 'e'.repeat(64), checkedAt: 't1', reason: 'The scan index now lists 3 documents; the snapshot listed 2. This check does not say which documents changed.' } })
+    expect(changed).toMatchObject({ complete: false, state: 'changed', headline: 'SNAPSHOT ONLY — EVIDENCE CHANGED DURING EXPORT' })
+    const said = changed.reasons.join(' ')
+    expect(said).toContain('b'.repeat(64))
+    expect(said).toContain('e'.repeat(64))
+    expect(said).toContain('2026-09-17T10:00:00Z')
+    expect(said).toMatch(/now lists 3 documents; the snapshot listed 2/)
+    expect(completeness({ rows, ...base, finalCheck: { status: 'failed', reason: 'the scan index did not answer within 20 s' } }))
+      .toMatchObject({ complete: false, state: 'failed', headline: 'SNAPSHOT ONLY — FINAL CHECK FAILED' })
+    // a missing packet outranks the check: INCOMPLETE, with the check's sentence among the reasons
+    const both = completeness({ rows: [row(), row({ file: 'b', status: 'failed', reason: 'x' })], ...base, finalCheck: { status: 'failed', reason: 'offline' } })
+    expect(both.state).toBe('incomplete')
+    expect(both.reasons.join(' ')).toMatch(/final check failed: offline/i)
+    // export-level CSV columns read "not recorded" without a header, never a verdict
+    const bare = csvHead(indexCsv(rows))
+    expect(bare['Export verdict']).toBe(NOT_RECORDED)
+    expect(bare['Final check']).toBe(NOT_RECORDED)
+    // the server-verification column separates PDF from HTML fallback
+    expect(serverVerifiedText(row())).toMatch(/^yes/)
+    expect(serverVerifiedText(row({ format: 'html' }))).toMatch(/^no — HTML fallback/)
+    expect(serverVerifiedText(row({ status: 'failed' }))).toBe('no packet')
   })
 
   it('index.html is a standalone accessible page with packet links and an honest verdict', () => {
