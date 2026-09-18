@@ -46,6 +46,14 @@ describe('Quarterly governance report download from Overview', () => {
     expect(downloads[0].filename).toBe('mova-quarterly-governance-report.pdf')
     expect(new TextDecoder().decode(downloads[0].bytes).startsWith('%PDF-')).toBe(true)
   })
+  it('says on its own first page that this browser-drawn PDF is not tagged', async () => {
+    const { container } = await clickReport()
+    expect(downloads).toHaveLength(1)
+    const text = new TextDecoder('latin1').decode(downloads[0].bytes)
+    expect(text).toContain('About this PDF: it is drawn in your browser and is not tagged')
+    // …and the menu says so before anyone downloads it
+    expect(container.querySelector('#rep-gov-hint').textContent).toMatch(/not tagged for assistive technology/)
+  })
   it('shows an export error and allows a successful retry', async () => {
     const successfulSave = jsPDF.API.save
     jsPDF.API.save = function () { throw new Error('download failed') }

@@ -232,6 +232,65 @@ def test_ownership_is_still_decided_before_the_digest(client):
     assert post(client, sid="scan-other", body=_body(factsDigest="e" * 64)).status_code == 404
 
 
+# ── absolute links: ACP_PUBLIC_URL, else the request's own origin, else text only ─────────────
+
+EVIDENCE_REL = "/?view=evidence&scan=scan-1&file=report.docx&finding=abc123"
+
+
+def _linked_body(client):
+    blocks = [{"k": "heading", "text": "Remaining work"},
+              {"k": "findingCard", "id": "f-1", "title": "1.4.3 · Contrast", "criterion": "1.4.3",
+               "location": {"label": "Page 3", "page": 3, "href": EVIDENCE_REL},
+               "description": "Low contrast", "status": "open"}]
+    return fresh(client.acp_store, model=_model(blocks=blocks), mode="full")
+
+
+def _uris(pdf_bytes):
+    out = []
+    with pikepdf.open(io.BytesIO(pdf_bytes)) as doc:
+        for page in doc.pages:
+            for annot in page.get("/Annots") or []:
+                action = annot.get("/A")
+                if action is not None and action.get("/URI") is not None:
+                    out.append(str(action.URI))
+    return out
+
+
+def test_the_configured_public_url_anchors_evidence_links(client):
+    r = post(client, body=_linked_body(client))
+    assert r.status_code == 200, r.text
+    assert "https://acp.example.com" + EVIDENCE_REL in _uris(r.content)
+
+
+def test_without_a_public_url_the_requests_own_https_origin_anchors_them(client, monkeypatch):
+    import core
+    monkeypatch.setattr(core, "PUBLIC_URL", "", raising=False)
+    r = post(client, body=_linked_body(client),
+             headers={"Host": "acp-app.westus2.azurecontainerapps.io", "X-Forwarded-Proto": "https",
+                      "Origin": "https://acp-app.westus2.azurecontainerapps.io"})
+    assert r.status_code == 200, r.text
+    uris = _uris(r.content)
+    assert "https://acp-app.westus2.azurecontainerapps.io" + EVIDENCE_REL in uris, uris
+    assert not any(u.startswith("/") for u in uris)
+
+
+@pytest.mark.parametrize("headers", [
+    # plain http, not loopback: not a trusted origin
+    {"Host": "acp.internal", "X-Forwarded-Proto": "http"},
+    # the browser says the app lives somewhere else: this server cannot vouch for that origin
+    {"Host": "api.example.com", "X-Forwarded-Proto": "https", "Origin": "https://app.example.com"},
+])
+def test_with_no_trusted_origin_the_location_is_printed_unlinked(client, monkeypatch, headers):
+    import core
+    monkeypatch.setattr(core, "PUBLIC_URL", "", raising=False)
+    r = post(client, body=_linked_body(client), headers=headers)
+    assert r.status_code == 200, r.text
+    uris = _uris(r.content)
+    assert not any("view=evidence" in u for u in uris), uris
+    from test_report_render import pdftext
+    assert "Page 3" in pdftext(r.content)
+
+
 def test_an_unavailable_facts_module_refuses_rather_than_skipping_the_check(client, monkeypatch):
     """A check that silently passes when its dependency is missing is worse than no check: it
     reports success for the exact case it exists to catch."""

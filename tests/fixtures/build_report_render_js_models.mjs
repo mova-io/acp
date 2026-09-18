@@ -156,7 +156,10 @@ function scaledUp(facts, findings = 12, changes = 30) {
       ruleId: seed.ruleId,
       instanceKey: `docx:image:${i}`,
       detail: `${seed.detail} (instance ${i + 1})`,
-      location: { ...(seed.location || {}), label: `docx:image:${i}`, page: (i % 9) + 1 },
+      // The shape report_facts._location emits (contract 1) for a Word image: a human label, the
+      // raw detector string kept verbatim, and NO page — a Word object does not map to a page.
+      location: { label: `Image ${i + 1}`, kind: 'object', page: null, slide: null, sheet: null, cell: null,
+        objectId: `image:${i + 1}`, element: `docx:image:${i + 1}`, raw: `docx:image:${i + 1}` },
     }
   })
   out.savedChanges = Array.from({ length: changes }, (_, i) => {
@@ -252,6 +255,39 @@ function adapt(facts, mode) {
   }
 }
 
+/**
+ * One finding as the scanner records it for a document of this format. Every fourth one is
+ * document-wide with no locator (3.1.1 language), which is real and must read "Location not
+ * recorded" — the others carry the detector's own location string.
+ */
+function realisticIssue(file, i) {
+  const ext = String(file).split('.').pop().toLowerCase()
+  if (i % 4 === 3) {
+    return { rule_id: `${ext.toUpperCase()}-LANG-001`, wcag: 'SC_3_1_1', severity: 'SERIOUS',
+      detail: 'The document language is not set.', page: null, location: null }
+  }
+  const n = i + 1
+  if (ext === 'pdf') {
+    return [
+      { rule_id: 'PDF-CONTRAST-001', wcag: 'SC_1_4_3', severity: 'SERIOUS', detail: `Grey text on white measures 2.9:1 on page ${n + 1}.`, page: n + 1, location: null },
+      { rule_id: 'PDF-ALT-001', wcag: 'SC_1_1_1', severity: 'SERIOUS', detail: `Figure ${n} has no alternative text.`, page: n, location: `pdf:fig:${n}:0` },
+      { rule_id: 'PDF-LINK-002', wcag: 'SC_2_4_4', severity: 'MODERATE', detail: 'Link text "click here" does not say where it goes.', page: n, location: null },
+    ][i % 3]
+  }
+  if (ext === 'xlsx') {
+    return [
+      { rule_id: 'XLSX-HEADER-001', wcag: 'SC_1_3_1', severity: 'MODERATE', detail: 'The table on this sheet has no header row.', page: null, location: `xlsx:sheet:Budget:cell:B${n + 2}` },
+      { rule_id: 'XLSX-ALT-001', wcag: 'SC_1_1_1', severity: 'SERIOUS', detail: `Chart ${n} has no alternative text.`, page: null, location: `xlsx:sheet:Summary:chart:${n}` },
+      { rule_id: 'XLSX-CONTRAST-001', wcag: 'SC_1_4_3', severity: 'SERIOUS', detail: 'Cell text contrast is 3.1:1.', page: null, location: `xlsx:sheet:Budget:cell:D${n + 4}` },
+    ][i % 3]
+  }
+  return [
+    { rule_id: 'DOCX-ALT-001', wcag: 'SC_1_1_1', severity: 'SERIOUS', detail: `Image ${n} has no description.`, page: null, location: `docx:image:${n}` },
+    { rule_id: 'DOCX-HEAD-002', wcag: 'SC_1_3_1', severity: 'MODERATE', detail: 'A paragraph styled to look like a heading is not marked as one.', page: null, location: `docx:paragraph:${12 + n}` },
+    { rule_id: 'DOCX-LINK-001', wcag: 'SC_2_4_4', severity: 'MODERATE', detail: 'Link text "here" does not describe its destination.', page: null, location: `docx:hyperlink:paragraph:${30 + n}` },
+  ][i % 3]
+}
+
 /** Scan facts → buildScanReportModel's argument. */
 function adaptScan(facts, mode) {
   const files = (facts.files || []).map((f) => ({
@@ -260,10 +296,11 @@ function adaptScan(facts, mode) {
     score: f.score,
     compliant: f.findingsOpen === 0,
     remediated_at: (f.currentArtifact && f.currentArtifact.kind === 'corrected') ? '2026-09-17T09:06:00+00:00' : null,
-    issues: Array.from({ length: f.findingsOpen ?? 0 }, (_, i) => ({
-      criterion: ['1.1.1', '1.4.3', '2.4.4'][i % 3], severity: 'SERIOUS',
-      detail: `Finding ${i + 1} recorded on ${f.file}.`,
-    })),
+    // The keys a real scan's file record carries (store.get_scan: rule_id, wcag, severity, detail,
+    // page, location) with detector-shaped locations for the document's format. An earlier
+    // version wrote `criterion`, which no builder reads, so every scan card rendered as "WCAG
+    // unknown · Location not recorded" and the renderer tests never saw a real criterion.
+    issues: Array.from({ length: f.findingsOpen ?? 0 }, (_, i) => realisticIssue(f.file, i)),
   }))
   const t = facts.totals || {}
   return {
