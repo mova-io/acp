@@ -611,7 +611,11 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
       if (ownsRelease(context)) setReleaseAnnouncement('The updated copy is still publishing safely in the background. You may leave this page and return later.')
       return 'pending'
     } finally {
-      if (ownsRelease(context)) { setRepublishing(false); setReportsRefresh((value) => value + 1) }
+      // A completed automatic plan has stopped polling, so its batch_progress ("Copies delivered")
+      // would keep the pre-republish count. Re-read it once, like the reports, when this settles.
+      if (ownsRelease(context)) {
+        setRepublishing(false); setReportsRefresh((value) => value + 1); setAutomaticStatusRefresh((value) => value + 1)
+      }
     }
   }
   const partialReleaseOptions = (fileNames) => allowRemainingIssues ? {

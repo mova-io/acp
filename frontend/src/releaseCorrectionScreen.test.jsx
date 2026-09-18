@@ -187,6 +187,28 @@ describe('Production screen: UTSW_Discharge_Summary.docx published 02701e61, cur
     expect(onPublish).toHaveBeenCalledExactlyOnceWith(name)
   })
 
+  it('re-reads a COMPLETED plan after the republish settles, so "Copies delivered" becomes 1 of 1', async () => {
+    // A completed plan stops polling. The backend counts the delivered current receipt, but the
+    // page only learns that if it asks again once the republish settles — otherwise the tile the
+    // owner complained about keeps saying 0 of 1 next to a row that says Delivered.
+    getReleaseStatus.mockResolvedValue(staleStatus)
+    const c = await mountScreen()
+    expect(tile(c, 'Copies delivered')).toBe('0')
+    const readsBefore = getAutomaticRelease.mock.calls.length
+    const deliveredBatch = { ...batch, delivered: 1, remaining: 0, status: 'completed',
+      buckets: { ...batch.buckets, published: 1, unclassified: 0 }, file_membership: { [name]: 'published' } }
+    getAutomaticRelease.mockResolvedValue({ authorization: { ...authorization, batch_progress: deliveredBatch }, run_id: 'run' })
+    getReleaseStatus.mockResolvedValue({ release_id: 'rel1', roots: [],
+      documents: [receipt({ artifact_digest: `sha256:${V2}`, published_artifact_digest: `sha256:${V2}`, publication_state: 'current', published_at: '2026-09-18T14:40:00Z' })],
+      publication: { state: 'current', out_of_date: [], identity_unknown: [], can_republish: false, republish_blocked_reason: null } })
+    republishRelease.mockResolvedValue({ result: 'republished', republished: [name], refused: [] })
+    await click(button(c, 'Publish updated copy and refresh reports'))
+    await flush()
+    expect(tile(c, 'Copies delivered')).toBe('1')
+    expect(getAutomaticRelease.mock.calls.length).toBeGreaterThan(readsBefore)
+    expect(c.querySelector('[aria-label="Automatic publication status"]').textContent).toContain('1 of 1 authorized copies delivered')
+  })
+
   it('a refused republish on this screen shows the reason without polling or "publishing"', async () => {
     getReleaseStatus.mockResolvedValue(staleStatus)
     const c = await mountScreen()
