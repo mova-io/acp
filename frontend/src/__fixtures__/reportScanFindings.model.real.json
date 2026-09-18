@@ -16,9 +16,9 @@
   "generatedAt": "2026-09-18T12:00:00.000Z",
   "platformVersion": null,
   "targetLevel": "AA",
-  "factsDigest": "a50c931eee2dc646077582e7278357f4b0681fab1e36f74ecb7021667d78ca43"
+  "factsDigest": "1c7ce35801f120133d99b6aad55d4097899644095352a276d6e2fbf872cf1b7f"
  },
- "factsDigest": "a50c931eee2dc646077582e7278357f4b0681fab1e36f74ecb7021667d78ca43",
+ "factsDigest": "1c7ce35801f120133d99b6aad55d4097899644095352a276d6e2fbf872cf1b7f",
  "targetLevel": "AA",
  "footerVersion": null,
  "footerGenerated": "September 18, 2026, 12:00 PM UTC",
@@ -217,7 +217,7 @@
   },
   {
    "k": "text",
-   "text": "Re-assessing a document inside the same scan replaces its earlier finding list, so changes within one scan are not compared.",
+   "text": "Re-assessments inside this scan: 5 have no replaced assessment recorded, which is not evidence that none was replaced.",
    "o": {
     "size": 9,
     "color": "#6B6670"

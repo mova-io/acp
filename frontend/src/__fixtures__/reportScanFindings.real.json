@@ -52,7 +52,7 @@
     "resolved": [],
     "status": "no_baseline"
    },
-   "factsDigest": "8189d70433e715bb734fcba4aeb9334641118db4d8f85760d8cbc5086910a7af",
+   "factsDigest": "52fc3a8048a09aaaac165beafe1e08697467bdedce0c55b1508db8b71e019aca",
    "factsVersion": 1,
    "findings": [
     {
@@ -151,9 +151,15 @@
    },
    "previous": null,
    "previousReason": "no earlier assessment of this same document under the same rubric and scope is recorded",
-   "priorDecisions": null,
-   "priorDecisionsBounds": null,
-   "priorDecisionsReason": "Decisions recorded against earlier scans of this document are not shown: ACP cannot yet list them by document. They are not carried forward to this scan's changes, and their absence here is not evidence that there were none.",
+   "priorDecisions": [],
+   "priorDecisionsBounds": {
+    "limit": 200,
+    "returned": 0,
+    "total": 0,
+    "truncated": false,
+    "unreadable": 0
+   },
+   "priorDecisionsReason": "no decision is recorded against an earlier scan of this document",
    "reviews": {},
    "sameScanHistory": {
     "baseline": null,
@@ -161,14 +167,14 @@
     "notComparable": null,
     "notComparableByCriterion": [],
     "persisting": [],
-    "reason": "ACP cannot yet read an assessment that a re-assessment replaced inside this scan, so changes within one scan are not compared; this is not evidence that the document was assessed only once",
-    "reasonCode": "reader_unavailable",
+    "reason": "no replaced assessment of this document was recorded in this scan — it was assessed once here, or re-assessed before ACP began recording replaced assessments; this is not evidence that there was no earlier one",
+    "reasonCode": "not_recorded",
     "renamed": null,
     "reopened": null,
     "reopenedReason": null,
     "resolved": [],
     "snapshot": null,
-    "status": "not_available"
+    "status": "not_recorded"
    },
    "savedChanges": [],
    "savedChangesComplete": true,
@@ -227,7 +233,7 @@
     "resolved": [],
     "status": "no_baseline"
    },
-   "factsDigest": "c9efac8fdb5d60d4209a4c380b2f41012c280cf1bc2630aeb8bd9b30431ae297",
+   "factsDigest": "5986453f94d5836d874795f6bffd04b3d1df99deab9f0a66c7a35d310c078f27",
    "factsVersion": 1,
    "findings": [
     {
@@ -286,9 +292,15 @@
    },
    "previous": null,
    "previousReason": "no earlier assessment of this same document under the same rubric and scope is recorded",
-   "priorDecisions": null,
-   "priorDecisionsBounds": null,
-   "priorDecisionsReason": "Decisions recorded against earlier scans of this document are not shown: ACP cannot yet list them by document. They are not carried forward to this scan's changes, and their absence here is not evidence that there were none.",
+   "priorDecisions": [],
+   "priorDecisionsBounds": {
+    "limit": 200,
+    "returned": 0,
+    "total": 0,
+    "truncated": false,
+    "unreadable": 0
+   },
+   "priorDecisionsReason": "no decision is recorded against an earlier scan of this document",
    "reviews": {},
    "sameScanHistory": {
     "baseline": null,
@@ -296,14 +308,14 @@
     "notComparable": null,
     "notComparableByCriterion": [],
     "persisting": [],
-    "reason": "ACP cannot yet read an assessment that a re-assessment replaced inside this scan, so changes within one scan are not compared; this is not evidence that the document was assessed only once",
-    "reasonCode": "reader_unavailable",
+    "reason": "no replaced assessment of this document was recorded in this scan — it was assessed once here, or re-assessed before ACP began recording replaced assessments; this is not evidence that there was no earlier one",
+    "reasonCode": "not_recorded",
     "renamed": null,
     "reopened": null,
     "reopenedReason": null,
     "resolved": [],
     "snapshot": null,
-    "status": "not_available"
+    "status": "not_recorded"
    },
    "savedChanges": [],
    "savedChangesComplete": true,
@@ -362,7 +374,7 @@
     "resolved": [],
     "status": "no_baseline"
    },
-   "factsDigest": "123c42526bc2d6892e3a03fa073d3ddf30e86841fb0546cd0116790e8ff859cc",
+   "factsDigest": "081ada43e143b62fd653a2596d675e588f6cadf6516c42ce7608d9128ed1a2f6",
    "factsVersion": 1,
    "findings": [
     {
@@ -421,9 +433,15 @@
    },
    "previous": null,
    "previousReason": "no earlier assessment of this same document under the same rubric and scope is recorded",
-   "priorDecisions": null,
-   "priorDecisionsBounds": null,
-   "priorDecisionsReason": "Decisions recorded against earlier scans of this document are not shown: ACP cannot yet list them by document. They are not carried forward to this scan's changes, and their absence here is not evidence that there were none.",
+   "priorDecisions": [],
+   "priorDecisionsBounds": {
+    "limit": 200,
+    "returned": 0,
+    "total": 0,
+    "truncated": false,
+    "unreadable": 0
+   },
+   "priorDecisionsReason": "no decision is recorded against an earlier scan of this document",
    "reviews": {},
    "sameScanHistory": {
     "baseline": null,
@@ -431,14 +449,14 @@
     "notComparable": null,
     "notComparableByCriterion": [],
     "persisting": [],
-    "reason": "ACP cannot yet read an assessment that a re-assessment replaced inside this scan, so changes within one scan are not compared; this is not evidence that the document was assessed only once",
-    "reasonCode": "reader_unavailable",
+    "reason": "no replaced assessment of this document was recorded in this scan — it was assessed once here, or re-assessed before ACP began recording replaced assessments; this is not evidence that there was no earlier one",
+    "reasonCode": "not_recorded",
     "renamed": null,
     "reopened": null,
     "reopenedReason": null,
     "resolved": [],
     "snapshot": null,
-    "status": "not_available"
+    "status": "not_recorded"
    },
    "savedChanges": [],
    "savedChangesComplete": true,
@@ -497,7 +515,7 @@
     "resolved": [],
     "status": "no_baseline"
    },
-   "factsDigest": "83f8afd620a3ac2a93f1238dbbec90699e7c19c297bba3b76c0523cab1762735",
+   "factsDigest": "d2939c44776de2aaa61b2561c7bbdb2dca2205bbc1ef97aa74de5d47e3213054",
    "factsVersion": 1,
    "findings": [
     {
@@ -556,9 +574,15 @@
    },
    "previous": null,
    "previousReason": "no earlier assessment of this same document under the same rubric and scope is recorded",
-   "priorDecisions": null,
-   "priorDecisionsBounds": null,
-   "priorDecisionsReason": "Decisions recorded against earlier scans of this document are not shown: ACP cannot yet list them by document. They are not carried forward to this scan's changes, and their absence here is not evidence that there were none.",
+   "priorDecisions": [],
+   "priorDecisionsBounds": {
+    "limit": 200,
+    "returned": 0,
+    "total": 0,
+    "truncated": false,
+    "unreadable": 0
+   },
+   "priorDecisionsReason": "no decision is recorded against an earlier scan of this document",
    "reviews": {},
    "sameScanHistory": {
     "baseline": null,
@@ -566,14 +590,14 @@
     "notComparable": null,
     "notComparableByCriterion": [],
     "persisting": [],
-    "reason": "ACP cannot yet read an assessment that a re-assessment replaced inside this scan, so changes within one scan are not compared; this is not evidence that the document was assessed only once",
-    "reasonCode": "reader_unavailable",
+    "reason": "no replaced assessment of this document was recorded in this scan — it was assessed once here, or re-assessed before ACP began recording replaced assessments; this is not evidence that there was no earlier one",
+    "reasonCode": "not_recorded",
     "renamed": null,
     "reopened": null,
     "reopenedReason": null,
     "resolved": [],
     "snapshot": null,
-    "status": "not_available"
+    "status": "not_recorded"
    },
    "savedChanges": [],
    "savedChangesComplete": true,
@@ -632,7 +656,7 @@
     "resolved": [],
     "status": "no_baseline"
    },
-   "factsDigest": "66020a3d6ecbec24af74c8dd32014c2dac2516505edcc1f2cc756192324cc2e9",
+   "factsDigest": "39be2c9a43f1d79ec60367bd1d14f077c97a7acbb76f8de8d6f2bfdef3af3e61",
    "factsVersion": 1,
    "findings": [
     {
@@ -716,9 +740,15 @@
    },
    "previous": null,
    "previousReason": "no earlier assessment of this same document under the same rubric and scope is recorded",
-   "priorDecisions": null,
-   "priorDecisionsBounds": null,
-   "priorDecisionsReason": "Decisions recorded against earlier scans of this document are not shown: ACP cannot yet list them by document. They are not carried forward to this scan's changes, and their absence here is not evidence that there were none.",
+   "priorDecisions": [],
+   "priorDecisionsBounds": {
+    "limit": 200,
+    "returned": 0,
+    "total": 0,
+    "truncated": false,
+    "unreadable": 0
+   },
+   "priorDecisionsReason": "no decision is recorded against an earlier scan of this document",
    "reviews": {},
    "sameScanHistory": {
     "baseline": null,
@@ -726,14 +756,14 @@
     "notComparable": null,
     "notComparableByCriterion": [],
     "persisting": [],
-    "reason": "ACP cannot yet read an assessment that a re-assessment replaced inside this scan, so changes within one scan are not compared; this is not evidence that the document was assessed only once",
-    "reasonCode": "reader_unavailable",
+    "reason": "no replaced assessment of this document was recorded in this scan — it was assessed once here, or re-assessed before ACP began recording replaced assessments; this is not evidence that there was no earlier one",
+    "reasonCode": "not_recorded",
     "renamed": null,
     "reopened": null,
     "reopenedReason": null,
     "resolved": [],
     "snapshot": null,
-    "status": "not_available"
+    "status": "not_recorded"
    },
    "savedChanges": [],
    "savedChangesComplete": true,
@@ -766,15 +796,15 @@
    "comparison": {
     "complete": true,
     "notes": [
-     "Re-assessing a document inside the same scan replaces its earlier finding list, so changes within one scan are not compared."
+     "Re-assessments inside this scan: 5 have no replaced assessment recorded, which is not evidence that none was replaced."
     ],
     "reason": "no document in this scan has an earlier assessment under the same rubric and scope; 5 have no earlier assessment at all.",
     "sameScan": {
      "filesBaselineUnusable": 0,
      "filesCompared": 0,
-     "filesNotAvailable": 5,
+     "filesNotAvailable": 0,
      "filesNotComparable": 0,
-     "filesNotRecorded": 0,
+     "filesNotRecorded": 5,
      "introduced": 0,
      "persisting": 0,
      "resolved": 0
@@ -797,7 +827,7 @@
     }
    },
    "complete": false,
-   "factsDigest": "a50c931eee2dc646077582e7278357f4b0681fab1e36f74ecb7021667d78ca43",
+   "factsDigest": "1c7ce35801f120133d99b6aad55d4097899644095352a276d6e2fbf872cf1b7f",
    "factsVersion": 1,
    "files": [
     {
@@ -822,7 +852,7 @@
       "kind": "source",
       "sha256": "md5-1"
      },
-     "factsDigest": "8189d70433e715bb734fcba4aeb9334641118db4d8f85760d8cbc5086910a7af",
+     "factsDigest": "52fc3a8048a09aaaac165beafe1e08697467bdedce0c55b1508db8b71e019aca",
      "file": "Board/Q1 #2 – Überblick.docx",
      "findings": [
       {
@@ -922,7 +952,7 @@
       "kind": "source",
       "sha256": "md5-2"
      },
-     "factsDigest": "c9efac8fdb5d60d4209a4c380b2f41012c280cf1bc2630aeb8bd9b30431ae297",
+     "factsDigest": "5986453f94d5836d874795f6bffd04b3d1df99deab9f0a66c7a35d310c078f27",
      "file": "decks/Q3 review & plan.pptx",
      "findings": [
       {
@@ -997,7 +1027,7 @@
    },
    "snapshot": {
     "builtAt": "2026-09-18T12:00:00+00:00",
-    "factsDigest": "a50c931eee2dc646077582e7278357f4b0681fab1e36f74ecb7021667d78ca43",
+    "factsDigest": "1c7ce35801f120133d99b6aad55d4097899644095352a276d6e2fbf872cf1b7f",
     "filesTotal": 5,
     "servedFrom": "fresh",
     "ttlSeconds": 60
@@ -1035,15 +1065,15 @@
    "comparison": {
     "complete": true,
     "notes": [
-     "Re-assessing a document inside the same scan replaces its earlier finding list, so changes within one scan are not compared."
+     "Re-assessments inside this scan: 5 have no replaced assessment recorded, which is not evidence that none was replaced."
     ],
     "reason": "no document in this scan has an earlier assessment under the same rubric and scope; 5 have no earlier assessment at all.",
     "sameScan": {
      "filesBaselineUnusable": 0,
      "filesCompared": 0,
-     "filesNotAvailable": 5,
+     "filesNotAvailable": 0,
      "filesNotComparable": 0,
-     "filesNotRecorded": 0,
+     "filesNotRecorded": 5,
      "introduced": 0,
      "persisting": 0,
      "resolved": 0
@@ -1066,7 +1096,7 @@
     }
    },
    "complete": false,
-   "factsDigest": "a50c931eee2dc646077582e7278357f4b0681fab1e36f74ecb7021667d78ca43",
+   "factsDigest": "1c7ce35801f120133d99b6aad55d4097899644095352a276d6e2fbf872cf1b7f",
    "factsVersion": 1,
    "files": [
     {
@@ -1091,7 +1121,7 @@
       "kind": "corrected",
       "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
      },
-     "factsDigest": "123c42526bc2d6892e3a03fa073d3ddf30e86841fb0546cd0116790e8ff859cc",
+     "factsDigest": "081ada43e143b62fd653a2596d675e588f6cadf6516c42ce7608d9128ed1a2f6",
      "file": "remediated/fixed.docx",
      "findings": [
       {
@@ -1157,7 +1187,7 @@
       "kind": "source",
       "sha256": "md5-3"
      },
-     "factsDigest": "83f8afd620a3ac2a93f1238dbbec90699e7c19c297bba3b76c0523cab1762735",
+     "factsDigest": "d2939c44776de2aaa61b2561c7bbdb2dca2205bbc1ef97aa74de5d47e3213054",
      "file": "reports/annual 100%.pdf",
      "findings": [
       {
@@ -1232,7 +1262,7 @@
    },
    "snapshot": {
     "builtAt": "2026-09-18T12:00:00+00:00",
-    "factsDigest": "a50c931eee2dc646077582e7278357f4b0681fab1e36f74ecb7021667d78ca43",
+    "factsDigest": "1c7ce35801f120133d99b6aad55d4097899644095352a276d6e2fbf872cf1b7f",
     "filesTotal": 5,
     "servedFrom": "memo",
     "ttlSeconds": 60
@@ -1270,15 +1300,15 @@
    "comparison": {
     "complete": true,
     "notes": [
-     "Re-assessing a document inside the same scan replaces its earlier finding list, so changes within one scan are not compared."
+     "Re-assessments inside this scan: 5 have no replaced assessment recorded, which is not evidence that none was replaced."
     ],
     "reason": "no document in this scan has an earlier assessment under the same rubric and scope; 5 have no earlier assessment at all.",
     "sameScan": {
      "filesBaselineUnusable": 0,
      "filesCompared": 0,
-     "filesNotAvailable": 5,
+     "filesNotAvailable": 0,
      "filesNotComparable": 0,
-     "filesNotRecorded": 0,
+     "filesNotRecorded": 5,
      "introduced": 0,
      "persisting": 0,
      "resolved": 0
@@ -1301,7 +1331,7 @@
     }
    },
    "complete": false,
-   "factsDigest": "a50c931eee2dc646077582e7278357f4b0681fab1e36f74ecb7021667d78ca43",
+   "factsDigest": "1c7ce35801f120133d99b6aad55d4097899644095352a276d6e2fbf872cf1b7f",
    "factsVersion": 1,
    "files": [
     {
@@ -1326,7 +1356,7 @@
       "kind": "source",
       "sha256": "md5-4"
      },
-     "factsDigest": "66020a3d6ecbec24af74c8dd32014c2dac2516505edcc1f2cc756192324cc2e9",
+     "factsDigest": "39be2c9a43f1d79ec60367bd1d14f077c97a7acbb76f8de8d6f2bfdef3af3e61",
      "file": "sheets/budget.xlsx",
      "findings": [
       {
@@ -1423,7 +1453,7 @@
    },
    "snapshot": {
     "builtAt": "2026-09-18T12:00:00+00:00",
-    "factsDigest": "a50c931eee2dc646077582e7278357f4b0681fab1e36f74ecb7021667d78ca43",
+    "factsDigest": "1c7ce35801f120133d99b6aad55d4097899644095352a276d6e2fbf872cf1b7f",
     "filesTotal": 5,
     "servedFrom": "memo",
     "ttlSeconds": 60

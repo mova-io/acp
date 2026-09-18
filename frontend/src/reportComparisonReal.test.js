@@ -173,6 +173,22 @@ describe('R-B2 / R-B3 — contract-shape facts through the models', () => {
   })
 })
 
+// REAL R-B2 / R-B3: the owner's readers (0f0fd520) on a real store — a re-assessment inside one
+// scan captured by save_file_result, and a decision recorded on the renamed document's earlier scan.
+describe('R-B2 / R-B3 — the owner’s real readers through the models', () => {
+  const RH = real.realHistory.files
+  const model = (facts, name, mode = 'reviewer') => buildFileReportModel({ file: name, mode, facts, rows: [] })
+  it('a real same-scan re-assessment is stated with the server’s counts', () => {
+    const text = textOf(model(RH['board/minutes.docx'], 'board/minutes.docx'))
+    expect(text).toContain('Within this scan: this document was re-assessed. Against the assessment it replaced, 1 finding(s) are new, 1 no longer reported and 1 still reported; 1 without a detector location cannot be matched one by one')
+  })
+  it('a real earlier-scan decision is listed as not carried forward', () => {
+    const facts = F['policies/renamed.docx']
+    expect(facts.priorDecisions.map((d) => [d.verdict, d.status])).toEqual([['rejected', 'not_carried_forward']])
+    expect(textOf(model(facts, 'policies/renamed.docx', 'full'))).toMatch(/earlier scan/i)
+  })
+})
+
 describe('downloaded HTML never carries a relative app link', () => {
   const linked = attachEvidenceLinks(F['decks/quarterly.pptx'])
   const model = buildFileReportModel({ file: 'decks/quarterly.pptx', mode: 'full', facts: linked, rows: [] })

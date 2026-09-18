@@ -1,46 +1,29 @@
-"""R-B4: a scan-index build reads its three per-file inputs ONCE, and nothing about a row changes.
+"""R-B4: a scan-index build reads its three per-file inputs ONCE — with the owner's REAL readers.
 
-report_facts.prefetch_scan_inputs feeds the per-file builders from three scan-wide readers when
-they exist:
+report_facts.prefetch_scan_inputs feeds the per-file builders from the owner's scan-wide readers
+(on this branch since 0f0fd520):
 
-  * `remediation_diffs_for_scan(scan_id, *, owner, files)`   (Stream G, Store wrapper pending)
-  * `change_reviews_for_scan(scan_id, owner, *, files)`      (Stream G, Store wrapper pending)
-  * `unverified_changes.pending_records_for_scan(store, scan_id, files, *, errors)` (Stream E)
+  * `Store.remediation_diffs_for_scan(scan_id, *, owner, files)`  → report_history
+  * `Store.change_reviews_for_scan(scan_id, owner, *, files)`     → report_history
+  * `unverified_changes.pending_records_for_scan(store, scan_id, files, *, errors)`
 
-NONE OF THE THREE IS ON THIS BRANCH. They live, uncommitted, in the owner's worktree, and this
-branch must not copy them. So this file carries TEST-ONLY implementations of exactly the owner
-contracts (/tmp/acp-report-followup-owner-response.md, "R-B4"), each a real scan-wide SQL read
-against the real isolated store — one statement per input (plus an owner check / chunking), never
-a loop over the per-file readers:
+Every test below runs those real readers against a real isolated SQLite store. "Per file" means
+the same build with the three readers made unavailable TO report_facts — the Store methods removed
+from the class and the module function removed, by monkeypatch, for that test only. The real
+`report_history` module is never replaced (the Store's other wrappers import it).
 
-  * diffs: one SELECT over remediation_diff for the scan, ordered (file, rule_id, seq), each row
-    projected through Store._with_diff_location exactly as get_remediation_diffs projects it;
-  * reviews: one SELECT over scan_decisions (kind LIKE 'change_review:%', owner_email = owner) —
-    the table and filter get_change_reviews uses;
-  * pending: the file records (1 statement) and the four tables pending_records reads, each read
-    ONCE for every file with a corrected copy (`file IN (…)`, chunked at 500), then REPLAYED through
-    the unchanged unverified_changes.pending_records per file via a read-only stand-in store. So the
-    per-file answer is pending_records' own logic, and the statements are scan-wide.
-
-What is proved here: (a) every row digest, every per-file facts object and the scan digest are
-byte-identical with and without the batched readers; (b) the statement counts, measured by wrapping
-the store's DB execute, are constant in N for the batched path and linear for the per-file path;
-(c) a file the pending reader reports in `errors` is unverifiedSource 'unavailable' (count null,
+Proved here: (a) every row digest, every per-file facts object and the scan digest are identical
+batched vs per file; (b) the statement counts — each SQL statement attributed to the reader on the
+stack when it ran — are constant in N for the batched path and linear per file, at N=50 and 300;
+(c) a file the real pending reader reports in `errors` is unverifiedSource 'unavailable' (null,
 never 0), and a reader that raises or omits a file falls back to the per-file read; (d) the owner
 filter holds for reviews and a foreign scan's rows never leak.
-
-What is NOT proved here and waits for the owner's commit: that the OWNER's real readers satisfy
-these contracts (their own tests, e.g. tests/test_report_history_scan_readers.py and
-tests/test_pending_records_for_scan.py, do that), and the combined integration. When they land,
-delete the stand-ins' monkeypatching and run (a)-(d) against the real ones.
 """
 from __future__ import annotations
 
 import contextlib
 import json
-import re
 import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -51,157 +34,6 @@ sys.path.insert(0, str(ACP / "api"))
 OWNER = "owner@hosp.org"
 INTRUDER = "someone-else@hosp.org"
 SID, OTHER_SID = "s-rb4-current", "s-rb4-foreign"
-CHUNK = 400
-PENDING_CHUNK = 500
-
-
-# ── test-only implementations of the owner's R-B4 contracts ──────────────────────────────────
-
-def _chunks(names, size):
-    names = list(dict.fromkeys(names))
-    return [names[i:i + size] for i in range(0, len(names), size)] or [[]]
-
-
-def rb4_remediation_diffs_for_scan(store, scan_id, *, owner=None, files=None):
-    """Owner contract: `result.get(f, [])` == store.get_remediation_diffs(scan_id, f)."""
-    out: dict[str, list[dict]] = {}
-    with store._db.cursor() as cur:
-        if owner is not None:
-            store._db.execute(cur, "SELECT 1 AS ok FROM scan_runs WHERE id=%s AND owner_email=%s",
-                              (scan_id, owner))
-            if not store._db.fetchone(cur):
-                return {}
-        groups = _chunks(files, CHUNK) if files is not None else [None]
-        for group in groups:
-            if group == []:
-                continue
-            sql = ("SELECT file,rule_id,seq,before,after,note,locator,page,TRUE AS verified "
-                   "FROM remediation_diff WHERE scan_id=%s")
-            params = [scan_id]
-            if group is not None:
-                sql += " AND file IN (" + ",".join(["%s"] * len(group)) + ")"
-                params.extend(group)
-            store._db.execute(cur, sql + " ORDER BY file, rule_id, seq", tuple(params))
-            for row in store._db.fetchall(cur):
-                name = row.pop("file")
-                out.setdefault(name, []).append(
-                    store._with_diff_location({**row, "verified": bool(row["verified"])}))
-    return out
-
-
-def rb4_change_reviews_for_scan(store, scan_id, owner, *, files=None):
-    """Owner contract: `result.get(f, {})` == store.get_change_reviews(scan_id, f, owner=owner);
-    the owner is REQUIRED (the per-file read drops its filter for a falsy owner; this never does)."""
-    if not isinstance(owner, str) or not owner:
-        raise ValueError("owner is required")
-    out: dict[str, dict] = {}
-    with store._db.cursor() as cur:
-        for group in (_chunks(files, CHUNK) if files is not None else [None]):
-            if group == []:
-                continue
-            sql = ("SELECT file,kind,value,updated_at FROM scan_decisions "
-                   "WHERE scan_id=%s AND kind LIKE %s AND owner_email=%s")
-            params = [scan_id, store.CHANGE_REVIEW_KIND_PREFIX + "%", owner]
-            if group is not None:
-                sql += " AND file IN (" + ",".join(["%s"] * len(group)) + ")"
-                params.extend(group)
-            store._db.execute(cur, sql, tuple(params))
-            for row in store._db.fetchall(cur):
-                out.setdefault(row["file"], {})[row["kind"]] = {
-                    "value": row["value"], "updated_at": row["updated_at"]}
-    return out
-
-
-# The four per-file statements pending_records runs, recognised by what they read. A statement the
-# replay does not recognise fails loudly: pending_records changed, so this stand-in is stale.
-_PENDING_READS = (
-    ("events", lambda s: "FROM decision_log" in s and "apply.saved_unverified" in s),
-    ("retries", lambda s: "FROM decision_log" in s and "office_retry.saved" in s),
-    ("confirmations", lambda s: "JOIN hitl_events" in s),
-    ("edges", lambda s: "FROM ai_validation_outcomes" in s and "source_revision IS NOT NULL" in s),
-)
-
-
-def _batched_pending_sql(kind: str, n: int) -> str:
-    marks = ",".join(["%s"] * n)
-    return {
-        "events": ("SELECT file,id,ts,rule_id,action,detail FROM decision_log WHERE scan_id=%s "
-                   f"AND file IN ({marks}) AND action IN ('apply.saved_unverified','apply.reverified') "
-                   "ORDER BY ts,id"),
-        "retries": ("SELECT file,detail FROM decision_log WHERE scan_id=%s "
-                    f"AND file IN ({marks}) AND action='office_retry.saved'"),
-        "edges": ("SELECT file,actual_source_sha256,artifact_sha256 FROM ai_validation_outcomes "
-                  f"WHERE scan_id=%s AND file IN ({marks}) AND source_revision IS NOT NULL"),
-        "confirmations": (
-            "SELECT v.file AS file,v.item_id,v.rule_id,v.artifact_sha256,v.proposal_snapshot_id,"
-            "v.actual_approved_value_sha256,v.created_at,e.approved_value_sha256,e.proposal_snapshot_ids "
-            "FROM ai_validation_outcomes v JOIN hitl_events e ON e.id=v.approval_event_id "
-            f"WHERE v.scan_id=%s AND v.file IN ({marks}) AND e.scan_id=v.scan_id AND e.file=v.file "
-            "AND e.item_id=v.item_id AND e.action IN ('approve','edit') "
-            "AND v.outcome='verified_cleared'"),
-    }[kind]
-
-
-class _Replay:
-    """A read-only store stand-in for ONE file: pending_records' reads answered from rows that were
-    already fetched scan-wide. It has no connection of its own."""
-
-    def __init__(self, record, tables):
-        self._record = record
-        self._tables = tables
-        self._db = self
-
-    def get_file_record(self, scan_id, file):
-        return self._record
-
-    @contextlib.contextmanager
-    def cursor(self):
-        yield types.SimpleNamespace(rows=[])
-
-    def execute(self, cur, sql, params=()):
-        kind = next((k for k, match in _PENDING_READS if match(sql)), None)
-        if kind is None:
-            raise AssertionError(f"pending_records ran a read this stand-in does not know: {sql}")
-        cur.rows = [dict(r) for r in self._tables[kind]]
-
-    def fetchall(self, cur):
-        return cur.rows
-
-
-def rb4_pending_records_for_scan(store, scan_id, files=None, *, errors=None):
-    """Stream E contract: per file EXACTLY pending_records(store, scan_id, file); a file whose
-    records are malformed is OMITTED and put in `errors` (when given), else the error propagates."""
-    import unverified_changes
-    records = store.get_file_records(scan_id) if files is None else {}
-    if files is not None:
-        for group in _chunks(files, PENDING_CHUNK):
-            if group:
-                records.update(store.get_file_records(scan_id, files=group))
-    names = list(dict.fromkeys(files)) if files is not None else list(records)
-    with_copy = [n for n in names if (records.get(n) or {}).get("corrected_sha256")]
-    tables: dict[str, dict[str, list]] = {k: {} for k, _ in _PENDING_READS}
-    with store._db.cursor() as cur:
-        for group in _chunks(with_copy, PENDING_CHUNK):
-            if not group:
-                continue
-            for kind, _ in _PENDING_READS:
-                store._db.execute(cur, _batched_pending_sql(kind, len(group)),
-                                  (scan_id, *group))
-                for row in store._db.fetchall(cur):
-                    tables[kind].setdefault(row.pop("file"), []).append(row)
-    out: dict[str, list] = {}
-    for name in names:
-        if name not in with_copy:
-            out[name] = []
-            continue
-        replay = _Replay(records.get(name), {k: tables[k].get(name, []) for k in tables})
-        try:
-            out[name] = unverified_changes.pending_records(replay, scan_id, name)
-        except (KeyError, TypeError, ValueError) as exc:
-            if errors is None:
-                raise
-            errors[name] = exc
-    return out
 
 
 # ── the estate ────────────────────────────────────────────────────────────────────────────────
@@ -225,12 +57,11 @@ def build_estate(store, n: int) -> list[str]:
 
     for sid, owner, when in ((SID, OWNER, "2026-09-01T09:00:00+00:00"),
                              (OTHER_SID, INTRUDER, "2026-09-02T09:00:00+00:00")):
-        rows = files(sid)
         store.save_scan({"_scan_id": sid, "started_at": when, "completed_at": when,
                          "source": "drive", "owner": owner,
                          "rubric": {"name": "wcag-aa", "hash": "rubric-1"},
                          "summary": {"files": n, "certifiable": 0, "uncertain": n, "error": 0,
-                                     "avg_score": 70}, "files": rows})
+                                     "avg_score": 70}, "files": files(sid)})
     for i, name in enumerate(names):
         if i % 3 == 0:
             store.record_remediation(SID, name, corrected_sha256=f"{i:064x}")
@@ -277,42 +108,61 @@ def rf(monkeypatch):
     report_facts.clear_scan_index_cache()
     monkeypatch.setattr(report_facts, "_now", lambda: "2026-09-18T12:00:00+00:00")
     monkeypatch.delenv("ACP_BUILD_VERSION", raising=False)
-    # The owner's report_history module is not on this branch; make sure no stray copy is used.
-    monkeypatch.setitem(sys.modules, "report_history", types.ModuleType("report_history"))
     yield report_facts
     report_facts.clear_scan_index_cache()
 
 
-def install_readers(monkeypatch, store, *, diffs=True, reviews=True, pending=True):
+READERS = ("diffs", "reviews", "unverified")
+
+
+def without_readers(monkeypatch, store, which=READERS):
+    """Make the chosen R-B4 readers unavailable TO report_facts, for this test only: the Store
+    method is removed from the class, the module-level fallback lookup finds nothing, and the
+    pending reader is removed from unverified_changes. The real modules are not replaced."""
+    import report_facts
     import unverified_changes
-    if diffs:
-        monkeypatch.setattr(store, "remediation_diffs_for_scan",
-                            lambda scan_id, *, owner=None, files=None:
-                            rb4_remediation_diffs_for_scan(store, scan_id, owner=owner, files=files),
-                            raising=False)
-    if reviews:
-        monkeypatch.setattr(store, "change_reviews_for_scan",
-                            lambda scan_id, owner, *, files=None:
-                            rb4_change_reviews_for_scan(store, scan_id, owner, files=files),
-                            raising=False)
-    if pending:
-        monkeypatch.setattr(unverified_changes, "pending_records_for_scan",
-                            rb4_pending_records_for_scan, raising=False)
+    names = {"diffs": "remediation_diffs_for_scan", "reviews": "change_reviews_for_scan"}
+    real_lookup = report_facts._report_history
+    hidden = {names[w] for w in which if w in names}
+    for name in hidden:
+        monkeypatch.delattr(type(store), name)
+
+    class _Hide:
+        """report_history as report_facts sees it, minus the hidden readers."""
+        def __init__(self, module):
+            self._m = module
+
+        def __getattr__(self, attr):
+            if attr in hidden:
+                raise AttributeError(attr)
+            return getattr(self._m, attr)
+    monkeypatch.setattr(report_facts, "_report_history", lambda: _Hide(real_lookup()))
+    if "unverified" in which:
+        monkeypatch.delattr(unverified_changes, "pending_records_for_scan")
 
 
 def _rows(built):
     return {r["file"]: r for r in built["index"]}
 
 
-# ── the stand-ins honour the owner contracts (so what follows tests report_facts, not them) ──────
+def test_the_owners_readers_are_real_on_this_branch(isolated_store):
+    """If this fails the owner's readers are gone again, and the rest of this file would be
+    testing the per-file path twice."""
+    import report_history
+    import unverified_changes
+    for name in ("remediation_diffs_for_scan", "change_reviews_for_scan"):
+        assert callable(getattr(type(isolated_store), name, None))
+        assert callable(getattr(report_history, name, None))
+    assert callable(getattr(unverified_changes, "pending_records_for_scan", None))
 
-def test_the_stand_in_readers_equal_the_per_file_reads(isolated_store):
+
+def test_the_real_readers_equal_the_per_file_reads_on_this_estate(isolated_store):
     import unverified_changes
     names = build_estate(isolated_store, 30)
-    diffs = rb4_remediation_diffs_for_scan(isolated_store, SID, owner=OWNER)
-    reviews = rb4_change_reviews_for_scan(isolated_store, SID, OWNER)
+    diffs = isolated_store.remediation_diffs_for_scan(SID, owner=OWNER)
+    reviews = isolated_store.change_reviews_for_scan(SID, OWNER)
     errors: dict = {}
-    pending = rb4_pending_records_for_scan(isolated_store, SID, names, errors=errors)
+    pending = unverified_changes.pending_records_for_scan(isolated_store, SID, names, errors=errors)
     for name in names:
         assert diffs.get(name, []) == isolated_store.get_remediation_diffs(SID, name)
         assert reviews.get(name, {}) == isolated_store.get_change_reviews(SID, name, owner=OWNER)
@@ -322,9 +172,6 @@ def test_the_stand_in_readers_equal_the_per_file_reads(isolated_store):
         else:
             assert pending[name] == unverified_changes.pending_records(isolated_store, SID, name)
     assert list(errors) == [names[3]]
-    assert rb4_remediation_diffs_for_scan(isolated_store, SID, owner=INTRUDER) == {}
-    with pytest.raises(ValueError):
-        rb4_change_reviews_for_scan(isolated_store, SID, None)
 
 
 def test_saved_changes_from_pending_is_unverified_changes_own_projection(isolated_store, rf):
@@ -342,24 +189,29 @@ def test_saved_changes_from_pending_is_unverified_changes_own_projection(isolate
 
 # ── (a) identical projection and digest ───────────────────────────────────────────────────────
 
-def test_every_row_the_scan_digest_and_the_per_file_facts_are_identical_with_batched_readers(
+def test_every_row_the_scan_digest_and_the_per_file_facts_are_identical_batched_vs_per_file(
         isolated_store, rf, monkeypatch):
     names = build_estate(isolated_store, 40)
-    per_file = rf.build_scan_index(isolated_store, SID, owner=OWNER)
-    assert per_file["inputsRead"] == {"diffs": "per_file", "reviews": "per_file",
-                                      "unverified": "per_file"}
-    install_readers(monkeypatch, isolated_store)
     batched = rf.build_scan_index(isolated_store, SID, owner=OWNER)
     assert batched["inputsRead"] == {"diffs": "batched", "reviews": "batched",
                                      "unverified": "batched"}
+    assert batched["baselineRead"] == "batched"                      # R-B1, real
+    per_file_rows = {}
+    with monkeypatch.context() as m:
+        without_readers(m, isolated_store)
+        per_file = rf.build_scan_index(isolated_store, SID, owner=OWNER)
+        assert per_file["inputsRead"] == {"diffs": "per_file", "reviews": "per_file",
+                                          "unverified": "per_file"}
+        for name in names:
+            per_file_rows[name] = rf.build_file_facts(isolated_store, SID, name, owner=OWNER)
     assert batched["digest"] == per_file["digest"]
     assert batched["index"] == per_file["index"]
     assert batched["facts"] == per_file["facts"]
-    # …and every row still equals the per-file route's facts (which never prefetch).
+    # Every row equals the per-file route's facts, with and without the readers present.
     for name in names:
         facts = rf.build_file_facts(isolated_store, SID, name, owner=OWNER)
-        assert _rows(batched)[name]["factsDigest"] == facts["factsDigest"]
-    # The data exercises every input: verified + unverified changes, reviews, and 'unavailable'.
+        assert _rows(batched)[name]["factsDigest"] == facts["factsDigest"] \
+            == per_file_rows[name]["factsDigest"]
     row = _rows(batched)[names[0]]
     assert row["savedChangesVerified"] == 2 and row["savedChangesUnverified"] == 1
     assert row["humanReviews"]["accepted"] == 1
@@ -368,44 +220,57 @@ def test_every_row_the_scan_digest_and_the_per_file_facts_are_identical_with_bat
 def test_bite_a_batched_reader_that_drops_one_row_moves_the_digest(isolated_store, rf, monkeypatch):
     """The equality above is not vacuous: one missing diff row in the batch is a different digest."""
     build_estate(isolated_store, 12)
-    per_file = rf.build_scan_index(isolated_store, SID, owner=OWNER)
-    install_readers(monkeypatch, isolated_store)
+    honest = rf.build_scan_index(isolated_store, SID, owner=OWNER)["digest"]
+    real = type(isolated_store).remediation_diffs_for_scan
 
-    def lossy(scan_id, *, owner=None, files=None):
-        got = rb4_remediation_diffs_for_scan(isolated_store, scan_id, owner=owner, files=files)
+    def lossy(self, scan_id, *, owner=None, files=None):
+        got = real(self, scan_id, owner=owner, files=files)
         first = sorted(got)[0]
         got[first] = got[first][:-1]
         return got
-    monkeypatch.setattr(isolated_store, "remediation_diffs_for_scan", lossy)
-    assert rf.build_scan_index(isolated_store, SID, owner=OWNER)["digest"] != per_file["digest"]
+    monkeypatch.setattr(type(isolated_store), "remediation_diffs_for_scan", lossy)
+    assert rf.build_scan_index(isolated_store, SID, owner=OWNER)["digest"] != honest
 
 
 # ── (b) the statement count ───────────────────────────────────────────────────────────────────
 
-_CATEGORIES = {
-    # The diff reader's owner check is part of its read (the contract's "+1 owner check").
-    "diffs": lambda s: "FROM remediation_diff" in s or "AS ok FROM scan_runs" in s,
-    "reviews": lambda s: "FROM scan_decisions" in s and re.search(r"(?<!NOT )LIKE", s) is not None,
-    "unverified": lambda s: ("FROM decision_log" in s or "FROM ai_validation_outcomes" in s
-                             or ("FROM file_records f" in s and "f.file IN" in s)),
-}
-
-
-def _count_statements(store, monkeypatch, fn):
-    seen: list[str] = []
-    real = store._db.execute
+@contextlib.contextmanager
+def attributed_statements(store, monkeypatch):
+    """Count every SQL statement, attributed to the input whose reader was on the stack when it
+    ran (nested calls count toward the outermost labelled reader); the rest is 'other'."""
+    import unverified_changes
+    counts = {"diffs": 0, "reviews": 0, "unverified": 0, "other": 0}
+    stack: list[str] = []
+    real_execute = store._db.execute
 
     def counting(cur, sql, params=()):
-        seen.append(sql)
-        return real(cur, sql, params)
-    monkeypatch.setattr(store._db, "execute", counting)
-    try:
-        result = fn()
-    finally:
-        monkeypatch.setattr(store._db, "execute", real)
-    counts = {k: sum(1 for s in seen if match(s)) for k, match in _CATEGORIES.items()}
-    counts["total"] = len(seen)
-    return result, counts
+        counts[stack[0] if stack else "other"] += 1
+        return real_execute(cur, sql, params)
+
+    def labelled(label, fn):
+        def wrapper(*a, **k):
+            stack.append(label)
+            try:
+                return fn(*a, **k)
+            finally:
+                stack.pop()
+        return wrapper
+
+    cls = type(store)
+    with monkeypatch.context() as m:
+        m.setattr(store._db, "execute", counting)
+        for name, label in (("get_remediation_diffs", "diffs"),
+                            ("remediation_diffs_for_scan", "diffs"),
+                            ("get_change_reviews", "reviews"),
+                            ("change_reviews_for_scan", "reviews")):
+            if hasattr(cls, name):
+                m.setattr(cls, name, labelled(label, getattr(cls, name)))
+        for name in ("saved_changes", "pending_records_for_scan"):
+            if hasattr(unverified_changes, name):
+                m.setattr(unverified_changes, name,
+                          labelled("unverified", getattr(unverified_changes, name)))
+        yield counts
+    counts["total"] = sum(v for k, v in counts.items() if k != "total")
 
 
 MEASURED: dict = {}
@@ -415,51 +280,51 @@ MEASURED: dict = {}
 def test_the_batched_path_reads_each_input_a_constant_number_of_times(isolated_store, rf,
                                                                      monkeypatch, n):
     build_estate(isolated_store, n)
-    per_file, before = _count_statements(
-        isolated_store, monkeypatch, lambda: rf.build_scan_index(isolated_store, SID, owner=OWNER))
-    install_readers(monkeypatch, isolated_store)
-    batched, after = _count_statements(
-        isolated_store, monkeypatch, lambda: rf.build_scan_index(isolated_store, SID, owner=OWNER))
-    MEASURED[n] = {"per_file": before, "batched": after}
-    print(f"\nR-B4 statements at N={n}: per-file {before}, batched {after}")
+    with attributed_statements(isolated_store, monkeypatch) as after:
+        batched = rf.build_scan_index(isolated_store, SID, owner=OWNER)
+    with monkeypatch.context() as m:
+        without_readers(m, isolated_store)
+        with attributed_statements(isolated_store, m) as before:
+            per_file = rf.build_scan_index(isolated_store, SID, owner=OWNER)
+    MEASURED[n] = {"per_file": dict(before), "batched": dict(after)}
+    print(f"\nR-B4 statements (owner's real readers) at N={n}: per-file {before}, batched {after}")
     assert batched["digest"] == per_file["digest"]
     # Per file: one diff read and one review read per document; pending_records reads the file
-    # record for every document plus four tables for every document with a corrected copy.
+    # record for every document plus four tables for every document with a corrected copy (the
+    # owner's pending_records reads all four before it parses, so the malformed one costs 1 + 4).
     with_copy = len(range(0, n, 3))
     assert before["diffs"] == n
     assert before["reviews"] == n
-    # (the malformed file stops after its first table read: 1 + 1 instead of 1 + 4)
-    assert before["unverified"] == n + 4 * with_copy - 3
-    # Batched: one diff statement + one owner check; one review statement; one file-record read
-    # and four table reads per 500 documents with a corrected copy (one chunk at these sizes).
+    assert before["unverified"] == n + 4 * with_copy
+    # Batched (owner contract): diffs 1 statement + 1 owner check; reviews 1; pending 1 file-record
+    # read + 4 table reads per 500 documents with a corrected copy — the same at 50 and at 300.
     assert after["diffs"] == 2
     assert after["reviews"] == 1
-    assert after["unverified"] == 1 + 4
-    # The whole build: everything else (baselines per file until R-B1 lands, etc.) is unchanged,
-    # so the saving is exactly the three inputs'.
-    assert before["total"] - after["total"] == (
-        before["diffs"] + before["reviews"] + before["unverified"]
-        - after["diffs"] - after["reviews"] - after["unverified"])
+    assert after["unverified"] == 5
+    # Nothing else moved: the saving is exactly the three inputs'.
+    assert before["other"] == after["other"]
 
 
 # ── (c) unreadable is 'unavailable', never zero; failures fall back per file ─────────────────
 
-def test_a_file_the_pending_reader_reports_in_errors_is_unavailable_not_zero(isolated_store, rf,
-                                                                            monkeypatch):
+def test_a_file_the_real_pending_reader_reports_in_errors_is_unavailable_not_zero(
+        isolated_store, rf, monkeypatch):
+    import unverified_changes
     names = build_estate(isolated_store, 12)
-    install_readers(monkeypatch, isolated_store)
-    calls = []
-    real = rb4_pending_records_for_scan
+    real = unverified_changes.pending_records_for_scan
+    seen = []
 
     def spy(store, scan_id, files=None, *, errors=None):
         got = real(store, scan_id, files, errors=errors)
-        calls.append(dict(errors))
+        seen.append(dict(errors))
         return got
-    import unverified_changes
     monkeypatch.setattr(unverified_changes, "pending_records_for_scan", spy)
+    # The per-file read must NOT be what answers for the malformed file.
+    monkeypatch.setattr(unverified_changes, "saved_changes", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("per-file pending read ran although the batched reader answered")))
     built = rf.build_scan_index(isolated_store, SID, owner=OWNER)
     assert built["inputsRead"]["unverified"] == "batched"
-    assert list(calls[0]) == [names[3]]                       # the batched reader reported it
+    assert list(seen[0]) == [names[3]]                        # the real reader reported it
     row = _rows(built)[names[3]]
     assert row["savedChangesUnverified"] is None              # unknown, never 0
     assert row["savedChangesComplete"] is False
@@ -469,53 +334,61 @@ def test_a_file_the_pending_reader_reports_in_errors_is_unavailable_not_zero(iso
 def test_errors_are_honoured_even_when_the_records_would_have_read(isolated_store, rf, monkeypatch):
     """Absent-because-unreadable is never read as "nothing pending": a file in `errors` is
     'unavailable' whatever the per-file read would have said."""
+    import unverified_changes
     names = build_estate(isolated_store, 9)
-    install_readers(monkeypatch, isolated_store)
+    real = unverified_changes.pending_records_for_scan
 
     def says_unreadable(store, scan_id, files=None, *, errors=None):
-        got = rb4_pending_records_for_scan(store, scan_id, files, errors=errors)
+        got = real(store, scan_id, files, errors=errors)
         got.pop(names[0], None)
         errors[names[0]] = ValueError("could not be read")
         return got
-    import unverified_changes
     monkeypatch.setattr(unverified_changes, "pending_records_for_scan", says_unreadable)
-    facts_row = _rows(rf.build_scan_index(isolated_store, SID, owner=OWNER))[names[0]]
-    assert facts_row["savedChangesUnverified"] is None
+    assert _rows(rf.build_scan_index(isolated_store, SID, owner=OWNER))[names[0]][
+        "savedChangesUnverified"] is None
 
 
 def test_a_file_the_pending_reader_omits_without_an_error_is_read_per_file(isolated_store, rf,
                                                                            monkeypatch):
+    import unverified_changes
     names = build_estate(isolated_store, 9)
-    per_file = rf.build_scan_index(isolated_store, SID, owner=OWNER)
-    install_readers(monkeypatch, isolated_store)
+    honest = rf.build_scan_index(isolated_store, SID, owner=OWNER)["digest"]
+    real = unverified_changes.pending_records_for_scan
 
     def forgets(store, scan_id, files=None, *, errors=None):
-        got = rb4_pending_records_for_scan(store, scan_id, files, errors=errors)
+        got = real(store, scan_id, files, errors=errors)
         got.pop(names[0])
         return got
-    import unverified_changes
     monkeypatch.setattr(unverified_changes, "pending_records_for_scan", forgets)
     built = rf.build_scan_index(isolated_store, SID, owner=OWNER)
     assert _rows(built)[names[0]]["savedChangesUnverified"] == 1     # not silently 0
-    assert built["digest"] == per_file["digest"]
+    assert built["digest"] == honest
 
 
 @pytest.mark.parametrize("which", ["diffs", "reviews", "unverified"])
 def test_a_reader_that_raises_falls_back_to_per_file_reads(isolated_store, rf, monkeypatch, which):
+    import unverified_changes
     build_estate(isolated_store, 9)
-    per_file = rf.build_scan_index(isolated_store, SID, owner=OWNER)
-    install_readers(monkeypatch, isolated_store)
+    honest = rf.build_scan_index(isolated_store, SID, owner=OWNER)["digest"]
 
     def boom(*a, **k):
         raise RuntimeError("the batched read failed")
-    import unverified_changes
-    target, attr = {"diffs": (isolated_store, "remediation_diffs_for_scan"),
-                    "reviews": (isolated_store, "change_reviews_for_scan"),
+    target, attr = {"diffs": (type(isolated_store), "remediation_diffs_for_scan"),
+                    "reviews": (type(isolated_store), "change_reviews_for_scan"),
                     "unverified": (unverified_changes, "pending_records_for_scan")}[which]
     monkeypatch.setattr(target, attr, boom)
     built = rf.build_scan_index(isolated_store, SID, owner=OWNER)
     assert built["inputsRead"][which] == "per_file"
-    assert built["digest"] == per_file["digest"]                      # never silently empty
+    assert built["digest"] == honest                                  # never silently empty
+
+
+def test_absent_readers_leave_every_input_per_file(isolated_store, rf, monkeypatch):
+    build_estate(isolated_store, 6)
+    honest = rf.build_scan_index(isolated_store, SID, owner=OWNER)["digest"]
+    without_readers(monkeypatch, isolated_store)
+    built = rf.build_scan_index(isolated_store, SID, owner=OWNER)
+    assert set(built["inputsRead"].values()) == {"per_file"}
+    assert built["digest"] == honest
 
 
 # ── (d) owner filter and isolation ────────────────────────────────────────────────────────────
@@ -523,30 +396,33 @@ def test_a_reader_that_raises_falls_back_to_per_file_reads(isolated_store, rf, m
 def test_the_owner_filter_and_scan_isolation_hold_on_the_batched_path(isolated_store, rf,
                                                                       monkeypatch):
     names = build_estate(isolated_store, 15)
-    install_readers(monkeypatch, isolated_store)
     seen = []
-    real = isolated_store.change_reviews_for_scan
+    real = type(isolated_store).change_reviews_for_scan
 
-    def spy(scan_id, owner, *, files=None):
+    def spy(self, scan_id, owner, *, files=None):
         seen.append(owner)
-        return real(scan_id, owner, files=files)
-    monkeypatch.setattr(isolated_store, "change_reviews_for_scan", spy)
+        return real(self, scan_id, owner, files=files)
+    monkeypatch.setattr(type(isolated_store), "change_reviews_for_scan", spy)
     built = rf.build_scan_index(isolated_store, SID, owner=OWNER)
     assert seen == [OWNER]
-    row = _rows(built)[names[0]]            # has an INTRUDER verdict (i % 7 == 0) and a foreign-scan one
+    assert built["inputsRead"]["reviews"] == "batched"
+    row = _rows(built)[names[0]]     # has an INTRUDER verdict (i % 7 == 0) and a foreign-scan one
     assert row["humanReviews"] == {"pending": 2, "accepted": 1, "correctionRequested": 0,
                                    "rejected": 0, "unable": 0, "stale": 0}
     facts = rf.build_file_facts(isolated_store, SID, names[0], owner=OWNER)
     assert set(facts["reviews"]) == {rf.verified_change_id(names[0], "1.1.1", 0)}
     assert all(c["after"] != "Foreign title" for c in facts["savedChanges"])
-    # A foreign owner still sees nothing at all.
+    # A foreign owner sees nothing at all, and the real diff reader refuses a foreign owner too.
     assert rf.build_scan_index(isolated_store, SID, owner=INTRUDER) is None
+    assert isolated_store.remediation_diffs_for_scan(SID, owner=INTRUDER) == {}
 
 
 def test_a_falsy_owner_never_takes_the_batched_review_read(isolated_store, rf, monkeypatch):
     build_estate(isolated_store, 5)
-    install_readers(monkeypatch, isolated_store)
     context = rf.scan_context(isolated_store, SID, owner=OWNER)
     modes = rf.prefetch_scan_inputs(isolated_store, SID, list(context["files_by_name"]),
                                     owner="", context=context)
     assert modes["reviews"] == "per_file" and "reviews_by_file" not in context
+    # (the owner's reader itself refuses one: it is never asked)
+    with pytest.raises(ValueError):
+        isolated_store.change_reviews_for_scan(SID, "")

@@ -572,11 +572,12 @@ def test_the_scan_builder_reads_the_scan_once_not_once_per_document(isolated_sto
         type(isolated_store).get_scan, type(isolated_store).get_file_records = original
     assert facts["filesTotal"] == 12
     assert calls["scan"] == 1, f"get_scan ran {calls['scan']} times for 12 documents"
-    # One scan-wide read, plus exactly one per document from inside
-    # unverified_changes.pending_records (which looks up its own corrected_sha256 and is not
-    # this module's to restructure). Pinned rather than rounded off, so a regression that
-    # reintroduces a scan-wide read per file is visible as a jump, not as a slow report.
-    assert calls["records"] == 1 + facts["filesTotal"], calls
+    # One scan-wide read (scan_context), plus ONE from the scan-wide pending reader (R-B4,
+    # unverified_changes.pending_records_for_scan, which reads the file records once for every
+    # document). Before R-B4 it was one per document (pending_records looks up its own
+    # corrected_sha256). Pinned rather than rounded off, so a regression that reintroduces a
+    # per-file read is visible as a jump (1 + 12), not as a slow report.
+    assert calls["records"] == 2, calls
 
 
 def test_a_scan_with_one_unledgered_document_cannot_state_a_resolved_total(isolated_store):

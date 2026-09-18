@@ -374,20 +374,23 @@ def aggregate(rows: list[dict], *, same_scan_history: bool,
         # ONE note (the scan summary is a single page): what was compared inside this scan, what
         # could not be, and — always, because it is the common case — that "none recorded" is not
         # "none happened".
+        # Its own list: this used to reuse `parts`, which silently replaced the ACROSS-scan
+        # `reason` below with the within-scan sentence whenever the R-B2 reader existed
+        # (found when the owner's real reader landed; pinned in test_report_comparison.py).
         s = same_scan
-        parts = []
+        same_parts = []
         if s["filesCompared"]:
-            parts.append(f"{s['filesCompared']} document(s) were compared with the assessment each "
-                         f"replaced ({s['introduced']} new, {s['resolved']} no longer reported, "
-                         f"{s['persisting']} still reported)")
+            same_parts.append(f"{s['filesCompared']} document(s) were compared with the assessment "
+                              f"each replaced ({s['introduced']} new, {s['resolved']} no longer "
+                              f"reported, {s['persisting']} still reported)")
         unusable = s["filesBaselineUnusable"] + s["filesNotComparable"]
         if unusable:
-            parts.append(f"{unusable} could not be compared, each document says why")
+            same_parts.append(f"{unusable} could not be compared, each document says why")
         if s["filesNotRecorded"]:
-            parts.append(f"{s['filesNotRecorded']} have no replaced assessment recorded, which is "
-                         f"not evidence that none was replaced")
-        if parts:
-            notes.append("Re-assessments inside this scan: " + "; ".join(parts) + ".")
+            same_parts.append(f"{s['filesNotRecorded']} have no replaced assessment recorded, which "
+                              f"is not evidence that none was replaced")
+        if same_parts:
+            notes.append("Re-assessments inside this scan: " + "; ".join(same_parts) + ".")
     if totals["notComparable"]:
         notes.append(f"{totals['notComparable']} current finding(s) have no detector location, so "
                      f"they cannot be matched one by one and are neither new nor resolved.")

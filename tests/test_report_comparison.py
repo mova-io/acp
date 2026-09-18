@@ -398,3 +398,17 @@ def test_c7_earlier_scan_decisions_are_named_as_unavailable_not_dropped(isolated
     assert facts["priorDecisions"] is None
     assert "not shown" in facts["priorDecisionsReason"]
     assert "not carried forward" in facts["priorDecisionsReason"]
+
+
+def test_the_within_scan_note_never_replaces_the_across_scan_reason():
+    """Found when the owner's real R-B2 reader landed: the same-scan note builder reused the
+    `parts` list of the estate reason, so every scan with the reader read "5 have no replaced
+    assessment recorded…" where it should say why there was no earlier-scan baseline."""
+    rows = [{"status": rc.NO_BASELINE, "reasonCode": "no_earlier_assessment"}] * 2
+    same = [{"status": rc.SAME_SCAN_NOT_RECORDED}] * 2
+    with_reader = rc.aggregate(rows, same_scan_history=True, same_scan_rows=same)
+    without = rc.aggregate(rows, same_scan_history=False, same_scan_rows=same)
+    assert with_reader["reason"] == without["reason"]
+    assert with_reader["reason"].startswith("no document in this scan has an earlier assessment")
+    assert with_reader["notes"] == ["Re-assessments inside this scan: 2 have no replaced assessment "
+                                    "recorded, which is not evidence that none was replaced."]

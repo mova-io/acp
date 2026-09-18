@@ -1,12 +1,14 @@
 """R-B1 / R-B2 / R-B3 consumption — CONTRACT-SHAPE tests.
 
-The readers are the #2131 owner's (Stream G `api/report_history.py`, Store wrappers by Stream D)
-and are NOT on this branch's base. So every reader below is a stand-in that returns EXACTLY the
-shape `/tmp/acp-report-followup-owner-response.md` specifies — clearly fake, on purpose — attached
-the two ways the real ones can land:
+The owner's real readers are on this branch now (0f0fd520; real-reader integration is in
+tests/test_report_facts_real_fixture.py and tests/test_report_facts_scan_readers.py). These tests
+keep pinning the report's reading of shapes a small real store cannot easily produce (truncation,
+unrecorded context, failed/partial snapshots), via stand-ins attached the two ways a reader can be
+found — without ever replacing the real `report_history` module (the Store's other wrappers
+import it):
 
-* as a Store method (`store.<name>(scan_id, …)`), and
-* as `report_history.<name>(store, scan_id, …)` with no Store wrapper yet.
+* as a Store method (`store.<name>(scan_id, …)`), patched on the class; and
+* module-only: the REAL module's attribute patched and the Store method removed.
 
 Everything else — the scan, its findings, the facts builder, the digests — is the real store.
 What these pin is the report's reading of each shape: a truncated decision list says "showing N
@@ -19,7 +21,6 @@ from __future__ import annotations
 
 import json
 import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -78,10 +79,17 @@ def _prior(issues, *, context="recorded_at_write", basis=None, outcome="assessed
     }
 
 
+HISTORY_READERS = ("previous_assessments_for_scan", "prior_assessment_in_scan",
+                   "change_reviews_for_document")
+
+
 @pytest.fixture()
-def no_history_module(monkeypatch):
-    """Neither landed: no Store method, and no importable report_history."""
-    monkeypatch.setitem(sys.modules, "report_history", None)
+def no_history_module(monkeypatch, isolated_store):
+    """Neither landed, AS report_facts SEES IT: the Store has no reader methods and
+    report_facts' history lookup finds no module. The real report_history stays importable — the
+    Store's other wrappers (and its per-file previous_assessment_for_file) still import it."""
+    for name in HISTORY_READERS:
+        monkeypatch.delattr(type(isolated_store), name, raising=False)
     monkeypatch.setattr(rf, "_report_history", lambda: None)
 
 
@@ -89,12 +97,15 @@ def _as_store_method(monkeypatch, store, name, fn):
     monkeypatch.setattr(type(store), name, fn, raising=False)
 
 
-def _as_module(monkeypatch, **fns):
-    module = types.ModuleType("report_history")
+def _as_module(monkeypatch, store, **fns):
+    """The module-only landing (report_history has the function, the Store wrapper does not):
+    the stand-in is patched onto the REAL module's attribute and the Store method is removed,
+    both restored by monkeypatch. The module object itself is never replaced."""
+    import report_history
     for name, fn in fns.items():
-        setattr(module, name, fn)
-    monkeypatch.setitem(sys.modules, "report_history", module)
-    return module
+        monkeypatch.delattr(type(store), name, raising=False)
+        monkeypatch.setattr(report_history, name, fn)
+    return report_history
 
 
 CURRENT = [LANG, _image_issue("a", 1, "docx:image:1"), _image_issue("c", 3, "docx:image:3")]
@@ -140,7 +151,7 @@ def test_rb3_through_report_history_before_the_store_wrapper(isolated_store, mon
         return {"decisions": [_decision("s-old", "x", "rejected", "2026-08-01")], "total": 1,
                 "returned": 1, "limit": limit, "truncated": False}
 
-    _as_module(monkeypatch, change_reviews_for_document=reviews)
+    _as_module(monkeypatch, isolated_store, change_reviews_for_document=reviews)
     facts = rf.build_file_facts(isolated_store, SID, FILE, owner=OWNER)
     assert got["store"] is isolated_store
     assert [d["verdictLabel"] for d in facts["priorDecisions"]] == ["rejected"]
@@ -150,11 +161,11 @@ def test_rb3_through_report_history_before_the_store_wrapper(isolated_store, mon
 
 def test_rb3_none_and_empty_are_different_answers(isolated_store, monkeypatch):
     _scan(isolated_store, files=[_doc(issues=CURRENT)])
-    _as_module(monkeypatch, change_reviews_for_document=lambda store, *a, **k: None)
+    _as_module(monkeypatch, isolated_store, change_reviews_for_document=lambda store, *a, **k: None)
     none = rf.build_file_facts(isolated_store, SID, FILE, owner=OWNER)
     assert none["priorDecisions"] is None and none["priorDecisionsBounds"] is None
     assert "not available" in none["priorDecisionsReason"]
-    _as_module(monkeypatch, change_reviews_for_document=lambda store, *a, **k: {
+    _as_module(monkeypatch, isolated_store, change_reviews_for_document=lambda store, *a, **k: {
         "decisions": [], "total": 0, "returned": 0, "limit": 200, "truncated": False})
     empty = rf.build_file_facts(isolated_store, SID, FILE, owner=OWNER)
     assert empty["priorDecisions"] == []
@@ -175,7 +186,8 @@ def _same_scan(store, monkeypatch, found, *, via="store"):
         _as_store_method(monkeypatch, store, "prior_assessment_in_scan",
                          lambda self, scan_id, file, *, owner: found)
     else:
-        _as_module(monkeypatch, prior_assessment_in_scan=lambda st, scan_id, file, *, owner: found)
+        _as_module(monkeypatch, store,
+                   prior_assessment_in_scan=lambda st, scan_id, file, *, owner: found)
     return rf.build_file_facts(store, SID, FILE, owner=OWNER)
 
 
@@ -273,7 +285,8 @@ def test_rb2_an_unfinished_current_assessment_is_not_compared(isolated_store, mo
 def test_rb2_scan_index_rows_equal_the_per_file_route_and_aggregate(isolated_store, monkeypatch):
     _scan(isolated_store, files=[_doc(issues=CURRENT), _doc("other.docx", issues=CURRENT)])
     by_file = {FILE: _prior(REPLACED), "other.docx": None}
-    _as_module(monkeypatch, prior_assessment_in_scan=lambda st, sid, f, *, owner: by_file[f])
+    _as_module(monkeypatch, isolated_store,
+               prior_assessment_in_scan=lambda st, sid, f, *, owner: by_file[f])
     scan = rf.build_scan_facts(isolated_store, SID, owner=OWNER)
     rows = {r["file"]: r for r in scan["files"]}
     for name in by_file:
@@ -313,19 +326,15 @@ def test_rb1_report_history_serves_both_the_index_and_the_per_file_route(isolate
                                                                          monkeypatch):
     _scan(isolated_store, sid="s-old", completed=OLD, files=[_doc(issues=REPLACED)])
     _scan(isolated_store, files=[_doc(issues=CURRENT), _doc("new.docx", issues=CURRENT)])
-    real = type(isolated_store).previous_assessment_for_file
+    import report_history
+    real = report_history.previous_assessments_for_scan      # the owner's REAL batched reader
     calls = []
 
     def batched(store, scan_id, *, owner, files=None):
         calls.append(list(files or []))
-        out = {}
-        for name in files:
-            found = real(store, scan_id, name, owner=owner)
-            if found:
-                out[name] = found
-        return out
+        return real(store, scan_id, owner=owner, files=files)
 
-    _as_module(monkeypatch, previous_assessments_for_scan=batched)
+    _as_module(monkeypatch, isolated_store, previous_assessments_for_scan=batched)
 
     def per_file_must_not_run(*a, **k):
         raise AssertionError("the per-file store read ran although the batched reader exists")
@@ -344,8 +353,10 @@ def test_rb1_report_history_serves_both_the_index_and_the_per_file_route(isolate
 
 def test_rb1_store_method_wins_over_the_module(isolated_store, monkeypatch):
     _scan(isolated_store, files=[_doc(issues=CURRENT)])
-    _as_module(monkeypatch, previous_assessments_for_scan=lambda *a, **k: (_ for _ in ()).throw(
-        AssertionError("module used although the Store has the method")))
+    import report_history
+    monkeypatch.setattr(report_history, "previous_assessments_for_scan",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("module used although the Store has the method")))
     _as_store_method(monkeypatch, isolated_store, "previous_assessments_for_scan",
                      lambda self, scan_id, *, owner, files=None: {})
     built = rf.build_scan_index(isolated_store, SID, owner=OWNER)
