@@ -119,6 +119,9 @@ _map_many([
     ("GET", "/assess/codeset"), ("GET", "/assess/eligibility"),
     ("GET", "/assess/eligibility/scoped"), ("GET", "/scans/{sid}/traces"),
     ("GET", "/scans/{sid}/ai_calls"), ("GET", "/rules"), ("GET", "/capability"),
+    # Read-only explanation of what each rule checks (Settings → Rule explanations); same
+    # audience as the rule catalog it explains.
+    ("GET", "/rules/explanations"),
     ("GET", "/scans/{sid}/trace/session"), ("GET", "/scans/{sid}/trace/session/data"),
     ("GET", "/scans/{sid}/trace/{kind}/exists"),
     ("GET", "/scans/{sid}/trace/file/{filename:path}/data"),

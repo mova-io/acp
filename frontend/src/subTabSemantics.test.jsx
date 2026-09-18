@@ -89,10 +89,10 @@ describe('Settings modal section tabs (Settings.jsx)', () => {
   const open = () => mount(createElement(Settings, { onClose: () => {}, me: { is_admin: false } }))
   const list = (c) => c.querySelector('[role="tablist"][aria-label="Settings sections"]')
 
-  it('is a role=tablist of 9 buttons with aria-selected on exactly one, no aria-expanded', async () => {
+  it('is a role=tablist of 10 buttons with aria-selected on exactly one, no aria-expanded', async () => {
     const c = await open()
     expect(list(c)).toBeTruthy()
-    expect(tabsIn(list(c))).toHaveLength(9)
+    expect(tabsIn(list(c))).toHaveLength(10)
     for (const t of tabsIn(list(c))) expect(t.tagName).toBe('BUTTON')
     expect(selectedIn(list(c)).map((t) => t.textContent)).toEqual(['Users'])
   })
@@ -106,7 +106,7 @@ describe('Settings modal section tabs (Settings.jsx)', () => {
   it('uses a roving tabindex: only the selected tab is a Tab stop', async () => {
     const c = await open()
     expect(stopsIn(list(c)).map((t) => t.textContent)).toEqual(['Users'])
-    expect(tabsIn(list(c)).filter((t) => t.getAttribute('tabindex') === '-1')).toHaveLength(8)
+    expect(tabsIn(list(c)).filter((t) => t.getAttribute('tabindex') === '-1')).toHaveLength(9)
   })
 
   it('selects a section on click and relabels the panel', async () => {

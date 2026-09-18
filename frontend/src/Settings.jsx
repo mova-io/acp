@@ -3,6 +3,7 @@ import { resetDemoData, resetMyData, getAllowlist, setAllowlist, inviteTester, g
 import { SIM } from './sim.js'
 import WorkerReplicaControl from './WorkerReplicaControl.jsx'
 import ReviewMemory from './ReviewMemory.jsx'
+import RuleExplanations from './RuleExplanations.jsx'
 import CapacitySchedule from './CapacitySchedule.jsx'
 import PeopleAccess from './PeopleAccess.jsx'
 import WorkspaceRoles from './WorkspaceRoles.jsx'
@@ -1274,6 +1275,10 @@ export default function Settings({ onClose, files = [], onDelegationChange, me =
               admin privilege — and ReviewMemory itself withholds every write control unless
               me?.is_admin, matching the backend's _require_admin on all three writes. */}
           <button {...sectionTab('memory')}>Review Memory</button>
+          {/* Read-only product metadata for everyone who can open Settings: what each rule checks per
+              criterion and format, its thresholds and its limits. No write controls — thresholds are
+              shown, not edited (ruleExplanations.test.jsx). */}
+          <button {...sectionTab('rules')}>Rule explanations</button>
         </div>
         <div className="setbody" id="settings-panel" role="tabpanel" aria-labelledby={`settings-tab-${tab}`}>
           {tab === 'owners' && <OwnerDelegate files={files} onChanged={onDelegationChange} />}
@@ -1285,6 +1290,7 @@ export default function Settings({ onClose, files = [], onDelegationChange, me =
           {tab === 'release' && <ReleasePreferences />}
           {tab === 'ai' && <AIProvidersPanel />}
           {tab === 'memory' && <ReviewMemory me={me} />}
+          {tab === 'rules' && <RuleExplanations me={me} />}
         </div>
       </div>
     </div>
