@@ -4396,6 +4396,10 @@ class ReleaseRepublishRequest(BaseModel):
     # file -> the exact 64-hex corrected digest the user confirmed publishing again.
     expected_artifacts: dict[str, str]
     allow_remaining_issues: StrictBool = False
+    # The exact files whose remaining-issues confirmation the user ticked. When given, a file the
+    # server finds needs confirmation but that is NOT listed is refused — so a file rescored as
+    # non-compliant after the page loaded is never authorized by another file's checkbox.
+    remaining_issue_files: list[str] | None = None
 
 
 REPUBLISH_UNRESOLVED = ("The delivered copy has no exact artifact identity, so ACP cannot tell whether it is "
@@ -4472,11 +4476,34 @@ def republish_release(sid: str, body: ReleaseRepublishRequest, request: Request)
         raise _republish_blocked(unapplied, release_publication.REPUBLISH_UNAPPLIED)
     stale = {row["file"]: row for row in currency["publication"]["out_of_date"]}
     needs_confirmation = [f for f in targets if stale[f]["requires_remaining_issue_confirmation"]]
-    if needs_confirmation and not body.allow_remaining_issues:
+    confirmed = (set(needs_confirmation) if body.remaining_issue_files is None
+                 else set(body.remaining_issue_files)) if body.allow_remaining_issues else set()
+    unconfirmed = [f for f in needs_confirmation if f not in confirmed]
+    if unconfirmed:
         raise HTTPException(409, detail={
-            "code": "remaining_issues_confirmation_required", "files": needs_confirmation,
+            "code": "remaining_issues_confirmation_required", "files": unconfirmed,
             "message": "The updated copy still has remaining issues. Confirm publishing it with those issues."})
+    # Refuse a missing provider grant HERE, before anything reaches the immutable decision log:
+    # publish_files would refuse it too, but only after writing its own authorization rows.
+    provider = release.get("source")
+    if provider in {"sharepoint", "drive"} and not request.headers.get(
+            "x-sp-token" if provider == "sharepoint" else "x-drive-token"):
+        name = "SharePoint" if provider == "sharepoint" else "Google Drive"
+        raise HTTPException(403, f"{name} publishing requires a current write grant.")
+    # ONE delegation (a second publish call would hit the release stage's single-flight fence),
+    # with the remaining-issue authorization scoped to the server-computed files that need it.
+    published = _publish_release_files(sid, request, {
+        "files": targets, "expected_artifacts": {f: expected[f] for f in targets},
+        "allow_remaining_issues": False,
+        "expected_destination": {"folder_id": release.get("parent_folder_id")},
+    }, remaining_issue_files=set(needs_confirmation))
+    results = published.get("published", [])
+    # Audit what was actually admitted, after the fact: a request refused inside publish_files
+    # must not leave "authorized to replace V1" in the immutable log.
+    admitted = {row["file"] for row in results if row.get("status") in {"queued", "published"}}
     for f in targets:
+        if f not in admitted:
+            continue
         previous = by_file[f]
         core.store.log_decision(owner, "release.republish_authorized", scan_id=sid, file=f, detail=json.dumps({
             "release_id": release["id"],
@@ -4487,14 +4514,6 @@ def republish_release(sid: str, body: ReleaseRepublishRequest, request: Request)
             # Only where it is actually applied: a compliant file is not authorized with issues.
             "allow_remaining_issues": f in needs_confirmation,
         }))
-    # ONE delegation (a second publish call would hit the release stage's single-flight fence),
-    # with the remaining-issue authorization scoped to the server-computed files that need it.
-    published = _publish_release_files(sid, request, {
-        "files": targets, "expected_artifacts": {f: expected[f] for f in targets},
-        "allow_remaining_issues": False,
-        "expected_destination": {"folder_id": release.get("parent_folder_id")},
-    }, remaining_issue_files=set(needs_confirmation))
-    results = published.get("published", [])
     return {"result": "republished", "already_current": False, "already_publishing": False,
             "republished": [row["file"] for row in results if row.get("status") in {"queued", "published"}],
             "results": results, "batch_id": published.get("batch_id"),

@@ -109,9 +109,15 @@ def project(store, scan_id: str, owner: str, release: dict | None) -> dict:
                 "current_remediated_at": (record or {}).get("remediated_at"),
                 "requires_remaining_issue_confirmation": bool(
                     not release_ready(record, False) and release_ready(record, True)),
+                "last_attempt_failure": None,
             })
         elif fields["publication_state"] == "identity_unknown":
             unknown.append(document["file"])
+    if out_of_date:
+        failures = last_attempt_failures(store, scan_id, (release or {}).get("id"),
+                                         {row["file"]: row["current_remediated_at"] for row in out_of_date})
+        for row in out_of_date:
+            row["last_attempt_failure"] = failures.get(row["file"])
     states = [row["publication_state"] for row in projected]
     reason = None
     if out_of_date:
@@ -144,3 +150,51 @@ def active_publish_digests(store, scan_id: str, owner: str, release_id: str) -> 
                 and payload.get("owner") == owner and payload.get("file")):
             active.setdefault(payload["file"], set()).add(payload.get("artifact_digest"))
     return active
+
+
+def _instant(value):
+    from datetime import datetime, timezone
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
+def last_attempt_failures(store, scan_id: str, release_id: str | None, saved_at: dict) -> dict:
+    """file -> the latest refused/failed publish attempt made since the current copy was saved.
+
+    store.record_release_document keeps a delivered receipt exact and appends the refusal to the
+    immutable decision_log instead ('release.publish_attempt_failed'), so a failed republish is
+    readable without re-identifying the delivered reports. Only attempts at or after the current
+    copy's save time are returned: an older refusal is about a different copy. The caller has
+    already proven ownership of ``scan_id``; rows are also bound to this ``release_id``.
+    """
+    if not release_id or not saved_at or not hasattr(store, "_db"):
+        return {}
+    files = sorted(saved_at)
+    with store._db.cursor() as cur:
+        store._db.execute(cur,
+            "SELECT ts,file,detail FROM decision_log WHERE scan_id=%s AND action=%s AND file IN ("
+            + ",".join(["%s"] * len(files)) + ") ORDER BY ts DESC",
+            (scan_id, "release.publish_attempt_failed", *files))
+        rows = store._db.fetchall(cur)
+    latest = {}
+    for row in rows:
+        file = row.get("file")
+        if file in latest:
+            continue
+        try:
+            detail = json.loads(row.get("detail") or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(detail, dict) or detail.get("release_id") != release_id:
+            continue
+        at, saved = _instant(row.get("ts")), _instant(saved_at.get(file))
+        if at is None or (saved is not None and at < saved):
+            continue
+        latest[file] = {"failure_category": detail.get("failure_category"),
+                        "explanation": detail.get("explanation"),
+                        "attempted_artifact_digest": detail.get("attempted_artifact_digest"),
+                        "at": row.get("ts")}
+    return latest

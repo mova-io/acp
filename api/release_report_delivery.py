@@ -85,9 +85,9 @@ def _copy_currency(store, sid, owner, release, assets=()):
     changed, legacy = [], []
     for file in sorted(held):
         current = (records.get(file) or {}).get('corrected_sha256')
-        if not current:
-            continue
-        if held[file] is None:
+        if not current or held[file] is None:
+            # Either side without an exact identity cannot be compared — the same answer the
+            # Release projection gives (identity_unknown), never an implied 'current'.
             legacy.append(file)
         elif held[file] != current:
             changed.append(dict(file=file, reported_artifact_digest=reported.get(file) or 'sha256:' + held[file],
@@ -161,7 +161,7 @@ def queue_release_reports(store, scan_id, owner, release_id):
             return _public(existing, store)
         current = store.release_status(release_id, owner)
         if not current or _fingerprint(release_id, current) != fingerprint:
-            raise ValueError('Release changed while preparing reports; retry with the current release')
+            raise ValueError(REPORT_RELEASE_CHANGED)
         if _published_copy_changed(store, scan_id, owner, current):
             raise ValueError(REPORT_COPY_CHANGED)
         names = {a['name']: a['name'].rsplit('.', 1)[0] + '-' + identity[:10] + '.' + a['name'].rsplit('.', 1)[1] for a in assets}

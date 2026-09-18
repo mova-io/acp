@@ -169,15 +169,21 @@ def test_a_failed_attempt_never_erases_the_delivered_receipt(world, failure):
     store.record_release_document(rid, OWNER, dict(file=FILE, status='queued'))
     store.record_release_document(rid, OWNER, dict(file=FILE, status='failed', released_relative_path=None, **failure))
     row = store.get_release_document(rid, FILE, OWNER)
-    assert row['status'] == 'published'
-    assert (row['failure_category'], row['explanation']) == (failure['failure_category'], failure['explanation'])
-    for key in ('artifact_digest', 'published_at', 'released_document_id', 'released_document_url',
-                'destination_relative_path', 'verification'):
-        assert row[key] == delivered[key], key
+    # The delivered row is restored EXACTLY — every column is part of the report fingerprint, so
+    # even the attempt's failure fields must not land on it (they re-identified the reports).
+    assert row == delivered
     assert column_status(store, rid)['status'] == 'completed'
+    import json
     import release_publication
+    attempts = [r for r in store.list_decisions(SID) if r['action'] == 'release.publish_attempt_failed']
+    assert len(attempts) == 1 and attempts[0]['file'] == FILE
+    detail = json.loads(attempts[0]['detail'])
+    assert detail['release_id'] == rid and detail['published_artifact_digest'] == delivered['artifact_digest']
+    assert (detail['failure_category'], detail['explanation']) == (failure['failure_category'], failure['explanation'])
     publication = release_publication.project(store, SID, OWNER, store.release_status(rid, OWNER))['publication']
     assert publication['state'] == 'out_of_date' and publication['can_republish'] is True
+    last = publication['out_of_date'][0]['last_attempt_failure']
+    assert (last['failure_category'], last['explanation']) == (failure['failure_category'], failure['explanation'])
     assert publication['out_of_date'][0]['published_artifact_digest'] == tag(V1)
 
 
@@ -270,7 +276,7 @@ def test_projection_out_of_date_and_republish_gates(world, monkeypatch):
         'state': 'out_of_date',
         'out_of_date': [{'file': FILE, 'published_artifact_digest': tag(V1), 'current_artifact_digest': tag(V2),
                          'published_at': PUBLISHED_AT, 'current_remediated_at': '2026-09-11T00:00:00+00:00',
-                         'requires_remaining_issue_confirmation': True}],
+                         'requires_remaining_issue_confirmation': True, 'last_attempt_failure': None}],
         'identity_unknown': [], 'can_republish': True, 'republish_blocked_reason': None}
     correct_to(store, V2, compliant=1)
     assert project()['publication']['out_of_date'][0]['requires_remaining_issue_confirmation'] is False
@@ -494,3 +500,44 @@ def test_per_file_authorization_is_scoped_and_fingerprinted(routes, world):
                                       remaining_issue_files=set())
     assert other.value.detail['code'] == 'stage_execution_active'
     assert len([job for job in jobs(store) if job.get('release_id') == world.release_id]) == 1
+
+
+def test_confirmation_list_never_authorizes_an_unticked_file(routes, world):
+    """The UI names the files whose remaining-issues box was ticked. A file the server finds needs
+    confirmation (e.g. rescored non-compliant at the same digest after the page loaded) but that is
+    not in that list is refused — another file's checkbox never authorizes it."""
+    store, rid = world.store, world.release_id
+    w1, w2 = 'a' * 64, 'b' * 64
+    with store._db.cursor() as cur:
+        store._db.execute(cur, "INSERT INTO file_records(scan_id,file,engine,status,compliant,corrected_sha256,remediated_at,drive_file_id) "
+                          "VALUES(%s,'two.pdf','pdf','analysed',0,%s,'t2','source-two')", (SID, w2))
+    store.ensure_release_execution(SID, OWNER, 'sharepoint', 2)
+    store.record_release_document(rid, OWNER, dict(file='two.pdf', status='published', artifact_digest=tag(w1),
+                                                    published_at=PUBLISHED_AT, published_url='https://example.com/two-v1'))
+    correct_to(store, V2)
+    before = len(jobs(store))
+    error = conflict(routes, {'expected_artifacts': {FILE: V2, 'two.pdf': w2}, 'allow_remaining_issues': True,
+                              'remaining_issue_files': [FILE]})
+    assert error.status_code == 409 and error.detail['code'] == 'remaining_issues_confirmation_required'
+    assert error.detail['files'] == ['two.pdf']
+    assert len(jobs(store)) == before
+    assert decisions(store, 'release.remaining_issues_authorized') == []
+    assert decisions(store, 'release.republish_authorized') == []
+    ok = republish(routes, {'expected_artifacts': {FILE: V2, 'two.pdf': w2}, 'allow_remaining_issues': True,
+                            'remaining_issue_files': [FILE, 'two.pdf']})
+    assert sorted(ok['republished']) == [FILE, 'two.pdf']
+
+
+def test_a_refusal_older_than_the_current_copy_is_not_reported_as_its_failure(routes, world):
+    """last_attempt_failure describes an attempt to publish the CURRENT copy. A refusal recorded
+    before that copy was saved is about a different copy and must not be attached to it."""
+    store, rid = world.store, world.release_id
+    store.record_release_document(rid, OWNER, dict(file=FILE, status='failed', failure_category='not_approved',
+                                                    explanation='Only approved corrected copies can be released.'))
+    assert len(decisions(store, 'release.publish_attempt_failed')) == 1
+    correct_to(store, V2, at='2999-01-01T00:00:00+00:00')
+    [row] = routes.get_release_status(SID, request())['publication']['out_of_date']
+    assert row['last_attempt_failure'] is None
+    correct_to(store, V2, at='2000-01-01T00:00:00+00:00')
+    [row] = routes.get_release_status(SID, request())['publication']['out_of_date']
+    assert row['last_attempt_failure']['failure_category'] == 'not_approved'
