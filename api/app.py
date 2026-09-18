@@ -35,7 +35,12 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="acp — accessibility compliance API", version="0.1.0")
 app.add_middleware(ReadinessPhaseMiddleware)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False,
-                   allow_methods=["*"], allow_headers=["*"], expose_headers=["X-Acp-Auth", "Content-Disposition"])
+                   allow_methods=["*"], allow_headers=["*"],
+                   # The provenance headers (which bytes a preview drew, which page, of how many)
+                   # must be listed HERE: a per-route Access-Control-Expose-Headers is overwritten by
+                   # this middleware, and a cross-origin SPA cannot read an unlisted header at all.
+                   expose_headers=["X-Acp-Auth", "Content-Disposition", "X-ACP-Artifact-Sha256",
+                                   "X-ACP-Rendered-Page", "X-ACP-Page-Count"])
 
 
 @app.middleware("http")
@@ -287,7 +292,11 @@ async def _access_gate(request, call_next):
     is configured."""
     if core.E2E_KEY and request.headers.get("x-e2e-key") == core.E2E_KEY:
         return await call_next(request)
-    if core.is_public(request.url.path):
+    # scope["path"], NOT request.url.path: the router dispatches on scope["path"], while
+    # request.url is rebuilt from the DECODED path, so an encoded '#' or '?' in a filename
+    # truncates it ('/scans/S/files/a%23b.xlsx/report-facts' reads as '/scans/S/files/a'), which
+    # matches no route and so read as public — anonymous access to a protected route (R-C1).
+    if core.is_public(request.scope.get("path", "")):
         return await call_next(request)
     if core.ACCESS_CODE:
         ok = False
