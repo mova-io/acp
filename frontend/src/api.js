@@ -1537,6 +1537,13 @@ export const getQueueJob = (jobId) => {
 // Send this scan's review-needing findings to the server HITL queue (idempotent
 // POST /hitl/queue/{sid}/auto) — called after a single-file remediate-now so an
 // AI-assisted fix still gets human sign-off instead of silently skipping review.
+// Re-check this scan's open review rows against the RECORDED assessment of the saved corrected
+// copy (contract C7/C8). Owner-scoped server route; no AI call, no document write, no change to any
+// row's review status — it only marks rows whose target a verified change already removed.
+// Resolves { scan_id, superseded_count, files: [{ file, superseded, unchanged, skipped: [{item_id, reason}] }] }.
+export const reconcileReviewTargets = (scanId) => (SIM
+  ? sim({ scan_id: scanId, superseded_count: 0, files: [] })
+  : fetch(`${BASE}/hitl/queue/${encodeURIComponent(scanId)}/reconcile-targets`, { method: 'POST', headers: headers(), cache: 'no-store' }).then(j))
 export const queueHitlReview = (scanId) => (SIM
   ? sim({ queued: 1 })
   : fetch(`${BASE}/hitl/queue/${encodeURIComponent(scanId)}/auto`, { method: 'POST', headers: headers() }).then(j))

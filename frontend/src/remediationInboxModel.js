@@ -644,7 +644,9 @@ export function autoFixRows(fixes = [], nameOf = (sc) => sc, { aiApplicationReco
     const fmt = (String(a.file || '').split('.').pop() || 'DOC').toUpperCase()
     // Target identity, when the evidence names one — what dedupeReviewTasks proves a duplicate by.
     // A reviewer-approved write records "approved by a reviewer · <locator>" in its note.
-    const noted = /approved by a reviewer · (\S+)\s*$/.exec(String(a.note || ''))?.[1]
+    // The locator is everything after that exact prefix — it may contain spaces ("image 1", a Word
+    // docPr name) — trimmed only at the ends; an empty suffix names no target.
+    const noted = /^approved by a reviewer · ([\s\S]*)$/.exec(String(a.note || ''))?.[1]?.trim() || null
     const targetLocator = a.locator ?? a.target ?? a.instance_key ?? noted ?? null
     const sourceItemId = a.item_id ?? a.review_item_id ?? a.hitl_id ?? null
     const findingId = a.finding_id ?? null

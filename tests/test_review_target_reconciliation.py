@@ -679,3 +679,148 @@ def test_automatic_queue_puts_no_marker_on_a_superseded_row(store):
            'automatic_approval': {'responsibility': 'human'}}
     [out] = annotate(store, [row], OWNER)
     assert 'automatic_approval' not in out
+
+
+# ── follow-up 2: repeated polls read no stored document; the narrow reconcile-targets route ──
+
+class CountingBlob(Blob):
+    def __init__(self, remediated, source=None):
+        super().__init__(remediated, source)
+        self.reads = []
+
+    def download_remediated(self, owner, sid, f):
+        self.reads.append(('remediated', f))
+        return super().download_remediated(owner, sid, f)
+
+    def download_source(self, owner, sid, f, checksum=None):
+        self.reads.append(('source', f))
+        return super().download_source(owner, sid, f, checksum)
+
+
+def test_repeated_calls_after_retirement_read_no_stored_document(store, monkeypatch):
+    """The retired row keeps its audit status 'pending'. Eligibility alone would re-download
+    both documents on every poll; current evidence must answer from metadata."""
+    w = World(store)
+    _persist(store, w)
+    blob = CountingBlob(w.corrected, w.source)
+    monkeypatch.setitem(sys.modules, 'blob', blob)
+    first = rtr.reconcile_scan(store, SID)
+    assert [s['item_id'] for s in first[FILE]['superseded']] == [w.alt]
+    reads = len(blob.reads)
+    assert reads >= 2                                   # the one real check read both
+    for _ in range(3):
+        again = rtr.reconcile_scan(store, SID)
+        assert again[FILE]['superseded'] == []
+        assert [u['item_id'] for u in again[FILE]['unchanged']] == [w.alt]
+    assert len(blob.reads) == reads, blob.reads[reads:]
+    assert len(w.lines()) == 1
+
+
+def test_a_mixed_file_is_still_checked_and_then_memoized(store, monkeypatch):
+    """One row retired, one genuinely open: the file is processed (the open row is decided on
+    the bytes), and the identical next call answers from memory until an input changes."""
+    w = World(store)
+    w.reconcile()                                           # the 1.1.1 row is retired
+    other = store.enqueue_proposals(SID, FILE, '1.4.9', [
+        {'locator': 'image 1', 'before': '', 'proposed_value': TEXT, 'source': 'OCR'}],
+        rule_name='Images of Text (No Exception)')
+    _persist(store, w)
+    blob = CountingBlob(w.corrected, w.source)
+    monkeypatch.setitem(sys.modules, 'blob', blob)
+    first = rtr.reconcile_scan(store, SID)[FILE]
+    assert len(blob.reads) >= 2                             # processed, not skipped as retired
+    assert any(s['item_id'] == other for s in first['skipped'])
+    assert any(u['item_id'] == w.alt for u in first['unchanged'])
+    reads = len(blob.reads)
+    assert rtr.reconcile_scan(store, SID)[FILE] == first
+    assert len(blob.reads) == reads                         # memoized: nothing changed
+    with store._db.cursor() as cur:                         # a binding change re-evaluates
+        store._db.execute(cur, "UPDATE hitl_queue SET proposal_snapshot_ids=%s WHERE id=%s",
+                          (json.dumps(['snap-new']), other))
+    rtr.reconcile_scan(store, SID)
+    assert len(blob.reads) > reads
+
+
+def test_whole_scan_calls_are_bounded(store, monkeypatch):
+    w = World(store)
+    _persist(store, w)
+    blob = CountingBlob(w.corrected, w.source)
+    monkeypatch.setitem(sys.modules, 'blob', blob)
+    result = rtr.reconcile_scan(store, SID, max_files=0)
+    assert result[FILE]['skipped'] == [{'item_id': None, 'reason': 'deferred_bounded'}]
+    assert blob.reads == [] and w.lines() == []
+
+
+def _client(store, monkeypatch, owner=OWNER):
+    import core
+    from app import app
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(core, 'store', store)
+    monkeypatch.setattr(core, 'ACCESS_CODE', '')
+    monkeypatch.setattr(core, 'GOOGLE_CLIENT_ID', 'test-client-id')
+    monkeypatch.setattr(core, 'E2E_KEY', None)
+    monkeypatch.setattr(core, 'OWNER_EMAIL', owner)
+    monkeypatch.setattr(core, 'verify_gis_token', lambda t: t)
+    monkeypatch.setattr(core, 'email_allowed', lambda e: True)
+    return TestClient(app)
+
+
+def test_reconcile_targets_route_is_owner_scoped_narrow_and_idempotent(store, monkeypatch):
+    w = World(store)
+    _persist(store, w)
+    blob = CountingBlob(w.corrected, w.source)
+    monkeypatch.setitem(sys.modules, 'blob', blob)
+    client = _client(store, monkeypatch)
+    url = f'/hitl/queue/{SID}/reconcile-targets'
+    # No routing, no AI, no writer: any of these being reached is a failure.
+    for name in ('queue_hitl_items', 'reconcile_completed_remediation_reviews',
+                 'queue_hitl_review_for_file', 'enqueue_job', 'enqueue_proposals'):
+        monkeypatch.setattr(store, name, lambda *a, _n=name, **k: pytest.fail(f'{_n} must not run'))
+    rows_before = {r['id'] for r in store.list_hitl_queue(scan_id=SID, include_superseded=True)}
+
+    assert client.post(url).status_code == 401
+    assert client.post(url, headers={'Authorization': 'Bearer other@example.com'}).status_code == 404
+    assert w.lines() == [] and blob.reads == []
+
+    response = client.post(url, headers={'Authorization': f'Bearer {OWNER}'})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body == {'scan_id': SID, 'superseded_count': 1,
+                    'files': [{'file': FILE, 'superseded': [w.alt], 'unchanged': [], 'skipped': []}]}
+    assert len(w.lines()) == 1
+    assert store.get_hitl_item(w.alt)['status'] == 'pending'
+    assert blob.uploads == []                                   # no document write
+
+    reads = len(blob.reads)
+    second = client.post(url, headers={'Authorization': f'Bearer {OWNER}'}).json()
+    assert second['superseded_count'] == 0
+    assert second['files'] == [{'file': FILE, 'superseded': [], 'unchanged': [w.alt],
+                                'skipped': [{'item_id': None, 'reason': 'nothing_to_reconcile'}]}]
+    assert len(w.lines()) == 1 and len(blob.reads) == reads
+    assert {r['id'] for r in store.list_hitl_queue(scan_id=SID, include_superseded=True)} == rows_before
+
+
+def test_reconcile_targets_requires_the_review_capability():
+    from workspace_capability_map import required_capabilities
+    # Keyed by the route TEMPLATE, as the middleware looks it up.
+    assert required_capabilities('POST', '/hitl/queue/{scan_id}/reconcile-targets') == {'remediate.review'}
+
+
+def test_auto_route_still_routes_and_reconciles(store, monkeypatch):
+    import core
+    from routes import hitl as routes
+    w = World(store)
+    _persist(store, w)
+    _completed(store, w)
+    monkeypatch.setitem(sys.modules, 'blob', Blob(w.corrected, w.source))
+    monkeypatch.setattr(core, 'store', store)
+    monkeypatch.setattr(core, 'fire_webhook', lambda *a, **k: None)
+    called = []
+    real = store.queue_hitl_items
+    monkeypatch.setattr(store, 'queue_hitl_items', lambda sid: (called.append(sid), real(sid))[1])
+
+    class Req:
+        class state:
+            user_email = None
+    response = routes.hitl_auto_queue(SID, Req())
+    assert called == [SID] and response['target_removals']['superseded'] == [w.alt]

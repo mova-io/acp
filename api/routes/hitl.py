@@ -118,6 +118,34 @@ def hitl_auto_queue(scan_id: str, request: Request):
                             for s in r.get("skipped", [])]}}
 
 
+@router.post("/hitl/queue/{scan_id}/reconcile-targets")
+def hitl_reconcile_targets(scan_id: str, request: Request):
+    """Re-check open review items against the RECORDED check of each saved Word copy.
+
+    Retires an item only when a different verified change removed every one of its targets
+    and a complete assessment of the current saved copy proves it (see
+    review_target_reconciliation). Deliberately narrower than /auto: no queue routing, no AI,
+    no document write, no review-status change — only a decision_log line and the exact
+    finding_disposition rows. Idempotent: a repeat call retires nothing new and, for items
+    already retired on current evidence, reads no stored document at all.
+    """
+    if core.store.get_scan(scan_id, owner=_request_owner(request)) is None:
+        raise HTTPException(404, "scan not found")
+    from review_target_reconciliation import reconcile_scan
+    files = []
+    for file, result in sorted(reconcile_scan(core.store, scan_id).items()):
+        files.append({
+            "file": file,
+            "superseded": sorted({str(s["item_id"]) for s in result.get("superseded", [])}),
+            "unchanged": sorted({str(s["item_id"]) for s in result.get("unchanged", [])}),
+            "skipped": [{"item_id": s.get("item_id"), "reason": s.get("reason")}
+                        for s in result.get("skipped", [])],
+        })
+    return {"scan_id": scan_id,
+            "superseded_count": sum(len(f["superseded"]) for f in files),
+            "files": files}
+
+
 @router.post("/hitl/queue/{scan_id}/verify")
 def hitl_verify_queue(scan_id: str, request: Request, file: str = Query(...)):
     """Queue a post-fix VERIFICATION item for one fully-automatic remediation

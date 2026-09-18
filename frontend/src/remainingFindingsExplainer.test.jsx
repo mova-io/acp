@@ -83,6 +83,22 @@ it('renders nothing when the explanation is all clear', async () => {
   expect(container.textContent).toBe('')
 })
 
+it('with unknown finding totals, says they are unavailable instead of rendering an empty list that reads as clear', async () => {
+  const settled = rows.map(r => r.id === 102 ? { ...r, validated: true } : r).filter(r => r.id !== 101)
+  const explanation = explainReviewPopulation({ rows: settled, automatic: true })   // no domain at all
+  expect(explanation.allClear).toBe(false)
+  for (const showHeadline of [true, false]) {
+    const { root, container } = createTestRoot()
+    await act(async () => root.render(createElement(RemainingFindingsExplainer, { explanation, onOpenItem: () => {}, showHeadline })))
+    expect(container.textContent).not.toMatch(/All clear/)
+    expect(container.querySelector('.remaining-findings-explainer__units').textContent)
+      .toContain('4 review tasks · current finding totals unavailable')
+    expect(container.querySelectorAll('.remaining-findings-explainer__list')).toHaveLength(0)
+    expect(!!container.querySelector('.remaining-findings-explainer__headline')).toBe(showHeadline)
+    if (showHeadline) expect(container.textContent).toContain('No open review tasks; current finding totals unavailable.')
+  }
+})
+
 it('omits its headline when the host already prints it as the lead line, keeping the item list', async () => {
   const explanation = explainReviewPopulation({ rows, automatic: true, unresolvedFindings: [finding], findingTotal: 1 })
   const { root, container } = createTestRoot()

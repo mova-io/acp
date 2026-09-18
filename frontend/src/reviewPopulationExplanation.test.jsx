@@ -207,6 +207,47 @@ describe('the server list total (domain_reconciliation.unresolved_findings_total
   })
 })
 
+// All clear needs KNOWN-zero finding evidence. Every case below has a terminal-only queue (all five
+// tasks in Results), so the only open question is whether the server's finding totals are known.
+describe('unknown finding totals never read as All clear', () => {
+  const settled = { rows: POST_FIX, decisions: {}, automatic: true }
+  const UNKNOWN = 'No open review tasks; current finding totals unavailable.'
+  const unknownCases = {
+    'a null domain': findingInputsFrom(null),
+    'a missing list and no count': findingInputsFrom({ available: true, total: 4 }),
+    'unbalanced buckets with an empty list': findingInputsFrom({ available: true, total: 9, buckets: { resolved_verified: 3, superseded: 1 }, unresolved_findings: [] }),
+  }
+  for (const [name, inputs] of Object.entries(unknownCases)) {
+    it(`withholds All clear for ${name}`, () => {
+      expect(inputs.findingTotal).toBeNull()
+      const e = explainReviewPopulation({ ...settled, ...inputs })
+      expect([e.humanCount, e.processingCount, e.statusCheckCount, e.remaining.length]).toEqual([0, 0, 0, 0])
+      expect(e.findingTotalsKnown).toBe(false)
+      expect(e.allClear).toBe(false)
+      expect(e.findingTotal).toBeNull()        // an empty list is not reported as "0 findings"
+      expect(e.headline).toBe(UNKNOWN)
+      expect(reviewLeadLine([], 0, e)).toBe(UNKNOWN)
+      expect(e.emptyFilterLine('review')).toBe('No tasks in Needs your input. No other open review tasks; current finding totals unavailable.')
+    })
+  }
+  it('still says All clear on known-zero evidence (balanced tile at 0, or an uncapped list total of 0)', () => {
+    const balanced = explainReviewPopulation({ ...settled, ...findingInputsFrom(POST_DOMAIN) })
+    expect(balanced.findingTotalsKnown).toBe(true)
+    expect(balanced.allClear).toBe(true)
+    expect(balanced.headline).toBe('All clear — nothing needs your review.')
+    const byListTotal = explainReviewPopulation({ ...settled, unresolvedFindings: [], unresolvedFindingsTotal: 0 })
+    expect(byListTotal.allClear).toBe(true)
+    // A balanced tile at 0 is itself known-zero evidence, list or no list.
+    const tileOnly = explainReviewPopulation({ ...settled, ...findingInputsFrom({ ...POST_DOMAIN, unresolved_findings: undefined }) })
+    expect(tileOnly.allClear).toBe(true)
+  })
+  it('adds the unavailable sentence when tasks remain and totals are unknown', () => {
+    const e = explainReviewPopulation({ rows: PRE_FIX, decisions: {}, automatic: true })
+    expect(e.allClear).toBe(false)
+    expect(e.headline).toBe('Nothing needs your decision. 2 items are status checks ACP is tracking — see Status checks. Current finding totals are unavailable.')
+  })
+})
+
 describe('progress labels', () => {
   it('share one denominator and read correctly in the singular', () => {
     const p = progressLabelsOf({ total: 1, decided: 1, finished: 0, awaitingOutcome: 1, open: 0 })

@@ -1,4 +1,4 @@
-// The production case behind scan b3eba56d4d5d, reproduced with SYNTHETIC rows on the real
+// A production case, reproduced with SYNTHETIC rows on the real
 // Remediate page (not the inbox alone), so the wiring — dedupe, explanation, banner, wording and
 // open-item selection — is exercised exactly as the page composes it.
 //
@@ -16,7 +16,8 @@ import Remediate from './Remediate.jsx'
 const SCAN = 'scan-frr'
 const BATCH = 'batch-frr'
 const FILE = 'synthetic-discharge.docx'
-const IMAGE = 'docx:drawing:1:paragraph:32'
+// The real writer's locator for a DOCX body image — note the space.
+const IMAGE = 'image 1'
 const POLICY = { enabled: true, supported: true, run_id: BATCH, source_revision: 'src', revision: 1 }
 
 let rows = []
@@ -62,7 +63,8 @@ const altReplaced = { ...altPending, superseded: true, superseded_reason: 'targe
 const altHuman = { ...altPending, automatic_approval: { state: 'review_required', responsibility: 'human',
   reason: 'The image description could not be confirmed automatically; a person must check it.',
   scan_id: SCAN, run_id: BATCH, source_revision: 'src', proposal_snapshot_ids: ['snap-111'] } }
-// The fifth row: applied-fix evidence that is a proven second representation of item-145.
+// The fifth row: applied-fix evidence that is a proven second representation of item-145. Exactly
+// the writer's note shape (api/handlers.py: 'approved by a reviewer · {locator}'), no locator field.
 const duplicateDiff = { file: FILE, sc: '1.4.5', before: '[image]', after: imagesOfText.approved_value,
   note: `approved by a reviewer · ${IMAGE}`, verified: true }
 

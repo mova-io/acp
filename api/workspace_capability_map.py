@@ -234,6 +234,10 @@ _map_many([
     ("PUT", "/hitl/queue/{item_id}"), ("PATCH", "/hitl/queue/{item_id}/assign"),
     ("POST", "/hitl/queue/{item_id}/retry-write"),
     ("POST", "/hitl/queue/{scan_id}/auto"), ("POST", "/hitl/queue/{scan_id}/verify"),
+    # Retires review items a different verified change already made moot, from the recorded
+    # check of the saved copy. It changes what the review queue asks of a person, so it is a
+    # review action like /auto — never a remediation run (no AI, no document write).
+    ("POST", "/hitl/queue/{scan_id}/reconcile-targets"),
 ], {"remediate.review"})
 # AI drafting assists a reviewer; it writes nothing to a document on its own.
 _map_many([("GET", "/ai/suggest"), ("GET", "/ai/explain"), ("GET", "/ai/validate"),

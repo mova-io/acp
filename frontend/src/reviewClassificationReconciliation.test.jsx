@@ -308,6 +308,44 @@ describe('dedupeReviewTasks proves a duplicate before dropping it', () => {
   })
 })
 
+describe('the writer note is the locator source, spaces included (api/handlers.py "approved by a reviewer · {locator}")', () => {
+  // Only the real note shape, through the real autoFixRows — no explicit locator field on the diff.
+  const writerNote = locator => `approved by a reviewer · ${locator}`
+  const review = locator => ({ id: 9601, file: 'synthetic.docx', rule_id: '1.4.5', status: 'approved', applied: true, validated: true,
+    _raw: { id: 9601, rule_id: '1.4.5', proposals: [{ locator, proposed_value: 'Synthetic text' }] } })
+  const evidence = note => autoFixRows([{ file: 'synthetic.docx', rule_id: '1.4.5', seq: 0, before: '[image]', after: 'Synthetic text', note, verified: true }], sc => sc)[0]
+
+  it.each([
+    ['the production image locator', 'image 1'],
+    ['a Word docPr name with spaces', 'Picture 3 – Discharge chart (copy)'],
+  ])('dedupes %s', (_label, locator) => {
+    const af = evidence(writerNote(locator))
+    expect(af.targetLocator).toBe(locator)
+    expect(dedupeReviewTasks([review(locator), af])).toHaveLength(1)
+    expect(reviewProgressOf([review(locator), af], {}).total).toBe(1)
+  })
+
+  it('trims only the ends of the locator', () => {
+    expect(evidence(`${writerNote('  image 1 ')}  `).targetLocator).toBe('image 1')
+  })
+
+  it('an empty suffix names no target and never dedupes', () => {
+    for (const note of [writerNote(''), writerNote('   '), 'approved by a reviewer ·']) {
+      const af = evidence(note)
+      expect(af.targetLocator).toBeUndefined()
+      expect(dedupeReviewTasks([review(''), af])).toHaveLength(2)
+    }
+  })
+
+  it('a different locator, or a note that only contains the prefix mid-text, never dedupes', () => {
+    expect(dedupeReviewTasks([review('image 1'), evidence(writerNote('image 2'))])).toHaveLength(2)
+    expect(dedupeReviewTasks([review('image 1'), evidence(writerNote('image 10'))])).toHaveLength(2)
+    const embedded = evidence(`office retry; approved by a reviewer · image 1`)
+    expect(embedded.targetLocator).toBeUndefined()
+    expect(dedupeReviewTasks([review('image 1'), embedded])).toHaveLength(2)
+  })
+})
+
 describe('reviewProgressOf keeps saved-but-unverified work out of "finished"', () => {
   it('an approved, written, unverified change is decided and awaiting its outcome', () => {
     const saved = hitl({ id: 9401, rule: '1.4.5', status: 'approved', applied: true, validated: false, value: 'Synthetic text.' })

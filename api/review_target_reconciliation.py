@@ -776,17 +776,12 @@ def _assessed_source(scan_id, file, owner, store):
     return data or None
 
 
-def _has_eligible_rows(store, scan_id, file):
-    with store._db.cursor() as cur:
-        store._db.execute(cur,
-            "SELECT status,applied FROM hitl_queue WHERE scan_id=%s AND file=%s", (scan_id, file))
-        return any(_eligible(r) for r in store._db.fetchall(cur))
-
-
 def reconcile_after_apply(store, scan_id, file, *, owner, prior: bytes, prior_sha256: str | None,
                           corrected: bytes, verification) -> dict:
     """Trigger (a): an apply job just committed `corrected` with its own complete re-scan."""
-    if not str(file).lower().endswith('.docx') or not _has_eligible_rows(store, scan_id, file):
+    # A new artifact makes every earlier retirement non-current, so rows retired before this
+    # job ARE candidates again and are re-affirmed on these bytes; nothing else re-reads storage.
+    if not str(file).lower().endswith('.docx') or not candidates(store, scan_id, file)[0]:
         return {'superseded': [], 'unchanged': [], 'skipped': [{'item_id': None, 'reason': 'nothing_to_reconcile'}]}
     from datetime import datetime, timezone
     evidence = evidence_from_verification(verification, verified_at=datetime.now(timezone.utc).isoformat())
@@ -802,32 +797,117 @@ def reconcile_after_apply(store, scan_id, file, *, owner, prior: bytes, prior_sh
                      source_kind='prior_corrected_copy', expected_source_sha256=prior_sha256)
 
 
-def reconcile_from_saved_assessment(store, scan_id, file, owner) -> dict:
-    """Triggers (b) and (c): persisted saved-copy evidence on the CURRENT corrected artifact.
+# Per-process memo of files whose last full check found nothing to retire, keyed by everything
+# that check depended on. Bounded; a miss only costs one re-check.
+_MEMO_LIMIT = 512
+# How many files one call may download and re-check. The rest report 'deferred_bounded' and are
+# picked up by the next call; files with nothing new to check never count against it.
+MAX_FILES_PER_CALL = 20
+# Skips that depend on something outside the fingerprint (storage availability): never memoized.
+_TRANSIENT = {'bytes_unavailable'}
 
-    Reads stored bytes only. No model call, no document write, no approval.
+
+def _file_rows(store, scan_id, file):
+    with store._db.cursor() as cur:
+        store._db.execute(cur, "SELECT * FROM hitl_queue WHERE scan_id=%s AND file=%s ORDER BY id",
+                          (scan_id, file))
+        return [store._decode_proposals(r) for r in store._db.fetchall(cur)]
+
+
+def candidates(store, scan_id, file):
+    """(rows still worth checking, ids already retired on CURRENT evidence). Metadata only.
+
+    A retired row keeps its audit status ('pending'), so eligibility alone would re-download
+    both documents on every poll forever. current_removals already proves those rows retired
+    without touching blob storage; only the rest are candidates.
     """
-    none = {'superseded': [], 'unchanged': [], 'skipped': []}
-    if not str(file).lower().endswith('.docx') or not _has_eligible_rows(store, scan_id, file):
-        none['skipped'].append({'item_id': None, 'reason': 'nothing_to_reconcile'})
-        return none
+    rows = _file_rows(store, scan_id, file)
+    eligible = [r for r in rows if _eligible(r)]
+    retired = current_removals(store, eligible)
+    return [r for r in eligible if str(r['id']) not in retired], sorted(retired), rows
+
+
+def _fingerprint(store, scan_id, file, record, evidence, rows):
+    """Everything a full check reads, except the bytes themselves (bound by their digests)."""
+    batch = current_batch(store, scan_id)
+    try:
+        scope_id = _scope(store, scan_id, file)[1]
+    except Exception:
+        return None
+    findings = sorted((f['finding_id'], f.get('disposition'), int(f.get('revision') or 0))
+                      for f in (store.list_finding_dispositions(scan_id, batch) if batch else [])
+                      if f['file'] == file)
+    state = [(str(r['id']), r.get('rule_id'), r.get('status'), bool(r.get('applied')),
+              bool(r.get('validated')), int(r.get('decision_version') or 0), _snapshots(r),
+              _targets(r)) for r in rows]
+    material = json.dumps([scan_id, file, record.get('corrected_sha256'), record.get('remediated_at'),
+                           batch, scope_id, evidence.get('evidence_line_id'), state, findings],
+                          sort_keys=True, default=str, separators=(',', ':'))
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+def _memo(store):
+    from collections import OrderedDict
+    memo = store.__dict__.get('_target_reconciliation_memo')
+    if memo is None:
+        memo = store.__dict__['_target_reconciliation_memo'] = OrderedDict()
+    return memo
+
+
+def reconcile_from_saved_assessment(store, scan_id, file, owner, *, budget=None) -> dict:
+    """Triggers (b), (c) and the reconcile-targets route: persisted saved-copy evidence on the
+    CURRENT corrected artifact.
+
+    Reads stored bytes only, and only when there is something new to decide: rows already retired
+    on current evidence, and files whose last complete check is unchanged in every input, are
+    answered from metadata. `budget` ([remaining downloads]) bounds a whole-scan call.
+    No model call, no document write, no approval.
+    """
+    result = {'superseded': [], 'unchanged': [], 'skipped': []}
+    if not str(file).lower().endswith('.docx'):
+        result['skipped'].append({'item_id': None, 'reason': 'format_unsupported'})
+        return result
+    todo, retired, rows = candidates(store, scan_id, file)
+    if not todo:
+        result['unchanged'] = [{'item_id': item_id} for item_id in retired]
+        result['skipped'].append({'item_id': None, 'reason': 'nothing_to_reconcile'})
+        return result
     record = store.get_file_record(scan_id, file) or {}
     evidence = persisted_evidence(store, scan_id, file, owner, record)
     if evidence is None:
-        none['skipped'].append({'item_id': None, 'reason': 'verification_missing'})
-        return none
+        result['skipped'].append({'item_id': None, 'reason': 'verification_missing'})
+        return result
+    fingerprint = _fingerprint(store, scan_id, file, record, evidence, rows)
+    memo = _memo(store)
+    if fingerprint and fingerprint in memo:
+        memo.move_to_end(fingerprint)
+        return json.loads(memo[fingerprint])
+    if budget is not None:
+        if budget[0] <= 0:
+            result['skipped'].append({'item_id': None, 'reason': 'deferred_bounded'})
+            return result
+        budget[0] -= 1
     import blob
     corrected = blob.download_remediated(owner, scan_id, file)
     source = _assessed_source(scan_id, file, owner, store)
     if not corrected or not source:
-        none['skipped'].append({'item_id': None, 'reason': 'bytes_unavailable'})
-        return none
-    return reconcile(store, scan_id, file, source=source, corrected=corrected, evidence=evidence,
-                     source_kind='assessed_source')
+        result['skipped'].append({'item_id': None, 'reason': 'bytes_unavailable'})
+        return result
+    outcome = reconcile(store, scan_id, file, source=source, corrected=corrected, evidence=evidence,
+                        source_kind='assessed_source')
+    if (fingerprint and not outcome['superseded']
+            and not any(s.get('reason') in _TRANSIENT for s in outcome['skipped'])):
+        # Nothing was retired, so nothing this check read has changed: the next identical
+        # call gets the same answer without reading either document again.
+        memo[fingerprint] = json.dumps(outcome)
+        while len(memo) > _MEMO_LIMIT:
+            memo.popitem(last=False)
+    return outcome
 
 
-def reconcile_scan(store, scan_id) -> dict:
-    """Trigger (c) for a whole scan: every docx that holds an eligible row. {file: result}."""
+def reconcile_scan(store, scan_id, *, max_files=None) -> dict:
+    """Every docx holding an eligible row, at most `max_files` (default MAX_FILES_PER_CALL) of
+    them read from storage in one call. {file: result}."""
     with store._db.cursor() as cur:
         store._db.execute(cur, "SELECT owner_email FROM scan_runs WHERE id=%s", (scan_id,))
         owner = (store._db.fetchone(cur) or {}).get('owner_email')
@@ -835,5 +915,6 @@ def reconcile_scan(store, scan_id) -> dict:
             "SELECT DISTINCT file FROM hitl_queue WHERE scan_id=%s AND (status IN ('pending','in_review') "
             "OR (status='approved' AND (applied IS NULL OR applied=0)))", (scan_id,))
         files = sorted(r['file'] for r in store._db.fetchall(cur) if r.get('file'))
-    return {file: reconcile_from_saved_assessment(store, scan_id, file, owner)
+    budget = [MAX_FILES_PER_CALL if max_files is None else max_files]
+    return {file: reconcile_from_saved_assessment(store, scan_id, file, owner, budget=budget)
             for file in files if str(file).lower().endswith('.docx')}

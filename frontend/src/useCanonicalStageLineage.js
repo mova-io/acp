@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 const POLL_MS = 15_000
+// Ask for an immediate re-read of the stage lineage, e.g. after an action that changed the
+// server's finding ledger (Remediate's "re-check remaining items"). detail: { scanId } — a request
+// for another scan is ignored; one without a scanId refreshes whatever is shown.
+export const STAGE_LINEAGE_REFRESH_EVENT = 'acp:stage-lineage-refresh'
 
 function lineageVersion(value) {
   const lineage = value?.lineage || value
@@ -52,12 +56,15 @@ export function useCanonicalStageLineage(scanId, loadLineage) {
     const stop = () => { live = false }
     refresh()
     const poll = setInterval(refresh, POLL_MS)
+    const requested = (event) => { if (!event?.detail?.scanId || event.detail.scanId === scanId) refresh() }
     window.addEventListener('focus', refresh)
+    window.addEventListener(STAGE_LINEAGE_REFRESH_EVENT, requested)
     window.addEventListener('acp:session-expired', stop)
     return () => {
       live = false
       clearInterval(poll)
       window.removeEventListener('focus', refresh)
+      window.removeEventListener(STAGE_LINEAGE_REFRESH_EVENT, requested)
       window.removeEventListener('acp:session-expired', stop)
     }
   }, [scanId, loadLineage, accept])

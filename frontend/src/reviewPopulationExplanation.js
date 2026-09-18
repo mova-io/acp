@@ -192,15 +192,23 @@ export function explainReviewPopulation({ rows = [], decisions = {}, automatic =
 
   const progress = progressOf(tasks, decisions)
   const unreadable = unanalysableCount(files)
-  const serverFindings = isCount(findingTotal) ? findingTotal : isCount(unresolvedFindingsTotal) ? unresolvedFindingsTotal : listed ? listed.length : null
+  // An empty list is not a count of zero on its own (see findingTotalsKnown below); only a non-empty
+  // list proves at least that many.
+  const serverFindings = isCount(findingTotal) ? findingTotal : isCount(unresolvedFindingsTotal) ? unresolvedFindingsTotal
+    : listed?.length ? listed.length : null
+  // "All clear" needs KNOWN-zero finding evidence, not merely no evidence of findings. Known zero is
+  // the tile's balanced count at 0 (findingInputsFrom returns null when the buckets do not add up) or
+  // the server's uncapped list total at 0. A missing domain, a missing list or unbalanced buckets
+  // leave the totals UNKNOWN — and an unknown is not a zero, however empty the queue looks.
+  const findingTotalsKnown = findingTotal === 0 || unresolvedFindingsTotal === 0
   const allClear = remaining.length === 0 && counts.review === 0 && counts.processing === 0 && counts['status-check'] === 0
     && progress.awaitingOutcome === 0 && unmatchedFindings.length === 0 && !unlistedFindings
-    && !(serverFindings > 0) && !(unresolvedFindingsTotal > 0) && unreadable === 0
+    && !(serverFindings > 0) && !(unresolvedFindingsTotal > 0) && unreadable === 0 && findingTotalsKnown
 
   const explanation = {
     taskTotal: tasks.length, humanCount: counts.review, processingCount: counts.processing,
     statusCheckCount: counts['status-check'], resultsCount: counts.results,
-    findingTotal: serverFindings, findingNote: FINDING_NOTE,
+    findingTotal: serverFindings, findingTotalsKnown, findingNote: FINDING_NOTE,
     remaining, unmatchedFindings, unlistedFindings, allClear, automatic, progress,
   }
   explanation.headline = headlineOf(explanation, files)
@@ -245,11 +253,19 @@ function otherWork(e, except = null) {
   else if (e.unlistedFindings) parts.push('unresolved findings the server did not itemise')
   return parts
 }
+export const UNKNOWN_TOTALS = 'No open review tasks; current finding totals unavailable.'
+// Nothing left in the QUEUE and nothing the server itemised — the only open question is the totals.
+const tasksSettled = (e) => e.remaining.length === 0 && !e.humanCount && !e.processingCount && !e.statusCheckCount
+  && !e.progress.awaitingOutcome && !e.unmatchedFindings.length && !e.unlistedFindings && !(e.findingTotal > 0)
 const joinParts = (parts) => parts.length <= 1 ? parts.join('') : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`
 
 function headlineOf(e, files) {
   const caveat = unreadableCaveat(files)
   if (e.allClear) return 'All clear — nothing needs your review.'
+  // Every task settled, but the finding totals cannot be confirmed: say exactly that, never "clear".
+  if (tasksSettled(e) && !e.findingTotalsKnown) {
+    return caveat ? `${UNKNOWN_TOTALS} ${caveat}` : UNKNOWN_TOTALS
+  }
   const sentences = []
   if (e.humanCount) {
     sentences.push(`${plural(e.humanCount, 'task needs', 'tasks need')} your ${e.automatic ? 'input' : 'review'} — see ${tabLabelOf('review', e.automatic)}.`)
@@ -268,6 +284,9 @@ function headlineOf(e, files) {
   else if (!unlinked && e.findingTotal > 0 && !e.humanCount && !e.statusCheckCount && !e.processingCount) {
     sentences.push(`The server still reports ${plural(e.findingTotal, 'unresolved finding')} — see Remaining findings.`)
   }
+  if (!e.findingTotalsKnown && !e.unlistedFindings && !unlinked && !(e.findingTotal > 0)) {
+    sentences.push('Current finding totals are unavailable.')
+  }
   if (caveat) sentences.push(caveat)
   return sentences.join(' ')
 }
@@ -285,6 +304,7 @@ function emptyFilterLineOf(e, filter) {
   const others = otherWork(e, tab)
   if (others.length) return `${lead} This is a filtered view — ${joinParts(others)} still ${others.length === 1 && /^1 /.test(others[0]) ? 'remains' : 'remain'} in other tabs.`
   if (e.allClear) return `${lead} Nothing else remains in this queue.`
+  if (tasksSettled(e) && !e.findingTotalsKnown) return `${lead} No other open review tasks; current finding totals unavailable.`
   return `${lead} This is a filtered view; other tasks may remain.`
 }
 

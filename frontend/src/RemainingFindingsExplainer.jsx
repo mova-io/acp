@@ -19,7 +19,9 @@ export default function RemainingFindingsExplainer({ explanation, onOpenItem, sh
     {showHeadline && <p className="remaining-findings-explainer__headline" role="status">{explanation.headline}</p>}
     <p className="remaining-findings-explainer__units muted">
       {explanation.taskTotal.toLocaleString()} review task{explanation.taskTotal === 1 ? '' : 's'}
-      {explanation.findingTotal != null && <> · {explanation.findingTotal.toLocaleString()} unresolved finding{explanation.findingTotal === 1 ? '' : 's'} reported by the server</>}
+      {explanation.findingTotal != null
+        ? <> · {explanation.findingTotal.toLocaleString()} unresolved finding{explanation.findingTotal === 1 ? '' : 's'} reported by the server</>
+        : <> · current finding totals unavailable</>}
       . {explanation.findingNote}
     </p>
     {remaining.length > 0 && <>

@@ -47,6 +47,8 @@ import { autoFixRows, matchesWorkflow, isAiAssistedDraft, dedupeReviewTasks } fr
 import { explainReviewPopulation, findingInputsFrom, QUEUE_TAB_KEY } from './reviewPopulationExplanation.js'
 import RemainingFindingsExplainer from './RemainingFindingsExplainer.jsx'
 import { OPEN_REVIEW_ITEM_EVENT, requestOpenReviewItem, takePendingReviewItem } from './openReviewItem.js'
+import ReconcileReviewTargets from './ReconcileReviewTargets.jsx'
+import { STAGE_LINEAGE_REFRESH_EVENT } from './useCanonicalStageLineage.js'
 import FileDrawer, { SOURCE_URL } from './FileDrawer.jsx'
 import SegmentDrawer from './SegmentDrawer.jsx'
 import { SENIORITY_ORDER, REMEDIATION_ACTIONS } from './sim.js'
@@ -1850,6 +1852,17 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
             finding, with the tab that holds it and a button that opens it (C5). Renders nothing
             when the explanation is all clear. */}
         {hasRemediationResults && <RemainingFindingsExplainer explanation={reviewExplanation} onOpenItem={openReviewItem} showHeadline={false} />}
+        {/* C8 — settle an already-completed run on request: re-check the open items against the
+            recorded check of the saved copy. Offered only while something is still open, and not
+            on a historical (time-travel) scan. On success the queue and the stage snapshot are both
+            re-read, so the panel above and the tiles reflect the server's new ledger. */}
+        {hasRemediationResults && runId && !reviewReadOnly && <ReconcileReviewTargets scanId={runId}
+          available={!reviewExplanation.allClear && (reviewExplanation.remaining.length > 0
+            || reviewExplanation.unmatchedFindings.length > 0 || !!reviewExplanation.unlistedFindings)}
+          onReconciled={() => {
+            window.dispatchEvent(new CustomEvent('acp:hitl-changed', { detail: { scanId: runId } }))
+            window.dispatchEvent(new CustomEvent(STAGE_LINEAGE_REFRESH_EVENT, { detail: { scanId: runId } }))
+          }} />}
         <ReviewRefreshNotice error={reviewRefreshError} onRetry={refreshReviewQueue}/>
         {actError && (
           <p role="alert" className="rem-act-error"
