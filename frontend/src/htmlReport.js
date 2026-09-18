@@ -172,6 +172,13 @@ function stageStrip(b) {
 
 function locationHtml(loc) {
   if (!loc) return esc(LOCATION_NOT_RECORDED)
+  if (loc.href && !loc.label) {
+    // A record with no recorded place still has a record in ACP (contract 2). Linking the words
+    // "Location not recorded" reads as a link TO a location; say what the link is — the same
+    // wording as the server renderer (report_render._location_html).
+    const abs = exportHref(loc.href)
+    return `${esc(LOCATION_NOT_RECORDED)}${abs ? ` · <a href="${esc(abs)}">open this record in ACP</a>` : ''}`
+  }
   return loc.href ? linkOrText(locationLabel(loc), loc.href) : esc(locationLabel(loc))
 }
 

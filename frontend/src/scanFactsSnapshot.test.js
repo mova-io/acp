@@ -97,4 +97,27 @@ describe('loadScanReportFacts — one snapshot or a stated stop', () => {
     expect(seen[0]).toMatch(/\/scans\/s%201\/report-facts\?offset=0&limit=10$/)
     expect(seen[1]).toMatch(/\/scans\/s%201\/report-facts\?offset=10&limit=10&digest=a%26b%3Dc$/)
   })
+
+  it('api.getScanReportFacts asks for finding records only when told to, and forwards an abort signal', async () => {
+    vi.resetModules()
+    vi.doMock('./sim.js', async (importActual) => ({ ...(await importActual()), SIM: false }))
+    const seen = []
+    const realFetch = globalThis.fetch
+    globalThis.fetch = vi.fn(async (url, init) => { seen.push({ url: String(url), init }); return new Response(JSON.stringify(pageOf(0, 10, 3)), { status: 200, headers: { 'Content-Type': 'application/json' } }) })
+    const ctl = new AbortController()
+    try {
+      const api = await import('./api.js')
+      await api.getScanReportFacts('s1', { offset: 0, limit: 10, includeFindings: true })
+      await api.getScanReportFacts('s1', { offset: 10, limit: 10, digest: 'd', includeFindings: true, signal: ctl.signal })
+      await api.getScanReportFacts('s1', { offset: 0, limit: 1 })
+    } finally {
+      globalThis.fetch = realFetch
+      vi.doUnmock('./sim.js')
+    }
+    expect(seen[0].url).toMatch(/\/report-facts\?offset=0&limit=10&include=findings$/)
+    expect(seen[1].url).toMatch(/\/report-facts\?offset=10&limit=10&digest=d&include=findings$/)
+    expect(seen[1].init.signal).toBe(ctl.signal)
+    expect(seen[2].url).toMatch(/\/report-facts\?offset=0&limit=1$/)
+    expect('signal' in seen[2].init).toBe(false)
+  })
 })

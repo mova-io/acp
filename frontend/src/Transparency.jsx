@@ -227,7 +227,8 @@ export function RuleBreakdown({ scanId, files }) {
     ])
     setFactsProgress({ loaded: 0, total: null, complete: false })
     try {
-      const got = await loadScanReportFacts(scanId, { getScanReportFacts, onProgress: setFactsProgress })
+      // Reviewer/Full link each finding card to its exact record (contract 8); Summary has no cards.
+      const got = await loadScanReportFacts(scanId, { getScanReportFacts, onProgress: setFactsProgress, includeFindings: mode !== 'summary' })
       const cmp = scanComparisonFromFacts(got.facts, targetLevel)
       return await generateScanReport({
         scanId, files: files || [], mode,

@@ -8,6 +8,7 @@ Three routes, all owner-scoped and all read-only:
   Bounded rather than capped: `filesTotal`, `offset`, `limit` and `complete` are all returned, so
   a caller can page a large estate instead of being handed a silently truncated list. The
   `factsDigest` is computed over the FULL index, so two clients on different pages agree on it.
+  `&include=findings` adds each row's exact finding records (contract 8) without moving it.
 * ``GET /scans/{sid}/files/{filename:path}/artifact/{sha256}/page/{page}`` — a page image of
   EXACTLY the bytes whose sha256 is in the path.
 
@@ -66,16 +67,24 @@ def get_scan_report_facts(sid: str, request: Request,
                           limit: int = Query(report_facts.FILE_PAGE_DEFAULT, ge=1,
                                              le=report_facts.FILE_PAGE_MAX),
                           digest: str | None = Query(None, min_length=64, max_length=64,
-                                                     pattern="^[0-9a-f]{64}$")):
+                                                     pattern="^[0-9a-f]{64}$"),
+                          include: str | None = Query(None, max_length=64,
+                                                      pattern="^findings$")):
     """One page of one snapshot (contract 3).
 
     `digest` is the first page's `factsDigest`. A later page carrying it is served from the same
     snapshot; when the evidence has moved on the answer is 409, never a page of a different
     snapshot. A request without `digest` always reads the evidence fresh.
+
+    `include=findings` (contract 8): each row on the page also carries its per-file facts' finding
+    records (same ids, same structured locations, every occurrence), so a scan report can link
+    each finding to its exact record. The digest does not depend on it (contract 7), and such a
+    page holds at most report_facts.FINDINGS_PAGE_MAX rows — the response's `limit` says so.
     """
     try:
         facts = report_facts.build_scan_facts(core.store, sid, owner=_owner(request),
-                                              offset=offset, limit=limit, digest=digest)
+                                              offset=offset, limit=limit, digest=digest,
+                                              include_findings=include == "findings")
     except report_facts.ScanFactsChanged:
         raise HTTPException(409, report_facts.SNAPSHOT_CHANGED_DETAIL)
     if facts is None:

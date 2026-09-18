@@ -67,12 +67,17 @@ export const FACTS_MAX_PAGES = 40          // 8,000 files; beyond that we say so
 export const FACTS_CHANGED_WHILE_PAGING =
   'The evidence changed while the report was being assembled, so the per-document index was stopped rather than mix two versions of it. Generate the report again.'
 
-export async function loadScanReportFacts(scanId, { getScanReportFacts, limit = FACTS_PAGE_LIMIT, maxPages = FACTS_MAX_PAGES, onProgress = null } = {}) {
-  const gap = (reason) => ({ facts: null, files: [], filesTotal: null, complete: false, pages: 0, factsError: reason, incompleteReason: reason })
+// `includeFindings` (contract 8, optional; default off, so existing callers — the packet exporter —
+// send exactly what they sent before): ask for each row's exact finding records. The result then
+// also says `findingsIncluded`: true only when EVERY loaded row carries a `findings` array, so a
+// server that ignored the request is never read as "these documents have no findings".
+export async function loadScanReportFacts(scanId, { getScanReportFacts, limit = FACTS_PAGE_LIMIT, maxPages = FACTS_MAX_PAGES, onProgress = null, includeFindings = false } = {}) {
+  const gap = (reason) => ({ facts: null, files: [], filesTotal: null, complete: false, pages: 0, factsError: reason, incompleteReason: reason, ...(includeFindings ? { findingsIncluded: false } : {}) })
   if (typeof getScanReportFacts !== 'function') return gap(FACTS_INTERNAL)
   if (!scanId) return gap('No assessment is selected, so the server report evidence was not read.')
+  const extra = includeFindings ? { includeFindings: true } : {}
   let first
-  try { first = await getScanReportFacts(scanId, { offset: 0, limit }) } catch (e) {
+  try { first = await getScanReportFacts(scanId, { offset: 0, limit, ...extra }) } catch (e) {
     return gap(`${isProgrammingError(e) ? FACTS_INTERNAL : FACTS_UNAVAILABLE} (${e?.message || e})`)
   }
   if (!first || typeof first !== 'object') return gap(FACTS_SIM)
@@ -92,7 +97,7 @@ export async function loadScanReportFacts(scanId, { getScanReportFacts, limit = 
   }
   while (!complete && !incompleteReason && pages < maxPages) {
     let next
-    try { next = await getScanReportFacts(scanId, { offset: files.length, limit, digest }) } catch (e) {
+    try { next = await getScanReportFacts(scanId, { offset: files.length, limit, digest, ...extra }) } catch (e) {
       incompleteReason = e?.status === 409
         ? `${FACTS_CHANGED_WHILE_PAGING} (Stopped after ${soFar()} documents.)`
         : `The per-document index stopped after ${soFar()} documents because the next page could not be read (${e?.message || e}).`
@@ -123,7 +128,9 @@ export async function loadScanReportFacts(scanId, { getScanReportFacts, limit = 
     incompleteReason = `The per-document index stopped at ${files.length}${filesTotal != null ? ` of ${filesTotal}` : ''} documents after ${maxPages} pages. The remaining documents are not included in this report.`
   }
   onProgress?.({ loaded: files.length, total: filesTotal, complete })
-  return { facts: { ...first, files }, files, filesTotal, complete, pages, factsError: null, incompleteReason }
+  const out = { facts: { ...first, files }, files, filesTotal, complete, pages, factsError: null, incompleteReason }
+  if (includeFindings) out.findingsIncluded = files.every((r) => r && Array.isArray(r.findings))
+  return out
 }
 // ── One occurrence, in the live drawer ───────────────────────────────────────────────────────
 // The drawer lists the scan record's own issue rows, which carry no server id. A row is linked to

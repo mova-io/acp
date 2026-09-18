@@ -273,12 +273,24 @@ def _review_bucket(verdict: str, stale) -> str:
             "rejected": "rejected", "unable": "unable"}.get(verdict, "stale")
 
 
+def _change_review_rows(store, scan_id: str, filename: str, *, owner: str,
+                        context: dict | None) -> dict:
+    """{kind: {value, updated_at}} for one file — from the scan build's ONE batched read (R-B4
+    `change_reviews_for_scan`) when prefetch_scan_inputs took it, else the per-file read."""
+    batched = (context or {}).get("reviews_by_file")
+    if batched is not None:
+        return batched.get(filename) or {}
+    return store.get_change_reviews(scan_id, filename, owner=owner) or {}
+
+
 def read_reviews(store, scan_id: str, filename: str, *, owner: str,
-                 current_sha256: str | None, digests_by_id: dict) -> dict:
+                 current_sha256: str | None, digests_by_id: dict,
+                 context: dict | None = None) -> dict:
     """{changeId: decision + stale + staleReason}, freshness RE-EVALUATED on every read."""
     prefix = getattr(store, "CHANGE_REVIEW_KIND_PREFIX", "change_review:")
     out: dict[str, dict] = {}
-    for kind, row in (store.get_change_reviews(scan_id, filename, owner=owner) or {}).items():
+    for kind, row in _change_review_rows(store, scan_id, filename, owner=owner,
+                                         context=context).items():
         try:
             decision = json.loads(row.get("value") or "{}")
         except (TypeError, ValueError):
@@ -318,8 +330,62 @@ def _clipped(value) -> bool:
     return len(str(value or "")) >= VALUE_MAX_CHARS
 
 
+def _diff_rows(store, scan_id: str, filename: str, context: dict | None) -> list[dict]:
+    """One file's verified diff rows — from the scan build's ONE batched read (R-B4
+    `remediation_diffs_for_scan`, whose per-file value IS get_remediation_diffs') when
+    prefetch_scan_inputs took it, else the per-file read."""
+    batched = (context or {}).get("diffs_by_file")
+    if batched is not None:
+        return list(batched.get(filename) or [])
+    return store.get_remediation_diffs(scan_id, filename) or []
+
+
+def saved_changes_from_pending(filename: str, entries) -> list[dict]:
+    """unverified_changes.saved_changes' projection, applied to already-read pending records.
+
+    The SAME comprehension that function applies to pending_records(store, scan, file) — so the
+    scan-wide reader (R-B4, Stream E: "a scan-wide saved_changes can be built by the caller from
+    this result with the same list comprehension saved_changes uses") gives the per-file list.
+    Pinned against unverified_changes.saved_changes itself by
+    tests/test_report_facts_scan_readers.py, so a change to the owner's projection fails there.
+    """
+    return [{**change, 'file': filename, 'rule_id': entry['rule_id'],
+             'applied': True, 'verified': False, 'verification': 'not_verified',
+             'artifact_sha256': entry['artifact_sha256'], 'reason': entry.get('reason'),
+             'note': 'AI applied · not verified'}
+            for entry in entries for change in entry.get('changes', [])]
+
+
+def _pending_changes(store, scan_id: str, filename: str,
+                     context: dict | None) -> tuple[list[dict], str]:
+    """(applied-but-unverified changes, 'ok'|'unavailable') for one file.
+
+    With the scan build's batched read (R-B4 `pending_records_for_scan`): a file the reader put in
+    `errors` could not be read — 'unavailable', the count UNKNOWN, never zero. A file the reader
+    neither answered nor reported is not assumed empty either: it is read per file.
+    """
+    import unverified_changes
+    batched = (context or {}).get("pending_by_file")
+    if batched is not None:
+        if filename in (context.get("pending_errors") or {}):
+            return [], "unavailable"
+        if filename in batched:
+            try:
+                return saved_changes_from_pending(filename, batched[filename] or []), "ok"
+            except (KeyError, TypeError, ValueError):
+                return [], "unavailable"
+    try:
+        return unverified_changes.saved_changes(store, scan_id, filename) or [], "ok"
+    except (KeyError, TypeError, ValueError):
+        # pending_records parses JSON written by other subsystems; a malformed record is a data
+        # problem, not a programming error. Anything else propagates rather than being turned
+        # into an empty list — see blocks_certification, which fails the same three ways.
+        return [], "unavailable"
+
+
 def build_saved_changes(store, scan_id: str, filename: str, record: dict,
-                        *, limit: int | None = SAVED_CHANGES_LIMIT) -> tuple[list[dict], bool, int, str]:
+                        *, limit: int | None = SAVED_CHANGES_LIMIT,
+                        context: dict | None = None) -> tuple[list[dict], bool, int, str]:
     """(changes, complete, total, unverifiedSource) — verified AND applied-but-unverified.
 
     `unverifiedSource` is 'ok' or 'unavailable'. It exists because silently dropping the
@@ -331,7 +397,7 @@ def build_saved_changes(store, scan_id: str, filename: str, record: dict,
     import report_location
     fmt = report_location.fmt_of_name(filename)
     rows: list[dict] = []
-    for diff in (store.get_remediation_diffs(scan_id, filename) or []):
+    for diff in _diff_rows(store, scan_id, filename, context):
         rule_id = str(diff.get("rule_id") or "")
         before, after = diff.get("before") or "", diff.get("after") or ""
         # R1 (store schema v59, every diff reader): `locator`, `page` and `location_source` —
@@ -370,15 +436,7 @@ def build_saved_changes(store, scan_id: str, filename: str, record: dict,
             "findingIds": None,
             "source": "remediation_diff",
         })
-    import unverified_changes
-    unverified_source = "ok"
-    try:
-        pending = unverified_changes.saved_changes(store, scan_id, filename) or []
-    except (KeyError, TypeError, ValueError):
-        # pending_records parses JSON written by other subsystems; a malformed record is a data
-        # problem, not a programming error. Anything else propagates rather than being turned
-        # into an empty list — see blocks_certification, which fails the same three ways.
-        pending, unverified_source = [], "unavailable"
+    pending, unverified_source = _pending_changes(store, scan_id, filename, context)
     for change in pending:
         rule_id = str(change.get("rule_id") or "")
         before, after = change.get("before") or "", change.get("after") or ""
@@ -717,6 +775,64 @@ def prefetch_baselines(store, scan_id: str, names: list[str], *, owner: str,
     for name in names:
         memo[name] = (got.get(name), False)
     return "batched"
+
+
+def _unverified_changes_module():
+    import unverified_changes
+    return unverified_changes
+
+
+def prefetch_scan_inputs(store, scan_id: str, names: list[str], *, owner: str,
+                         context: dict) -> dict:
+    """R-B4: read a scan-index build's three per-file inputs ONCE each, when the readers exist.
+
+    Returns {"diffs", "reviews", "unverified"} → 'batched' | 'per_file'. Each batched value is fed
+    to the SAME per-file builders (build_saved_changes / read_reviews), so a row's projection and
+    digest are byte-identical to the per-file route's, which never prefetches. Every reader is
+    feature-detected, and one that is missing, refuses, raises, or answers with the wrong shape
+    leaves THAT input on its per-file read — an unreadable batch is never an empty one.
+
+    - `remediation_diffs_for_scan(scan_id, *, owner, files)` (Store method or report_history):
+      `result.get(f, [])` IS get_remediation_diffs(scan_id, f), every row, v59 locations.
+    - `change_reviews_for_scan(scan_id, owner, *, files)`: `result.get(f, {})` IS
+      get_change_reviews(scan_id, f, owner=owner). The owner is REQUIRED — the per-file read drops
+      its filter for a falsy owner and the batched one refuses, so a falsy owner stays per file.
+    - `unverified_changes.pending_records_for_scan(store, scan_id, files, *, errors)` (Stream E):
+      per file EXACTLY pending_records(); a file it could not read is in `errors` and becomes
+      unverifiedSource 'unavailable'. Asked for every name, so a name it neither answers nor
+      reports is read per file rather than assumed to have nothing pending.
+    """
+    modes = {"diffs": "per_file", "reviews": "per_file", "unverified": "per_file"}
+    diffs = history_reader(store, "remediation_diffs_for_scan")
+    if diffs is not None:
+        try:
+            got = diffs(scan_id, owner=owner)
+        except Exception:
+            got = None
+        if isinstance(got, dict):
+            context["diffs_by_file"] = got
+            modes["diffs"] = "batched"
+    reviews = history_reader(store, "change_reviews_for_scan")
+    if reviews is not None and isinstance(owner, str) and owner:
+        try:
+            got = reviews(scan_id, owner)
+        except Exception:
+            got = None
+        if isinstance(got, dict):
+            context["reviews_by_file"] = got
+            modes["reviews"] = "batched"
+    pending = getattr(_unverified_changes_module(), "pending_records_for_scan", None)
+    if callable(pending):
+        errors: dict = {}
+        try:
+            got = pending(store, scan_id, list(names), errors=errors)
+        except Exception:
+            got = None
+        if isinstance(got, dict):
+            context["pending_by_file"] = got
+            context["pending_errors"] = errors
+            modes["unverified"] = "batched"
+    return modes
 
 
 def _load_baseline(store, scan_id: str, filename: str, *, owner: str,
@@ -1091,13 +1207,14 @@ def build_file_facts(store, scan_id: str, filename: str, *, owner: str,
                                document_id=_document_id(run, file_row, filename, record))
 
     changes, changes_complete, changes_total, unverified_source = build_saved_changes(
-        store, scan_id, filename, record, limit=saved_changes_limit)
+        store, scan_id, filename, record, limit=saved_changes_limit, context=context)
     # Freshness is judged against the SAVED COPY's digest, not the current artifact generally:
     # see decision_binding_sha256. With no corrected digest recorded every decision reads
     # "freshness unknown", which is the honest answer and never a confirmation.
     reviews = read_reviews(store, scan_id, filename, owner=owner,
                            current_sha256=decision_binding_sha256(record),
-                           digests_by_id={c["id"]: c["changeDigest"] for c in changes})
+                           digests_by_id={c["id"]: c["changeDigest"] for c in changes},
+                           context=context)
     if include_previous:
         previous, previous_reason, comparison = build_previous(
             store, scan_id, filename, run, owner=owner, context=context,
@@ -1238,11 +1355,32 @@ def _index_row(facts: dict) -> dict:
     }
 
 
-def build_scan_index(store, scan_id: str, *, owner: str) -> dict | None:
+# Contract 8: the finding records an `include=findings` scan page carries per row — exactly the
+# per-file facts' own findings (same server ids, same structured location, every occurrence).
+FINDING_RECORD_KEYS = ("id", "ruleId", "sc", "severity", "detail", "location", "comparable",
+                       "state", "stateReason", "recommendedAction")
+# Rows per page when findings are included: a page then carries every finding of every row on it,
+# so it is bounded by rows rather than by the index's FILE_PAGE_MAX. The response states `limit`,
+# and the client pages by what it was given.
+FINDINGS_PAGE_MAX = 200
+
+
+def finding_records(facts: dict) -> list[dict]:
+    return [{k: copy.deepcopy(f.get(k)) for k in FINDING_RECORD_KEYS}
+            for f in (facts.get("findings") or [])]
+
+
+def build_scan_index(store, scan_id: str, *, owner: str,
+                     include_findings: bool = False) -> dict | None:
     """The FULL scan index and its digest, built fresh. None when the caller cannot see the scan.
 
     Returns {"facts": <scan facts without files/paging>, "index": [rows], "digest", "builtAt",
-    "baselineRead": 'batched'|'per_file'}.
+    "baselineRead": 'batched'|'per_file', "inputsRead": {diffs, reviews, unverified},
+    "findingsByFile": {file: {"findings": [...], "remediatedAt"}} | None}.
+
+    `findingsByFile` (contract 8) is kept OUTSIDE the rows and outside the digest: the digest is
+    the same whether or not a caller asked for findings (contract 7), and a build nobody asked
+    findings of does not hold them.
     """
     import report_comparison as rc
     context = scan_context(store, scan_id, owner=owner)
@@ -1251,6 +1389,8 @@ def build_scan_index(store, scan_id: str, *, owner: str) -> dict | None:
     run = context["run"]
     names = list(context["files_by_name"])
     baseline_read = prefetch_baselines(store, scan_id, names, owner=owner, context=context)
+    inputs_read = prefetch_scan_inputs(store, scan_id, names, owner=owner, context=context)
+    findings_by_file: dict | None = {} if include_findings else None
 
     index: list[dict] = []
     # C6 per-document same-scan summaries: aggregated below, not added to the index row (the
@@ -1298,6 +1438,9 @@ def build_scan_index(store, scan_id: str, *, owner: str) -> dict | None:
             totals["approvalsRecheckRequired"] += row["approvalsRecheckRequired"]
         index.append(row)
         same_scan_rows.append(rc.compact(facts.get("sameScanHistory")))
+        if findings_by_file is not None:
+            findings_by_file[name] = {"findings": finding_records(facts),
+                                      "remediatedAt": facts["identity"]["remediatedAt"]}
     if not approvals_known:
         totals["approvalsRecheckRequired"] = None
     if not unverified_known:
@@ -1356,7 +1499,8 @@ def build_scan_index(store, scan_id: str, *, owner: str) -> dict | None:
     facts.pop("_files_all")
     facts["factsDigest"] = digest
     return {"facts": facts, "index": index, "digest": digest, "builtAt": _now(),
-            "baselineRead": baseline_read}
+            "baselineRead": baseline_read, "inputsRead": inputs_read,
+            "findingsByFile": findings_by_file}
 
 
 def _cache_key(store, owner: str, scan_id: str) -> tuple:
@@ -1364,11 +1508,16 @@ def _cache_key(store, owner: str, scan_id: str) -> tuple:
     return (id(store), owner, scan_id)
 
 
-def _cached_index(store, scan_id: str, owner: str, digest: str) -> dict | None:
+def _cached_index(store, scan_id: str, owner: str, digest: str,
+                  include_findings: bool = False) -> dict | None:
     now = time.monotonic()
     with _scan_index_lock:
         entry = _scan_index_cache.get(_cache_key(store, owner, scan_id))
         if entry and entry["digest"] == digest and entry["expires"] > now:
+            # A memo built without findings cannot serve a page that asks for them: that page
+            # is rebuilt (and 409s if the evidence moved), never served without its records.
+            if include_findings and entry["built"].get("findingsByFile") is None:
+                return None
             return entry["built"]
     return None
 
@@ -1392,7 +1541,8 @@ def clear_scan_index_cache() -> None:
 
 
 def build_scan_facts(store, scan_id: str, *, owner: str, offset: int = 0,
-                     limit: int = FILE_PAGE_DEFAULT, digest: str | None = None) -> dict | None:
+                     limit: int = FILE_PAGE_DEFAULT, digest: str | None = None,
+                     include_findings: bool = False) -> dict | None:
     """Scan-level totals plus a BOUNDED per-file index — one page of one snapshot.
 
     The digest is computed over the FULL, unpaginated index, so two clients that fetched
@@ -1402,11 +1552,17 @@ def build_scan_facts(store, scan_id: str, *, owner: str, offset: int = 0,
     served from the memo; otherwise the index is rebuilt and, if the fresh digest differs,
     ScanFactsChanged is raised (the route answers 409) — pages of two snapshots are never mixed.
     Without `digest` the index is always rebuilt.
+
+    `include_findings` (contract 8): each row on THIS page also carries `findings` — the per-file
+    facts' own finding records — and `remediatedAt`. Nothing else changes: the digest, the row
+    digests and every other key are the same with or without it (contract 7). Pages are then at
+    most FINDINGS_PAGE_MAX rows.
     """
-    built = _cached_index(store, scan_id, owner, digest) if digest else None
+    built = (_cached_index(store, scan_id, owner, digest, include_findings)
+             if digest else None)
     served_from = "memo" if built else "fresh"
     if built is None:
-        built = build_scan_index(store, scan_id, owner=owner)
+        built = build_scan_index(store, scan_id, owner=owner, include_findings=include_findings)
         if built is None:
             return None
         _remember_index(store, scan_id, owner, built)
@@ -1414,11 +1570,20 @@ def build_scan_facts(store, scan_id: str, *, owner: str, offset: int = 0,
             raise ScanFactsChanged(digest, built["digest"])
     index = built["index"]
     offset = max(0, int(offset or 0))
-    limit = max(1, min(int(limit or FILE_PAGE_DEFAULT), FILE_PAGE_MAX))
+    limit = max(1, min(int(limit or FILE_PAGE_DEFAULT),
+                       FINDINGS_PAGE_MAX if include_findings else FILE_PAGE_MAX))
     page = index[offset:offset + limit]
     facts = copy.deepcopy(built["facts"])
     facts["generatedAt"] = built["builtAt"]
     facts["files"] = copy.deepcopy(page)
+    if include_findings:
+        extra = built["findingsByFile"] or {}
+        for row in facts["files"]:
+            got = extra.get(row["file"])
+            # Built in the same loop as the row, so always present; if it ever were not, the
+            # records are "not supplied" (null), never an empty list that reads "no findings".
+            row["findings"] = copy.deepcopy(got["findings"]) if got else None
+            row["remediatedAt"] = got.get("remediatedAt") if got else None
     facts["filesTotal"] = len(index)
     facts["offset"] = offset
     facts["limit"] = limit

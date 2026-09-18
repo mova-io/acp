@@ -83,7 +83,9 @@ export default function Overview({ run, files, trend, trendDates, onGo, scanList
     ])
     setFactsProgress({ loaded: 0, total: null, complete: false })
     try {
-      const got = await loadScanReportFacts(run.id, { getScanReportFacts, onProgress: setFactsProgress })
+      // Reviewer/Full print a card per finding, each linking its EXACT record (contract 8), so they
+      // ask for the rows' finding records; the one-page Summary prints no cards and does not.
+      const got = await loadScanReportFacts(run.id, { getScanReportFacts, onProgress: setFactsProgress, includeFindings: mode !== 'summary' })
       const cmp = scanComparisonFromFacts(got.facts, run?.target || 'AA')
       // generateScanReport resolves the RENDERER's outcome ({ok, fallback, message, model}); it is
       // returned unchanged so the menu can say "HTML was downloaded instead" rather than reporting

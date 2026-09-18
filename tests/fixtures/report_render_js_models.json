@@ -20542,6 +20542,14 @@
     }
    },
    {
+    "k": "text",
+    "text": "Exact finding links are unavailable in this report: the server's report evidence was not read. These findings come from the list on screen and do not link to a record in ACP.",
+    "o": {
+     "bold": true,
+     "color": "#854F0B"
+    }
+   },
+   {
     "k": "findingCard",
     "id": "f-bc0244d9d136656c",
     "status": "open",
@@ -21958,6 +21966,14 @@
     "o": {
      "size": 9,
      "color": "#6B6670"
+    }
+   },
+   {
+    "k": "text",
+    "text": "Exact finding links are unavailable in this report: the server's report evidence was not read. These findings come from the list on screen and do not link to a record in ACP.",
+    "o": {
+     "bold": true,
+     "color": "#854F0B"
     }
    },
    {

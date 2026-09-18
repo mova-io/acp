@@ -672,10 +672,14 @@ export const getFileReportFacts = (scanId, file) => (SIM || !scanId || !file
 // `digest` (Contract 3): the first page's factsDigest, sent with every LATER page. The server
 // answers 409 when the evidence has moved on since, so a caller never stitches page 1 of one
 // snapshot to page 2 of another. The first page is requested without it (a fresh build).
-export const getScanReportFacts = (scanId, { offset = 0, limit = 200, digest = null } = {}) => (SIM || !scanId
+// `includeFindings` (contract 8): each index row also carries its per-file facts' finding records
+// (server ids, structured locations), so a scan report can link every finding to its exact record.
+// The snapshot digest is the same either way; such pages hold at most 200 rows.
+// `signal` (optional) aborts the request itself — the packet exporter's bounded final check uses it.
+export const getScanReportFacts = (scanId, { offset = 0, limit = 200, digest = null, includeFindings = false, signal = null } = {}) => (SIM || !scanId
   ? sim(null)
-  : fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/report-facts?offset=${encodeURIComponent(offset)}&limit=${encodeURIComponent(limit)}${digest ? `&digest=${encodeURIComponent(digest)}` : ''}`,
-          { headers: headers(), cache: 'no-store' }).then(j))
+  : fetch(`${BASE}/scans/${encodeURIComponent(scanId)}/report-facts?offset=${encodeURIComponent(offset)}&limit=${encodeURIComponent(limit)}${digest ? `&digest=${encodeURIComponent(digest)}` : ''}${includeFindings ? '&include=findings' : ''}`,
+          { headers: headers(), cache: 'no-store', ...(signal ? { signal } : {}) }).then(j))
 // EXACT-BYTES page render: the server rasterises only bytes whose sha256 equals `sha256`, and
 // answers 404 when it does not hold them. That is what makes a preview's provenance knowable —
 // /files/{file}/page/{page} prefers the original but may fall back to the remediated blob, so

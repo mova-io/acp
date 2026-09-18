@@ -22,9 +22,10 @@ import { fixSteps, hasGuidance, appName } from './remediationGuide.js'
 import {
   fileIssuesOf, rowsFromFindings, buildFindingCards, rankFindingCards, buildComparison,
   buildComparisonFromFacts, boundList, changeIdOf, scOfValue, criterionName,
+  findingCardsFromFacts, isOutstandingFinding,
 } from './reportEvidence.js'
 import { MODE_LABEL } from './reportModel.js'
-import { fileEvidenceHref } from './evidenceLink.js'
+import { fileEvidenceHref, attachEvidenceLinks } from './evidenceLink.js'
 
 // Normalize a filename to one of the native-app formats the remediation guide keys on.
 const CHECKLIST_CAP = 60
@@ -50,8 +51,8 @@ const REVIEWER_FINDING_CAP = 50
 const NR = 'Not recorded'
 const orNR = (v) => (v == null || v === '' ? NR : String(v))
 // A document-name cell that opens that document's evidence view in ACP (evidenceLink contract 2).
-// The scan report's cards carry client-side ids, so it cannot name an exact finding; it CAN name
-// the document, and that is the link it offers — never a finding-level link it cannot back.
+// It names the DOCUMENT; the finding cards name each exact finding (serverFindingCards, contract
+// 8) when the server's records were read, and do not link at all when they were not.
 // Relative here; every renderer absolutizes it against a trusted origin or prints text only.
 export const docCell = (file, scanId) => {
   const href = scanId && file ? fileEvidenceHref({ scanId, file }) : null
@@ -382,10 +383,24 @@ export function buildScanReportModel(data = {}) {
 
   if (atLeast('reviewer')) {
     H('Remaining work across documents')
-    const cards = rankFindingCards(openFiles.flatMap((f) => buildFindingCards({
-      file: f.file, rows: rowsFromFindings(f), assignee: f.assignee ?? f.owner ?? null,
-    }).map((c) => ({ ...c, title: `${f.file} — ${c.title}`, file: f.file }))))
-    if (awaitingReassess.length) T(`${awaitingReassess.length} document(s) with a saved corrected copy are not listed here until they are re-assessed.`, { size: 9, color: MUTED_HEX })
+    // Contract 8: the cards come from the SERVER's finding records (the scan index read with
+    // include=findings), so each card's location links that exact record in ACP. Without them the
+    // cards are built from this screen's list and say that they cannot link — a client-side id
+    // names nothing the evidence viewer can open, and a "first finding of this criterion" link
+    // would land on the wrong occurrence whenever a criterion has two.
+    const server = serverFindingCards(facts, { scanId: scanIdForLinks, files, data })
+    let cards
+    if (server.available) {
+      cards = server.cards
+      if (server.awaiting) T(`${server.awaiting} document(s) with a saved corrected copy are not listed here until they are re-assessed.`, { size: 9, color: MUTED_HEX })
+      T(`Each finding below links its exact record in ACP${indexState.partial ? ` (for the ${indexState.loaded} of ${indexState.total ?? 'an unknown number of'} documents whose evidence was loaded)` : ''}; a finding with no recorded location still opens its own record.`, { size: 9, color: MUTED_HEX })
+    } else {
+      cards = rankFindingCards(openFiles.flatMap((f) => buildFindingCards({
+        file: f.file, rows: rowsFromFindings(f), assignee: f.assignee ?? f.owner ?? null,
+      }).map((c) => ({ ...c, title: `${f.file} — ${c.title}`, file: f.file }))))
+      if (awaitingReassess.length) T(`${awaitingReassess.length} document(s) with a saved corrected copy are not listed here until they are re-assessed.`, { size: 9, color: MUTED_HEX })
+      if (cards.length) T(`Exact finding links are unavailable in this report: ${server.reason} These findings come from the list on screen and do not link to a record in ACP.`, { bold: true, color: AMBER_HEX })
+    }
     if (cards.length) {
       const b = boundList(cards, mode === 'full' ? null : REVIEWER_FINDING_CAP)
       b.shown.forEach((c) => blocks.push(c))
@@ -576,6 +591,43 @@ export function factsIndexState(facts, data = {}) {
   else if (data.factsIndexComplete === true) partial = total != null && rows != null && rows < total
   else partial = total == null || rows == null || rows < total
   return { partial, loaded: rows, total, reason: partial ? (reason || (total == null ? 'The server did not state how many documents the index holds.' : null)) : null, known: true }
+}
+
+// Contract 8: finding cards from the server's own finding records (index rows read with
+// include=findings). Returns { available: true, cards, awaiting } or { available: false, reason }.
+//
+// Every record the server holds becomes one card, so two findings of one criterion on different
+// objects are two cards with two exact links; a record with no location still links its own record
+// (the renderers print "Location not recorded · open this record in ACP"). Nothing is matched by
+// criterion, and no id is made up: without the server's records there are no links at all.
+// Documents with a saved corrected copy are left out exactly as the screen-list path leaves them
+// out (their findings describe the copy before remediation) and are counted in `awaiting`.
+export function serverFindingCards(facts, { scanId = null, files = [], data = {} } = {}) {
+  const rows = facts && Array.isArray(facts.files) ? facts.files : null
+  if (!rows) {
+    const why = typeof data.factsIncompleteReason === 'string' && data.factsIncompleteReason.trim() ? data.factsIncompleteReason.trim() : null
+    return { available: false, reason: why ? `the server's report evidence was not read (${why}).` : 'the server\'s report evidence was not read.' }
+  }
+  if (!rows.every((r) => r && typeof r.file === 'string' && Array.isArray(r.findings))) {
+    return { available: false, reason: 'the server\'s per-document index did not include its finding records.' }
+  }
+  if (!scanId) return { available: false, reason: 'the scan id was not recorded, so no record can be named.' }
+  const screen = new Map((files || []).map((f) => [f.file, f]))
+  const corrected = (r) => !!r.remediatedAt || r.currentArtifact?.kind === 'corrected'
+  const blocking = (f) => isOutstandingFinding(f) && String(f?.severity || '').toUpperCase() !== 'REVIEW'
+  let awaiting = 0
+  const cards = []
+  for (const r of rows) {
+    if (corrected(r)) {
+      if (r.findings.some(blocking)) awaiting++
+      continue
+    }
+    const s = screen.get(r.file) || {}
+    const linked = attachEvidenceLinks({ identity: { scanId, file: r.file }, findings: r.findings })
+    findingCardsFromFacts(linked, { assignee: s.assignee ?? s.owner ?? null })
+      .forEach((c) => cards.push({ ...c, title: `${r.file} — ${c.title}`, file: r.file }))
+  }
+  return { available: true, cards: rankFindingCards(cards), awaiting }
 }
 
 // One document's comparison, in words, for the master index. Every status is a different fact.
