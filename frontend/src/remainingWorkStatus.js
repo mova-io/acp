@@ -2,22 +2,30 @@ import { reviewWorkBreakdown } from './reviewWorkBreakdown.js'
 import { unresolvedWorkSummary } from './unresolvedWorkSummary.js'
 import { pendingReviewRows } from './remediationCountSummary.js'
 import { matchesAutomaticReview } from './automaticReviewResponsibility.js'
+import { VISION_NOTICE_KINDS, visionNoticeOpen, visionSettles } from './remediationEventFeed.js'
 
 // Recent event evidence is narration, never a substitute for the reconciled counters.
-const VISION = new Set(['remediate.vision_retry_pending', 'remediate.vision_retry_blocked', 'remediate.vision_retry_recovered', 'remediate.delivered'])
+//
+// Image-description notices: every record that can be a notice (queued retry, genuine block,
+// recovered with images still missing or with coverage unknown) stays current until a LATER record
+// bound to the same run (and, for a replacement, the same review item) settles it. Delivery never does — see visionSettles in remediationEventFeed.js. Order is seq, never
+// arrival. Obsolete retries never open a notice (history keeps them). Missing binding keeps the
+// notice. Counted row notices (other criteria in the same file) come from `rows` and are untouched.
 export function remainingWorkStatus({ events = [], rows = [], decisions = {}, snapshot = null, automatic = false } = {}) {
-  const latest = new Map()
-  const ordered = [...events].sort((a, b) => Number(b.id) - Number(a.id))
-  for (const event of ordered) {
-    if (!event.documentKey || !VISION.has(event.kind) || latest.has(event.documentKey)) continue
-    latest.set(event.documentKey, event)
-  }
+  const bound = events.filter(event => event.documentKey && Number.isFinite(Number(event.id))
+    && (VISION_NOTICE_KINDS.has(event.kind) || event.kind === 'remediate.review_target_replaced'))
+  const current = bound.filter(event => visionNoticeOpen(event) && !bound.some(later => visionSettles(event, later)))
+    .sort((a, b) => Number(b.id) - Number(a.id))
   const notices = []
   const spendingFiles = new Set()
   const blockedCaptionFiles = new Set()
   const now = Date.parse(snapshot?.generated_at || '')
-  for (const event of latest.values()) {
+  for (const event of current) {
     if (event.kind === 'remediate.vision_retry_pending') notices.push({ key: event.key, label: 'AI retry queued', responsibility: 'ACP will retry automatically. No individual approval is needed for this retry.', tone: 'automatic' })
+    if (event.kind === 'remediate.vision_retry_recovered' && !(event.missing > 0) && event.coverageUnknown) notices.push({ key: event.key, label: 'Image description coverage not confirmed',
+      responsibility: "ACP could not confirm that every image in this document has a description draft. Check the document's images in Review before relying on it; nothing is counted as complete.", tone: 'review' })
+    if (event.kind === 'remediate.vision_retry_recovered' && event.missing > 0) notices.push({ key: event.key, label: 'Image description still needed',
+      responsibility: `${event.missing.toLocaleString()} image${event.missing === 1 ? '' : 's'} in this document still need${event.missing === 1 ? 's' : ''} a description. No usable AI draft exists for ${event.missing === 1 ? 'it' : 'them'}; provide the description in Review, or check AI activity for the generation reason before retrying.`, tone: 'review' })
     if (event.kind === 'remediate.vision_retry_blocked') {
       if (event.documentName && ['vision_permission_or_budget_blocked', 'vision_spending_reconciliation_required', 'vision_local_endpoint_required', 'vision_provider_access_denied', 'vision_budget_admission_denied', 'vision_budget_exhausted', 'vision_run_permission_unavailable', 'vision_ai_disabled_or_budget_zero', 'vision_pricing_not_verified', 'vision_provider_limit_exceeded', 'vision_provider_request_rejected'].includes(event.reasonCode)) blockedCaptionFiles.add(event.documentName)
       if (event.reasonCode === 'vision_spending_reconciliation_required') {

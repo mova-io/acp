@@ -13445,6 +13445,16 @@ class Store:
         "remediate.cancel_requested", "remediate.paused", "remediate.resumed",
         "remediate.vision_retry_pending", "remediate.vision_retry_recovered",
         "remediate.vision_retry_blocked",
+        # An image-description retry cancelled because its input legitimately moved on (document
+        # changed, run inactive, review changed, target replaced, or the draft only needs human
+        # confirmation). Not success and not a provider failure — which is why it is not
+        # `vision_retry_blocked`; whether a provider was called is `detail.no_ai_request`, present
+        # only when known. Not material: nothing in the document moved.
+        "remediate.vision_retry_obsolete",
+        # A review row retired because an approved, verified fix removed its target
+        # (review_target_reconciliation). A statement about the review queue, not a document
+        # write, so not material either.
+        "remediate.review_target_replaced",
         "remediate.ai_escalation_started", "remediate.ai_escalation_finished",
         "remediate.ai_request_started", "remediate.ai_request_finished",
     })

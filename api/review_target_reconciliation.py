@@ -701,6 +701,7 @@ def _commit(store, scan_id, file, plans, result, *, corrected_sha, source_sha, s
             batch_id, scope_id, evidence, actor):
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
+    recorded_lines = []
     with store.transaction():
         begin_write(store)
         locked_rows = lock_rows(store, [p['row']['id'] for p in plans])
@@ -766,6 +767,14 @@ def _commit(store, scan_id, file, plans, result, *, corrected_sha, source_sha, s
                         (line_id, now, actor, ACTION, scan_id, file, row.get('rule_id'),
                          json.dumps(detail, sort_keys=True, separators=(',', ':'))))
                 verified_at = detail['verified_at']
+                # Narrated only for a NEWLY recorded line (the line id is deterministic, so a replay
+                # finds it existing and adds nothing), and only after the commit below.
+                # item_id names the exact retired row (the target), so a reader can clear only
+                # what this retirement settled; rule ids are dotted ('1.1.1', never 'SC_1_1_1').
+                recorded_lines.append({'item_id': str(row['id']),
+                                       'rule_id': _criterion(row.get('rule_id')) or None,
+                                       'removed_by_rule_id': detail['removed_by_rule_id'] or None,
+                                       'finding_count': len(finding_ids)})
             else:
                 with store._db.cursor() as cur:
                     store._db.execute(cur, "SELECT detail FROM decision_log WHERE id=%s", (line_id,))
@@ -787,7 +796,25 @@ def _commit(store, scan_id, file, plans, result, *, corrected_sha, source_sha, s
             (result['superseded'] if not existing or moved else result['unchanged']).append(
                 {'item_id': str(row['id']), 'decision_log_id': line_id, 'finding_ids': finding_ids,
                  'findings_moved': moved, 'recorded': not existing})
+    _narrate_replacements(store, scan_id, file, batch_id, recorded_lines)
     return result
+
+
+def _narrate_replacements(store, scan_id, file, batch_id, lines):
+    """`remediate.review_target_replaced`, once per newly recorded retirement line.
+
+    AFTER the commit, never inside it: an event may lag the write it describes but must never lead
+    it, and a failed append inside a Postgres transaction would abort the retirement itself. The
+    detail is safe by construction — the retired row's id, two criterion ids and a count; the run
+    (remediate batch) rides `correlation_id` and the file rides the `document` column only, where
+    filename suppression applies. Never raises: narration cannot fail the work.
+    """
+    for detail in lines:
+        try:
+            store.append_scan_event(scan_id, 'remediate.review_target_replaced', phase='remediate',
+                                    document=file, correlation_id=batch_id, detail=detail)
+        except Exception:
+            pass
 
 
 # ── trigger points ─────────────────────────────────────────────────────────────────────────

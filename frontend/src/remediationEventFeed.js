@@ -39,8 +39,90 @@ export function verificationFailureLabel(detail = {}) {
     .slice(0, 20).map(row => `WCAG ${row.criterion}: ${labels[row.reason_code]}`).join('; ')
 }
 
+// A queued image-description retry that was CANCELLED because it no longer applied — the saved
+// input changed, the run stopped, the review item changed, or the draft only needs a person. It is
+// neither success nor a provider failure, so it gets its own wording and a neutral tone. Two wire
+// forms: the dedicated kind, and a stored `vision_retry_blocked` row the server re-projects at read
+// time with a `vision_retry_*` reason code (historical records). The server sends `review_only`
+// only when every remaining target is a NAMED human-judgment gate; `not_needed` covers usable
+// drafts and drafts held for an unrecognised reason, so it claims no human gate and no validity.
+//
+// Only `target_replaced` may name an approved, verified fix: `input_changed` means the source
+// revision, corrected bytes or parent job changed, which does not by itself prove what caused it.
+// "No AI request was made" is said ONLY when the event records `no_ai_request: true`; a historical
+// re-projection cannot prove that, so its line says nothing either way.
+export const OBSOLETE_VISION_REASONS = {
+  vision_retry_input_changed: 'the saved input changed (the document or its assessed source was updated)',
+  vision_retry_target_replaced: 'its image was replaced by an approved, verified fix',
+  vision_retry_review_only: 'each remaining image already has a draft waiting for your review',
+  vision_retry_not_needed: 'no image needed a new AI draft',
+  vision_retry_review_changed: 'the review item changed',
+  vision_retry_run_inactive: 'the run is no longer active',
+}
+export const isObsoleteVisionRetry = (kind, detail = {}) => kind === 'remediate.vision_retry_obsolete'
+  || (kind === 'remediate.vision_retry_blocked' && typeof detail?.reason_code === 'string' && detail.reason_code.startsWith('vision_retry_'))
+
+const count = value => (value == null || value === '' || !Number.isFinite(Number(value)) || Number(value) < 0) ? null : Math.floor(Number(value))
+// Criterion ids arrive dotted ('1.1.1') or as the stored rule id ('SC_1_1_1', 'WCAG_1_1_1'); only
+// the three numbers are ever displayed, so nothing else from the field can reach the screen.
+const criterionId = value => {
+  const match = typeof value === 'string' && /^(?:WCAG_?|SC_)?(\d{1,2})[._](\d{1,2})[._](\d{1,2})$/i.exec(value.trim())
+  return match ? `${match[1]}.${match[2]}.${match[3]}` : null
+}
+// Binding identities: the run (the event's correlation id) and the review item (detail.item_id).
+// Opaque handles, never displayed; anything outside a short token shape reads as absent.
+const handle = value => (typeof value === 'string' || typeof value === 'number') && /^[A-Za-z0-9_.:-]{1,80}$/.test(String(value)) ? String(value) : null
+
+// A recovered retry saved a DRAFT; it never writes to the document. Auto-apply exists, so a draft
+// is not assumed to need a person: "waiting for your review" appears only when the record counts
+// drafts awaiting human confirmation (awaiting_review > 0). Historical records carry only {drafts}
+// and get the neutral draft wording. Drafts whose blocker is unknown are "needs checking" — never
+// valid, usable or verified.
+export const UNCERTAIN_DRAFT_KEY = 'uncertain'
+// Coverage is UNKNOWN only when the record says so: `missing: null` (the row's total is unknown).
+// `coverage_complete: false` alongside a numeric `missing` is KNOWN incompleteness (missing > 0),
+// not unknown coverage. A historical record without the key says nothing either way.
+const recoveredCoverageUnknown = detail => (Object.prototype.hasOwnProperty.call(detail, 'missing') && detail.missing === null)
+  || (detail.coverage_complete === false && count(detail.missing) == null)
+function recoveredLine(event, detail) {
+  const drafts = count(detail.drafts)
+  const awaiting = count(detail.awaiting_review)
+  const missing = count(detail.missing)
+  const uncertain = count(detail[UNCERTAIN_DRAFT_KEY])
+  const usable = count(detail.usable)
+  const unknownCoverage = recoveredCoverageUnknown(detail)
+  const counted = awaiting != null || missing != null || uncertain != null || usable != null || unknownCoverage
+  const parts = []
+  const noun = amount => amount > 1 ? `${amount.toLocaleString()} AI image descriptions` : 'AI image description'
+  if (awaiting > 0) {
+    parts.push(`${noun(awaiting)} drafted for ${file(event)}`)
+    parts.push('waiting for your review — not yet written to the document')
+  } else if (!counted || drafts > 0 || uncertain > 0 || usable > 0) {
+    parts.push(`${noun(Math.max(drafts ?? 1, uncertain ?? 0, 1))} drafted for ${file(event)}`)
+    parts.push('not yet written to the document')
+  } else parts.push(`AI image-description retry finished for ${file(event)} · no draft was produced`)
+  if (uncertain > 0) parts.push(`${n(uncertain, 'draft')} ${uncertain === 1 ? 'needs' : 'need'} checking`)
+  if (missing > 0) parts.push(`${n(missing, 'image')} still ${missing === 1 ? 'needs' : 'need'} a description`)
+  if (unknownCoverage) parts.push(missing > 0 ? 'other images may also need one' : 'whether every image has a description is not known')
+  return parts.join(' · ')
+}
+
+// `not_needed` and `review_only` carry the settled-draft counts. `uncertain` drafts are held for a
+// reason ACP could not classify: never described as valid, verified or merely awaiting confirmation.
+function obsoleteReason(detail) {
+  const base = OBSOLETE_VISION_REASONS[detail.reason_code] || 'it no longer applied'
+  if (detail.reason_code !== 'vision_retry_not_needed' && detail.reason_code !== 'vision_retry_review_only') return base
+  const usable = count(detail.usable), awaiting = count(detail.awaiting_review), uncertain = count(detail[UNCERTAIN_DRAFT_KEY])
+  const parts = [usable > 0 && `${n(usable, 'draft')} ready`, awaiting > 0 && `${awaiting.toLocaleString()} waiting for your review`,
+    uncertain > 0 && `${uncertain.toLocaleString()} held for a reason ACP could not classify`].filter(Boolean)
+  return parts.length ? `${base} (${parts.join(', ')})` : base
+}
+
 export function remediationEventLine(event) {
   const detail = event?.detail || {}
+  if (isObsoleteVisionRetry(event?.kind, detail)) {
+    return `Earlier image-description retry for ${file(event)} cancelled · ${obsoleteReason(detail)}.${detail.no_ai_request === true ? ' No AI request was made.' : ''}`
+  }
   switch (event?.kind) {
     case 'remediate.ai_request_started':
     case 'remediate.ai_request_finished': {
@@ -77,7 +159,13 @@ export function remediationEventLine(event) {
     case 'remediate.vision_retry_pending':
       return `Image description for ${file(event)} queued to retry · attempt ${detail.retry || 1} of 2`
     case 'remediate.vision_retry_recovered':
-      return `Image description recovered for ${file(event)} · saved corrections still need verification`
+      return recoveredLine(event, detail)
+    case 'remediate.review_target_replaced': {
+      const rule = criterionId(detail.rule_id)
+      const by = criterionId(detail.removed_by_rule_id)
+      const items = count(detail.finding_count)
+      return `${rule ? `WCAG ${rule} review` : 'Review item'} for ${file(event)} no longer applies${items > 1 ? ` (${items.toLocaleString()} items)` : ''} · its target was removed by a verified${by ? ` WCAG ${by}` : ''} fix`
+    }
     case 'remediate.vision_retry_blocked':
       if (detail.reason_code === 'vision_spending_reconciliation_required') return `Image description for ${file(event)} paused · awaiting confirmation of previous AI usage before another paid request`
       if (detail.reason_code === 'vision_permission_or_budget_blocked') return `Image description for ${file(event)} paused · saved AI permission or spending limit needs attention`
@@ -117,6 +205,7 @@ export function remediationEventLine(event) {
 }
 
 export function eventTone(kind, detail = {}) {
+  if (isObsoleteVisionRetry(kind, detail || {})) return 'neutral'
   if (kind === 'remediate.ai_request_finished' && detail.status === 'failed') return 'attention'
   if (kind === 'remediate.delivery_failed' && detail.delivery_status === 'saved_in_acp') return 'neutral'
   if (kind === 'remediate.verification_failed' || kind === 'remediate.delivery_failed') return 'error'
@@ -143,7 +232,23 @@ export function addRemediationEvent(previous, event, id, limit = MAX_VISIBLE_REM
             // added. Absent (an older server, or a replayed row) reads as unknown — which is
             // neither true nor false, and is why this is `?? null` rather than `|| false`.
             material: event.material == null ? null : !!event.material,
-            reasonCode: ['vision_spending_reconciliation_required', 'vision_permission_or_budget_blocked', 'vision_generated_output_unusable', 'vision_local_endpoint_required', 'vision_recovery_unresolved', 'vision_response_empty', 'vision_provider_access_denied', 'vision_budget_admission_denied', 'vision_budget_exhausted', 'vision_run_permission_unavailable', 'vision_ai_disabled_or_budget_zero', 'vision_pricing_not_verified', 'vision_provider_limit_exceeded', 'vision_provider_request_rejected'].includes(event.detail?.reason_code) ? event.detail.reason_code : null,
+            reasonCode: ['vision_spending_reconciliation_required', 'vision_permission_or_budget_blocked', 'vision_generated_output_unusable', 'vision_local_endpoint_required', 'vision_recovery_unresolved', 'vision_response_empty', 'vision_provider_access_denied', 'vision_budget_admission_denied', 'vision_budget_exhausted', 'vision_run_permission_unavailable', 'vision_ai_disabled_or_budget_zero', 'vision_pricing_not_verified', 'vision_provider_limit_exceeded', 'vision_provider_request_rejected', ...Object.keys(OBSOLETE_VISION_REASONS)].includes(event.detail?.reason_code) ? event.detail.reason_code : null,
+            // A cancelled retry that no longer applied (either wire form). Never a current notice.
+            obsolete: isObsoleteVisionRetry(event.kind, event.detail || {}),
+            // Server-classified lifecycle stage (additive; absent from older servers → null).
+            activityStage: ['draft_generation', 'review', 'document_write', 'verification', 'delivery', 'run'].includes(event.activity_stage ?? event.detail?.activity_stage) ? (event.activity_stage ?? event.detail.activity_stage) : null,
+            // Which rule a review-target replacement retired; only a 1.1.1 replacement clears an image notice.
+            ruleId: event.kind === 'remediate.review_target_replaced' ? criterionId(event.detail?.rule_id) : null,
+            // Images still without a draft after a recovered retry; null when the record predates the count.
+            missing: event.kind === 'remediate.vision_retry_recovered' ? count(event.detail?.missing) : null,
+            // The record SAYS coverage is unknown (missing: null). A historical
+            // record that predates the count says nothing either way and is not flagged.
+            coverageUnknown: event.kind === 'remediate.vision_retry_recovered' && recoveredCoverageUnknown(event.detail || {}),
+            // Proven complete coverage — the only recovery that may settle a block.
+            coverageComplete: event.kind === 'remediate.vision_retry_recovered' && event.detail?.coverage_complete === true,
+            // Binding for clearing notices: the run the event belongs to and the review item it concerns.
+            runId: handle(event.correlation_id),
+            itemId: handle(event.detail?.item_id),
             attempt: event.attempt == null ? null : Number(event.attempt),
             evidenceIds: typeof event.detail?.evidence_id === 'string' && /^[a-f0-9]{12}$/.test(event.detail.evidence_id) ? [event.detail.evidence_id] : [],
             evidenceAvailable: typeof event.detail?.evidence_id === 'string' && /^[a-f0-9]{12}$/.test(event.detail.evidence_id),
@@ -206,7 +311,52 @@ export function documentHistories(rows = []) {
   return byDocument
 }
 
+// IMAGE-DESCRIPTION NOTICE BINDING. A notice (queued retry, genuine block, recovered with images
+// missing or with coverage unknown) is settled only by a LATER event (higher seq) for the same
+// document, bound to the SAME run, that proves the notice no longer describes current work:
+//
+//   * a queued retry ("AI retry queued") is superseded by any later event of its own retry chain
+//     (pending / blocked / recovered / obsolete): the retry has run or been replaced, so "queued"
+//     is no longer true. That event then speaks for itself;
+//   * a block, or a recovery with images missing / coverage unknown, is settled by a later event of
+//     the chain that reports the newer state — an obsolete retry, a newer block, a newer queued
+//     retry, or a recovery. A recovery settles it ONLY when it records coverage_complete === true:
+//     `missing: 0` alone, unknown coverage (`missing: null`) and historical {drafts}-only records
+//     never settle anything;
+//   * a `review_target_replaced` for rule 1.1.1 retires it only when both records name the same run
+//     AND the same item. A replaced image never settles another image's failure.
+//
+// Within the chain an item id recorded on only one side is not a mismatch (a run schedules one
+// retry chain per document, for its single 1.1.1 row, and historical records carry no item id);
+// two different item ids always are. Missing RUN binding never matches, and another run's event
+// never settles this run's notice. DELIVERY IS NOT IN THE CHAIN: publication may deliver a copy
+// with issues remaining, so a delivered copy proves nothing about an image description.
+const CHAIN = new Set(['remediate.vision_retry_pending', 'remediate.vision_retry_blocked', 'remediate.vision_retry_recovered',
+  'remediate.vision_retry_obsolete'])
+export const VISION_NOTICE_KINDS = CHAIN
+export function visionSettles(open, later) {
+  if (!open || !later || open === later || !open.documentKey || open.documentKey !== later.documentKey) return false
+  const earlier = Number(open.id), next = Number(later.id)
+  if (!Number.isFinite(earlier) || !Number.isFinite(next) || next <= earlier) return false
+  if (!open.runId || open.runId !== later.runId) return false
+  if (later.kind === 'remediate.review_target_replaced') {
+    return later.ruleId === '1.1.1' && !!open.itemId && open.itemId === later.itemId
+  }
+  if (!CHAIN.has(later.kind)) return false
+  if (open.itemId && later.itemId && open.itemId !== later.itemId) return false
+  if (open.kind === 'remediate.vision_retry_pending') return true
+  return later.kind !== 'remediate.vision_retry_recovered' || later.coverageComplete === true
+}
+// Whether a record is itself a current notice once nothing later settles it.
+export function visionNoticeOpen(row) {
+  if (!row || row.obsolete) return false
+  if (row.kind === 'remediate.vision_retry_pending' || row.kind === 'remediate.vision_retry_blocked') return true
+  return row.kind === 'remediate.vision_retry_recovered' && (row.missing > 0 || row.coverageUnknown === true)
+}
+const VISION_ATTENTION = new Set(['remediate.vision_retry_pending', 'remediate.vision_retry_blocked'])
+
 // Group the bounded recent history, retaining actionable exceptions ahead of routine milestones.
+// Rows are newest first; an attention row already settled by a NEWER row does not lead its group.
 export function activityGroups(rows = []) {
   const groups = new Map()
   for (const row of rows) {
@@ -217,7 +367,8 @@ export function activityGroups(rows = []) {
   return [...groups.values()].map(group => ({ ...group,
     lead: group.rows.find((row, index) => (row.tone === 'error' || row.tone === 'attention')
       && !(row.kind === 'remediate.delivery_failed'
-        && group.rows.slice(0, index).some(newer => newer.kind === 'remediate.delivered')))
+        && group.rows.slice(0, index).some(newer => newer.kind === 'remediate.delivered'))
+      && !(VISION_ATTENTION.has(row.kind) && group.rows.slice(0, index).some(newer => visionSettles(row, newer))))
       || group.rows.find(row => row.tone === 'success') || group.rows[0],
   }))
 }

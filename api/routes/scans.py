@@ -2419,7 +2419,7 @@ def _resume_plan(sid: str, raw_cursor: str | None) -> tuple[int | None, str | No
     return (cursor, None)
 
 
-def _project_event(event: dict, sid: str, privacy: str) -> dict:
+def _project_event(event: dict, sid: str, privacy: str, *, remapped: dict | None = None) -> dict:
     """One durable event as it goes on the wire: structured, correlated, and privacy-checked.
 
     THE PROJECTION IS THE ENFORCEMENT POINT, and there is exactly one of it. PRD §22 lets a
@@ -2438,9 +2438,18 @@ def _project_event(event: dict, sid: str, privacy: str) -> dict:
     wrong about it is a disclosure that cannot be taken back.
     """
     import remediation_run
+    import remediation_activity_history
     out = dict(event)
     out["document_ref"] = remediation_run.document_ref(sid, event.get("document"))
     out["material"] = core.store.is_material_event(event.get("kind"))
+    # Contract V3: which part of the work this narrates (draft / review / document write /
+    # verification / delivery / run). Set here, once, so every read path carries the same label.
+    out["activity_stage"] = remediation_activity_history.activity_stage(event.get("kind"))
+    # A read-time correction `_project_events` computed for a stored event whose recorded detail
+    # was provably wrong (a historical obsolete retry written as a generic block). Applied BEFORE
+    # the suppression scrub below, so the scrub sees the detail that actually ships.
+    if remapped and event.get("seq") is not None and int(event["seq"]) in remapped:
+        out["detail"] = dict(remapped[int(event["seq"])])
     if privacy == "suppressed":
         out["document"] = None
         out["document_suppressed"] = True
@@ -2449,6 +2458,20 @@ def _project_event(event: dict, sid: str, privacy: str) -> dict:
             out["detail"] = {k: v for k, v in detail.items()
                              if k not in ("file", "filename", "path", "source_path")}
     return out
+
+
+def _project_events(events: list[dict], sid: str, privacy: str, *, store=None) -> list[dict]:
+    """A PAGE of events through `_project_event`, with that page's read-time corrections.
+
+    Every read path (stream replay, live tick, /history, /remediation/activity) projects through
+    here, so the historical obsolete-retry mapping is decided once per page — one decision_log
+    read, not one per event — and identically wherever the event is shown. The mapping reads the
+    raw `document` column, so it runs before suppression blanks it; it never raises.
+    """
+    import remediation_activity_history
+    remapped = remediation_activity_history.historical_retry_projections(
+        store or core.store, sid, events)
+    return [_project_event(event, sid, privacy, remapped=remapped) for event in events]
 
 
 def _stream_is_finished(out: dict) -> bool:
@@ -2566,12 +2589,14 @@ async def stream_remediation_status(sid: str, request: Request):
         elif after_seq is not None:
             missed = await asyncio.to_thread(core.store.list_scan_events, sid,
                                              after_seq=after_seq)
-            for event in missed:
+            projected = (await asyncio.to_thread(_project_events, missed, sid, privacy)
+                         if missed else [])
+            for event in projected:
                 # `id:` is what makes this resumable at all — the client stores the last one it
                 # rendered and sends it back on the next connect.
                 yield (f"id: {event['seq']}\n"
                        "event: remediation-event\n"
-                       f"data: {_json.dumps(_project_event(event, sid, privacy), default=str)}\n\n")
+                       f"data: {_json.dumps(event, default=str)}\n\n")
             cursor = missed[-1]["seq"] if missed else after_seq
         else:
             # FIRST CONNECT, no cursor. Start from the newest event rather than 0: this client has
@@ -2589,10 +2614,12 @@ async def stream_remediation_status(sid: str, request: Request):
             if cursor is not None:
                 fresh = await asyncio.to_thread(core.store.list_scan_events, sid,
                                                 after_seq=cursor)
-                for event in fresh:
+                projected = (await asyncio.to_thread(_project_events, fresh, sid, privacy)
+                             if fresh else [])
+                for event in projected:
                     yield (f"id: {event['seq']}\n"
                            "event: remediation-event\n"
-                           f"data: {_json.dumps(_project_event(event, sid, privacy), default=str)}"
+                           f"data: {_json.dumps(event, default=str)}"
                            "\n\n")
                 if fresh:
                     cursor = fresh[-1]["seq"]
@@ -3092,8 +3119,8 @@ def scan_history(sid: str, request: Request, after_seq: int | None = Query(None,
     # was looking at — and this is the half a client falls back to precisely when the stream is
     # unavailable, so it is the less-watched one by construction.
     privacy = core.store.remediation_filename_privacy(sid)
-    events = [_project_event(e, sid, privacy)
-              for e in core.store.list_scan_events(sid, after_seq=after_seq, limit=limit)]
+    events = _project_events(core.store.list_scan_events(sid, after_seq=after_seq, limit=limit),
+                             sid, privacy)
     return {"available": True, "scan_id": sid, "events": events, "count": len(events),
             # The cursor for the next call. None on an empty page rather than 0 — 0 is a real
             # `after_seq` meaning "from the start", and returning it for "nothing here" would make
