@@ -1,0 +1,4663 @@
+{
+ "_comment": "Recorded by tests/test_report_packet_real_store.py from the real store and routes; replayed by frontend/src/reportPacketRealStore.test.js. Do not edit by hand.",
+ "capability": {
+  "assessment": {
+   "docx": {
+    "1.1.1": "review",
+    "1.3.1": "auto",
+    "1.3.2": "review",
+    "1.3.3": "review",
+    "1.3.5": "review",
+    "1.4.1": "review",
+    "1.4.10": "review",
+    "1.4.11": "review",
+    "1.4.12": "review",
+    "1.4.3": "auto",
+    "1.4.5": "review",
+    "1.4.8": "auto",
+    "1.4.9": "review",
+    "2.1.2": "review",
+    "2.4.10": "review",
+    "2.4.2": "auto",
+    "2.4.4": "review",
+    "2.4.6": "review",
+    "2.4.9": "review",
+    "3.1.1": "auto",
+    "3.1.2": "review",
+    "3.1.5": "review",
+    "3.3.2": "auto",
+    "4.1.2": "review"
+   },
+   "html": {
+    "1.1.1": "review",
+    "1.2.1": "review",
+    "1.2.2": "review",
+    "1.2.3": "review",
+    "1.3.1": "auto",
+    "1.3.2": "review",
+    "1.3.3": "review",
+    "1.3.4": "auto",
+    "1.3.5": "auto",
+    "1.4.1": "auto",
+    "1.4.10": "auto",
+    "1.4.11": "review",
+    "1.4.12": "auto",
+    "1.4.2": "auto",
+    "1.4.3": "auto",
+    "1.4.4": "auto",
+    "1.4.5": "review",
+    "1.4.6": "auto",
+    "2.4.1": "auto",
+    "2.4.2": "auto",
+    "2.4.3": "auto",
+    "2.4.4": "review",
+    "2.4.6": "review",
+    "2.4.7": "auto",
+    "2.4.9": "review",
+    "2.5.3": "auto",
+    "2.5.8": "review",
+    "3.1.1": "auto",
+    "3.1.2": "review",
+    "3.1.4": "auto",
+    "3.1.5": "review",
+    "3.3.2": "auto",
+    "4.1.2": "auto"
+   },
+   "pdf": {
+    "1.1.1": "review",
+    "1.3.1": "review",
+    "1.3.2": "review",
+    "1.3.3": "review",
+    "1.3.5": "review",
+    "1.4.1": "review",
+    "1.4.11": "review",
+    "1.4.12": "review",
+    "1.4.3": "auto",
+    "1.4.5": "review",
+    "1.4.6": "auto",
+    "1.4.9": "review",
+    "2.4.1": "auto",
+    "2.4.2": "auto",
+    "2.4.3": "review",
+    "2.4.4": "review",
+    "2.4.6": "review",
+    "2.5.3": "review",
+    "3.1.1": "auto",
+    "3.1.2": "review",
+    "3.1.5": "review",
+    "4.1.2": "review"
+   },
+   "pptx": {
+    "1.1.1": "review",
+    "1.3.1": "auto",
+    "1.3.2": "auto",
+    "1.3.3": "review",
+    "1.4.1": "review",
+    "1.4.10": "review",
+    "1.4.11": "review",
+    "1.4.12": "review",
+    "1.4.2": "review",
+    "1.4.3": "auto",
+    "1.4.4": "review",
+    "1.4.5": "review",
+    "1.4.6": "auto",
+    "1.4.9": "review",
+    "2.1.1": "human",
+    "2.1.2": "review",
+    "2.4.2": "auto",
+    "2.4.3": "review",
+    "2.4.4": "review",
+    "2.4.6": "review",
+    "2.4.9": "review",
+    "3.1.1": "auto",
+    "3.1.2": "review",
+    "3.1.5": "review",
+    "4.1.2": "review"
+   },
+   "xlsx": {
+    "1.1.1": "review",
+    "1.3.1": "auto",
+    "1.3.2": "auto",
+    "1.3.3": "review",
+    "1.4.1": "review",
+    "1.4.11": "review",
+    "1.4.3": "auto",
+    "1.4.5": "review",
+    "1.4.6": "auto",
+    "1.4.9": "review",
+    "2.1.2": "review",
+    "2.4.2": "auto",
+    "2.4.4": "review",
+    "2.4.6": "review",
+    "3.1.1": "auto",
+    "3.1.2": "review",
+    "3.1.5": "review",
+    "4.1.2": "review"
+   }
+  },
+  "assessment_lanes": [
+   "auto",
+   "human",
+   "review"
+  ],
+  "capability": {
+   "docx": {
+    "1.1.1": "assisted",
+    "1.3.1": "auto",
+    "1.3.2": "assisted",
+    "1.3.3": "assisted",
+    "1.3.5": "human",
+    "1.4.1": "assisted",
+    "1.4.10": "human",
+    "1.4.11": "assisted",
+    "1.4.12": "human",
+    "1.4.3": "auto",
+    "1.4.5": "assisted",
+    "1.4.8": "assisted",
+    "1.4.9": "assisted",
+    "2.1.2": "human",
+    "2.4.10": "assisted",
+    "2.4.2": "auto",
+    "2.4.4": "assisted",
+    "2.4.6": "auto",
+    "2.4.9": "assisted",
+    "3.1.1": "auto",
+    "3.1.2": "assisted",
+    "3.1.5": "assisted",
+    "3.3.2": "auto",
+    "4.1.2": "auto"
+   },
+   "html": {
+    "1.1.1": "human",
+    "1.2.1": "human",
+    "1.2.2": "human",
+    "1.2.3": "human",
+    "1.3.1": "auto",
+    "1.3.2": "human",
+    "1.3.3": "assisted",
+    "1.3.4": "auto",
+    "1.3.5": "auto",
+    "1.4.1": "auto",
+    "1.4.10": "auto",
+    "1.4.11": "human",
+    "1.4.12": "auto",
+    "1.4.2": "auto",
+    "1.4.3": "auto",
+    "1.4.4": "auto",
+    "1.4.5": "human",
+    "1.4.6": "auto",
+    "2.4.1": "auto",
+    "2.4.2": "auto",
+    "2.4.3": "auto",
+    "2.4.4": "assisted",
+    "2.4.6": "auto",
+    "2.4.7": "auto",
+    "2.4.9": "human",
+    "2.5.3": "auto",
+    "2.5.8": "human",
+    "3.1.1": "auto",
+    "3.1.2": "assisted",
+    "3.1.4": "auto",
+    "3.1.5": "assisted",
+    "3.3.2": "auto",
+    "4.1.2": "auto"
+   },
+   "pdf": {
+    "1.1.1": "assisted",
+    "1.3.1": "human",
+    "1.3.2": "human",
+    "1.3.3": "human",
+    "1.3.5": "human",
+    "1.4.1": "human",
+    "1.4.11": "human",
+    "1.4.12": "human",
+    "1.4.3": "auto",
+    "1.4.5": "human",
+    "1.4.6": "auto",
+    "1.4.9": "human",
+    "2.4.1": "auto",
+    "2.4.2": "auto",
+    "2.4.3": "auto",
+    "2.4.4": "human",
+    "2.4.6": "human",
+    "2.5.3": "human",
+    "3.1.1": "auto",
+    "3.1.2": "assisted",
+    "3.1.5": "human",
+    "4.1.2": "auto"
+   },
+   "pptx": {
+    "1.1.1": "assisted",
+    "1.3.1": "auto",
+    "1.3.2": "auto",
+    "1.3.3": "assisted",
+    "1.4.1": "human",
+    "1.4.10": "human",
+    "1.4.11": "human",
+    "1.4.12": "human",
+    "1.4.2": "human",
+    "1.4.3": "auto",
+    "1.4.4": "human",
+    "1.4.5": "assisted",
+    "1.4.6": "auto",
+    "1.4.9": "human",
+    "2.1.1": "human",
+    "2.1.2": "human",
+    "2.4.2": "auto",
+    "2.4.3": "human",
+    "2.4.4": "assisted",
+    "2.4.6": "assisted",
+    "2.4.9": "assisted",
+    "3.1.1": "auto",
+    "3.1.2": "assisted",
+    "3.1.5": "human",
+    "4.1.2": "human"
+   },
+   "xlsx": {
+    "1.1.1": "assisted",
+    "1.3.1": "auto",
+    "1.3.2": "auto",
+    "1.3.3": "assisted",
+    "1.4.1": "human",
+    "1.4.11": "human",
+    "1.4.3": "auto",
+    "1.4.5": "assisted",
+    "1.4.6": "auto",
+    "1.4.9": "assisted",
+    "2.1.2": "human",
+    "2.4.2": "auto",
+    "2.4.4": "assisted",
+    "2.4.6": "assisted",
+    "3.1.1": "auto",
+    "3.1.2": "human",
+    "3.1.5": "assisted",
+    "4.1.2": "human"
+   }
+  },
+  "formats": [
+   "html",
+   "docx",
+   "pptx",
+   "xlsx",
+   "pdf"
+  ],
+  "lanes": [
+   "assisted",
+   "auto",
+   "human"
+  ]
+ },
+ "clean": {
+  "decisions": {},
+  "dispositions": {
+   "Clean/Minutes – March.docx": [],
+   "Clean/Plan.pdf": []
+  },
+  "fileFacts": {
+   "Clean/Minutes – March.docx": {
+    "accounting": {
+     "accountingReason": "no saved change touches any criterion with a finding, so every recorded finding is still open",
+     "findingsOpen": 1,
+     "findingsResolvedVerified": null,
+     "findingsTotal": 1,
+     "humanReviews": {
+      "accepted": 0,
+      "correctionRequested": 0,
+      "pending": 0,
+      "rejected": 0,
+      "stale": 0,
+      "unable": 0
+     },
+     "resolutionLedger": "none",
+     "savedChangesUnverified": 0,
+     "savedChangesVerified": 0
+    },
+    "approvals": {
+     "approvedAwaitingWrite": 0,
+     "note": "Approved in the review queue against a source version or proposed value that has since changed, so it needs a reviewer to approve it again against the current version. This report records that state; it does not re-queue or change the approval.",
+     "pending": 0,
+     "recheckRequired": [],
+     "source": "ok"
+    },
+    "assessment": {
+     "artifactAssessed": "source",
+     "assessedAt": "2026-09-02T05:05:00+00:00",
+     "assessedAtSource": "scan",
+     "engine": ".net/office",
+     "findingsComplete": true,
+     "findingsTotal": 1,
+     "rawStatus": "uncertain",
+     "score": 88,
+     "state": "assessed",
+     "stateReason": "the document was assessed and every in-scope rule was evaluated"
+    },
+    "comparison": {
+     "baseline": null,
+     "introduced": [],
+     "notComparable": null,
+     "notComparableByCriterion": [],
+     "persisting": [],
+     "reason": "no earlier assessment of this same document under the same rubric and scope is recorded",
+     "reasonCode": "no_earlier_assessment",
+     "renamed": null,
+     "reopened": null,
+     "reopenedReason": null,
+     "resolved": [],
+     "status": "no_baseline"
+    },
+    "factsDigest": "f70bfca4f4e510d1f3329887382962ebe7278dd1114f3aefa6d6c54ebada6e47",
+    "factsVersion": 1,
+    "findings": [
+     {
+      "comparable": true,
+      "detail": "Paragraph styled as a heading is not a heading",
+      "id": "90ed6961d1a8477f8935d5de70381ccc",
+      "instanceKey": "docx:paragraph:3",
+      "ledgerFindingId": null,
+      "location": {
+       "cell": null,
+       "element": "docx:paragraph:3",
+       "kind": "paragraph",
+       "label": "Paragraph 4",
+       "objectId": "paragraph:3",
+       "page": null,
+       "raw": "docx:paragraph:3",
+       "sheet": null,
+       "slide": null
+      },
+      "recommendedAction": null,
+      "recommendedActionSource": null,
+      "ruleId": "DOCX-HEAD-002",
+      "sc": "1.3.1",
+      "severity": "MODERATE",
+      "state": "open",
+      "stateReason": "recorded by the current assessment and not resolved by any per-finding record"
+     }
+    ],
+    "generatedAt": "2026-09-18T07:32:10.829539+00:00",
+    "identity": {
+     "correctedSha256": null,
+     "currentArtifact": {
+      "kind": "source",
+      "sha256": "md5-clean-minutes"
+     },
+     "file": "Clean/Minutes – March.docx",
+     "platformVersion": "2026.9.17.9",
+     "remediatedAt": null,
+     "rubricHash": "h1",
+     "scanId": "s-packets-clean",
+     "scanScope": null,
+     "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+     "sourceChecksum": "md5-clean-minutes",
+     "sourceChecksumKind": "other",
+     "sourceSha256": null,
+     "targetLevel": "AA",
+     "targetLevelSource": "workspace_config"
+    },
+    "kind": "file",
+    "limits": {
+     "findingsLimit": null,
+     "noteMaxChars": 500,
+     "savedChangesLimit": null,
+     "valueClippedIsUnrecoverable": true,
+     "valueMaxChars": 2000
+    },
+    "previous": null,
+    "previousReason": "no earlier assessment of this same document under the same rubric and scope is recorded",
+    "priorDecisions": null,
+    "priorDecisionsBounds": null,
+    "priorDecisionsReason": "Decisions recorded against earlier scans of this document are not shown: ACP cannot yet list them by document. They are not carried forward to this scan's changes, and their absence here is not evidence that there were none.",
+    "reviews": {},
+    "sameScanHistory": {
+     "baseline": null,
+     "introduced": [],
+     "notComparable": null,
+     "notComparableByCriterion": [],
+     "persisting": [],
+     "reason": "ACP cannot yet read an assessment that a re-assessment replaced inside this scan, so changes within one scan are not compared; this is not evidence that the document was assessed only once",
+     "reasonCode": "reader_unavailable",
+     "renamed": null,
+     "reopened": null,
+     "reopenedReason": null,
+     "resolved": [],
+     "snapshot": null,
+     "status": "not_available"
+    },
+    "savedChanges": [],
+    "savedChangesComplete": true,
+    "savedChangesLimit": null,
+    "savedChangesTotal": 0,
+    "savedChangesUnverifiedSource": "ok"
+   },
+   "Clean/Plan.pdf": {
+    "accounting": {
+     "accountingReason": "no saved change touches any criterion with a finding, so every recorded finding is still open",
+     "findingsOpen": 0,
+     "findingsResolvedVerified": null,
+     "findingsTotal": 0,
+     "humanReviews": {
+      "accepted": 0,
+      "correctionRequested": 0,
+      "pending": 0,
+      "rejected": 0,
+      "stale": 0,
+      "unable": 0
+     },
+     "resolutionLedger": "none",
+     "savedChangesUnverified": 0,
+     "savedChangesVerified": 0
+    },
+    "approvals": {
+     "approvedAwaitingWrite": 0,
+     "note": "Approved in the review queue against a source version or proposed value that has since changed, so it needs a reviewer to approve it again against the current version. This report records that state; it does not re-queue or change the approval.",
+     "pending": 0,
+     "recheckRequired": [],
+     "source": "ok"
+    },
+    "assessment": {
+     "artifactAssessed": "source",
+     "assessedAt": "2026-09-02T05:05:00+00:00",
+     "assessedAtSource": "scan",
+     "engine": ".net/office",
+     "findingsComplete": true,
+     "findingsTotal": 0,
+     "rawStatus": "uncertain",
+     "score": 100,
+     "state": "assessed",
+     "stateReason": "the document was assessed and every in-scope rule was evaluated"
+    },
+    "comparison": {
+     "baseline": null,
+     "introduced": [],
+     "notComparable": null,
+     "notComparableByCriterion": [],
+     "persisting": [],
+     "reason": "no earlier assessment of this same document under the same rubric and scope is recorded",
+     "reasonCode": "no_earlier_assessment",
+     "renamed": null,
+     "reopened": null,
+     "reopenedReason": null,
+     "resolved": [],
+     "status": "no_baseline"
+    },
+    "factsDigest": "4ea4d0d71bf480bcbdbb35e67a14aebbeef8427441d43d72eb7e1179a97f1fce",
+    "factsVersion": 1,
+    "findings": [],
+    "generatedAt": "2026-09-18T07:32:10.834776+00:00",
+    "identity": {
+     "correctedSha256": null,
+     "currentArtifact": {
+      "kind": "source",
+      "sha256": "md5-clean-plan"
+     },
+     "file": "Clean/Plan.pdf",
+     "platformVersion": "2026.9.17.9",
+     "remediatedAt": null,
+     "rubricHash": "h1",
+     "scanId": "s-packets-clean",
+     "scanScope": null,
+     "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+     "sourceChecksum": "md5-clean-plan",
+     "sourceChecksumKind": "other",
+     "sourceSha256": null,
+     "targetLevel": "AA",
+     "targetLevelSource": "workspace_config"
+    },
+    "kind": "file",
+    "limits": {
+     "findingsLimit": null,
+     "noteMaxChars": 500,
+     "savedChangesLimit": null,
+     "valueClippedIsUnrecoverable": true,
+     "valueMaxChars": 2000
+    },
+    "previous": null,
+    "previousReason": "no earlier assessment of this same document under the same rubric and scope is recorded",
+    "priorDecisions": null,
+    "priorDecisionsBounds": null,
+    "priorDecisionsReason": "Decisions recorded against earlier scans of this document are not shown: ACP cannot yet list them by document. They are not carried forward to this scan's changes, and their absence here is not evidence that there were none.",
+    "reviews": {},
+    "sameScanHistory": {
+     "baseline": null,
+     "introduced": [],
+     "notComparable": null,
+     "notComparableByCriterion": [],
+     "persisting": [],
+     "reason": "ACP cannot yet read an assessment that a re-assessment replaced inside this scan, so changes within one scan are not compared; this is not evidence that the document was assessed only once",
+     "reasonCode": "reader_unavailable",
+     "renamed": null,
+     "reopened": null,
+     "reopenedReason": null,
+     "resolved": [],
+     "snapshot": null,
+     "status": "not_available"
+    },
+    "savedChanges": [],
+    "savedChangesComplete": true,
+    "savedChangesLimit": null,
+    "savedChangesTotal": 0,
+    "savedChangesUnverifiedSource": "ok"
+   }
+  },
+  "finalCheck": {
+   "unchanged": {
+    "accounting": {
+     "accountingReason": "at least one document has no per-finding ledger, so the scan-level resolved count cannot be stated",
+     "findingsOpen": 1,
+     "findingsResolvedVerified": null,
+     "findingsTotal": 1,
+     "humanReviews": {
+      "accepted": 0,
+      "correctionRequested": 0,
+      "pending": 0,
+      "rejected": 0,
+      "stale": 0,
+      "unable": 0
+     },
+     "resolutionLedger": "none",
+     "savedChangesUnverified": 0,
+     "savedChangesVerified": 0
+    },
+    "comparison": {
+     "complete": true,
+     "notes": [
+      "Re-assessing a document inside the same scan replaces its earlier finding list, so changes within one scan are not compared."
+     ],
+     "reason": "no document in this scan has an earlier assessment under the same rubric and scope; 2 have no earlier assessment at all.",
+     "sameScan": {
+      "filesBaselineUnusable": 0,
+      "filesCompared": 0,
+      "filesNotAvailable": 2,
+      "filesNotComparable": 0,
+      "filesNotRecorded": 0,
+      "introduced": 0,
+      "persisting": 0,
+      "resolved": 0
+     },
+     "status": "no_baseline",
+     "totals": {
+      "filesBaselineUnusable": 0,
+      "filesCompared": 0,
+      "filesNew": 2,
+      "filesNoBaseline": 2,
+      "filesNotComparable": 0,
+      "filesRenamed": 0,
+      "filesReopenedUndetermined": 0,
+      "introduced": 0,
+      "notComparable": 0,
+      "persisting": 0,
+      "reopened": 0,
+      "reopenedDetermined": 0,
+      "resolved": 0
+     }
+    },
+    "complete": false,
+    "factsDigest": "7d2514ec3858ced88584ca5ead2a03544af3349b0695f94269f18dd4ce4ea6b1",
+    "factsVersion": 1,
+    "files": [
+     {
+      "approvalsRecheckRequired": 0,
+      "assessment": {
+       "state": "assessed",
+       "stateReason": "the document was assessed and every in-scope rule was evaluated"
+      },
+      "comparison": {
+       "baseline": null,
+       "introduced": null,
+       "notComparable": null,
+       "persisting": null,
+       "reason": "no earlier assessment of this same document under the same rubric and scope is recorded",
+       "reasonCode": "no_earlier_assessment",
+       "renamed": null,
+       "reopened": null,
+       "resolved": null,
+       "status": "no_baseline"
+      },
+      "currentArtifact": {
+       "kind": "source",
+       "sha256": "md5-clean-minutes"
+      },
+      "factsDigest": "f70bfca4f4e510d1f3329887382962ebe7278dd1114f3aefa6d6c54ebada6e47",
+      "file": "Clean/Minutes – March.docx",
+      "findingsOpen": 1,
+      "findingsResolvedVerified": null,
+      "findingsTotal": 1,
+      "humanReviews": {
+       "accepted": 0,
+       "correctionRequested": 0,
+       "pending": 0,
+       "rejected": 0,
+       "stale": 0,
+       "unable": 0
+      },
+      "resolutionLedger": "none",
+      "savedChangesComplete": true,
+      "savedChangesUnverified": 0,
+      "savedChangesVerified": 0,
+      "score": 88
+     }
+    ],
+    "filesTotal": 2,
+    "generatedAt": "2026-09-18T07:32:10.853615+00:00",
+    "identity": {
+     "file": null,
+     "platformVersion": "2026.9.17.9",
+     "rubricHash": "h1",
+     "scanId": "s-packets-clean",
+     "scanScope": null,
+     "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+     "source": "local",
+     "targetLevel": "AA",
+     "targetLevelSource": "workspace_config"
+    },
+    "kind": "scan",
+    "limit": 1,
+    "limits": {
+     "filePageMax": 1000,
+     "savedChangesLimit": null,
+     "valueMaxChars": 2000
+    },
+    "offset": 0,
+    "previous": null,
+    "previousReason": "the estate comparison is aggregated from each document's own comparison with its most recent earlier assessment",
+    "scan": {
+     "assessedAt": "2026-09-02T05:05:00+00:00",
+     "startedAt": "2026-09-01T05:00:00+00:00",
+     "status": "done"
+    },
+    "snapshot": {
+     "builtAt": "2026-09-18T07:32:10.853615+00:00",
+     "factsDigest": "7d2514ec3858ced88584ca5ead2a03544af3349b0695f94269f18dd4ce4ea6b1",
+     "filesTotal": 2,
+     "servedFrom": "fresh",
+     "ttlSeconds": 60
+    },
+    "totals": {
+     "approvalsRecheckRequired": 0,
+     "assessed": 2,
+     "documents": 2,
+     "error": 0,
+     "findingsTotal": 1,
+     "notAssessed": 0,
+     "partial": 0,
+     "savedChangesUnverified": 0,
+     "savedChangesVerified": 0
+    }
+   }
+  },
+  "remediationState": {
+   "Clean/Minutes – March.docx": [],
+   "Clean/Plan.pdf": []
+  },
+  "scan": {
+   "files": [
+    {
+     "acp_stamped": null,
+     "compliant": 0,
+     "corrected_sha256": null,
+     "drive_file_id": null,
+     "drive_write_url": null,
+     "engine": ".net/office",
+     "file": "Clean/Minutes – March.docx",
+     "issues": [
+      {
+       "detail": "Paragraph styled as a heading is not a heading",
+       "location": "docx:paragraph:3",
+       "page": null,
+       "rule_id": "DOCX-HEAD-002",
+       "severity": "MODERATE",
+       "wcag": "SC_1_3_1"
+      }
+     ],
+     "owner": null,
+     "pages": null,
+     "parent_folder": null,
+     "published_at": null,
+     "remediated_at": null,
+     "score": 88,
+     "sheets": null,
+     "size_kb": null,
+     "skipped_rules": 0,
+     "sourceName": "Local upload",
+     "source_modified": null,
+     "source_relative_path": null,
+     "status": "uncertain"
+    },
+    {
+     "acp_stamped": null,
+     "compliant": 0,
+     "corrected_sha256": null,
+     "drive_file_id": null,
+     "drive_write_url": null,
+     "engine": ".net/office",
+     "file": "Clean/Plan.pdf",
+     "issues": [],
+     "owner": null,
+     "pages": null,
+     "parent_folder": null,
+     "published_at": null,
+     "remediated_at": null,
+     "score": 100,
+     "sheets": null,
+     "size_kb": null,
+     "skipped_rules": 0,
+     "sourceName": "Local upload",
+     "source_modified": null,
+     "source_relative_path": null,
+     "status": "uncertain"
+    }
+   ]
+  },
+  "scanFactsPages": [
+   {
+    "digest": null,
+    "limit": 3,
+    "offset": 0,
+    "response": {
+     "accounting": {
+      "accountingReason": "at least one document has no per-finding ledger, so the scan-level resolved count cannot be stated",
+      "findingsOpen": 1,
+      "findingsResolvedVerified": null,
+      "findingsTotal": 1,
+      "humanReviews": {
+       "accepted": 0,
+       "correctionRequested": 0,
+       "pending": 0,
+       "rejected": 0,
+       "stale": 0,
+       "unable": 0
+      },
+      "resolutionLedger": "none",
+      "savedChangesUnverified": 0,
+      "savedChangesVerified": 0
+     },
+     "comparison": {
+      "complete": true,
+      "notes": [
+       "Re-assessing a document inside the same scan replaces its earlier finding list, so changes within one scan are not compared."
+      ],
+      "reason": "no document in this scan has an earlier assessment under the same rubric and scope; 2 have no earlier assessment at all.",
+      "sameScan": {
+       "filesBaselineUnusable": 0,
+       "filesCompared": 0,
+       "filesNotAvailable": 2,
+       "filesNotComparable": 0,
+       "filesNotRecorded": 0,
+       "introduced": 0,
+       "persisting": 0,
+       "resolved": 0
+      },
+      "status": "no_baseline",
+      "totals": {
+       "filesBaselineUnusable": 0,
+       "filesCompared": 0,
+       "filesNew": 2,
+       "filesNoBaseline": 2,
+       "filesNotComparable": 0,
+       "filesRenamed": 0,
+       "filesReopenedUndetermined": 0,
+       "introduced": 0,
+       "notComparable": 0,
+       "persisting": 0,
+       "reopened": 0,
+       "reopenedDetermined": 0,
+       "resolved": 0
+      }
+     },
+     "complete": true,
+     "factsDigest": "7d2514ec3858ced88584ca5ead2a03544af3349b0695f94269f18dd4ce4ea6b1",
+     "factsVersion": 1,
+     "files": [
+      {
+       "approvalsRecheckRequired": 0,
+       "assessment": {
+        "state": "assessed",
+        "stateReason": "the document was assessed and every in-scope rule was evaluated"
+       },
+       "comparison": {
+        "baseline": null,
+        "introduced": null,
+        "notComparable": null,
+        "persisting": null,
+        "reason": "no earlier assessment of this same document under the same rubric and scope is recorded",
+        "reasonCode": "no_earlier_assessment",
+        "renamed": null,
+        "reopened": null,
+        "resolved": null,
+        "status": "no_baseline"
+       },
+       "currentArtifact": {
+        "kind": "source",
+        "sha256": "md5-clean-minutes"
+       },
+       "factsDigest": "f70bfca4f4e510d1f3329887382962ebe7278dd1114f3aefa6d6c54ebada6e47",
+       "file": "Clean/Minutes – March.docx",
+       "findingsOpen": 1,
+       "findingsResolvedVerified": null,
+       "findingsTotal": 1,
+       "humanReviews": {
+        "accepted": 0,
+        "correctionRequested": 0,
+        "pending": 0,
+        "rejected": 0,
+        "stale": 0,
+        "unable": 0
+       },
+       "resolutionLedger": "none",
+       "savedChangesComplete": true,
+       "savedChangesUnverified": 0,
+       "savedChangesVerified": 0,
+       "score": 88
+      },
+      {
+       "approvalsRecheckRequired": 0,
+       "assessment": {
+        "state": "assessed",
+        "stateReason": "the document was assessed and every in-scope rule was evaluated"
+       },
+       "comparison": {
+        "baseline": null,
+        "introduced": null,
+        "notComparable": null,
+        "persisting": null,
+        "reason": "no earlier assessment of this same document under the same rubric and scope is recorded",
+        "reasonCode": "no_earlier_assessment",
+        "renamed": null,
+        "reopened": null,
+        "resolved": null,
+        "status": "no_baseline"
+       },
+       "currentArtifact": {
+        "kind": "source",
+        "sha256": "md5-clean-plan"
+       },
+       "factsDigest": "4ea4d0d71bf480bcbdbb35e67a14aebbeef8427441d43d72eb7e1179a97f1fce",
+       "file": "Clean/Plan.pdf",
+       "findingsOpen": 0,
+       "findingsResolvedVerified": null,
+       "findingsTotal": 0,
+       "humanReviews": {
+        "accepted": 0,
+        "correctionRequested": 0,
+        "pending": 0,
+        "rejected": 0,
+        "stale": 0,
+        "unable": 0
+       },
+       "resolutionLedger": "none",
+       "savedChangesComplete": true,
+       "savedChangesUnverified": 0,
+       "savedChangesVerified": 0,
+       "score": 100
+      }
+     ],
+     "filesTotal": 2,
+     "generatedAt": "2026-09-18T07:32:10.824150+00:00",
+     "identity": {
+      "file": null,
+      "platformVersion": "2026.9.17.9",
+      "rubricHash": "h1",
+      "scanId": "s-packets-clean",
+      "scanScope": null,
+      "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+      "source": "local",
+      "targetLevel": "AA",
+      "targetLevelSource": "workspace_config"
+     },
+     "kind": "scan",
+     "limit": 3,
+     "limits": {
+      "filePageMax": 1000,
+      "savedChangesLimit": null,
+      "valueMaxChars": 2000
+     },
+     "offset": 0,
+     "previous": null,
+     "previousReason": "the estate comparison is aggregated from each document's own comparison with its most recent earlier assessment",
+     "scan": {
+      "assessedAt": "2026-09-02T05:05:00+00:00",
+      "startedAt": "2026-09-01T05:00:00+00:00",
+      "status": "done"
+     },
+     "snapshot": {
+      "builtAt": "2026-09-18T07:32:10.824150+00:00",
+      "factsDigest": "7d2514ec3858ced88584ca5ead2a03544af3349b0695f94269f18dd4ce4ea6b1",
+      "filesTotal": 2,
+      "servedFrom": "fresh",
+      "ttlSeconds": 60
+     },
+     "totals": {
+      "approvalsRecheckRequired": 0,
+      "assessed": 2,
+      "documents": 2,
+      "error": 0,
+      "findingsTotal": 1,
+      "notAssessed": 0,
+      "partial": 0,
+      "savedChangesUnverified": 0,
+      "savedChangesVerified": 0
+     }
+    }
+   }
+  ],
+  "scanId": "s-packets-clean"
+ },
+ "decisions": {},
+ "dispositions": {
+  "../../outside/escape.xlsx": [],
+  "Budget & notes (draft).xlsx": [],
+  "CON.pptx": [],
+  "Policies/2026/Überblick – Richtlinie.docx": [],
+  "Reports/Q1 summary.pdf": [],
+  "broken.docx": [],
+  "not-yet.pdf": [],
+  "reports/q1 SUMMARY.pdf": []
+ },
+ "fileFacts": {
+  "../../outside/escape.xlsx": {
+   "accounting": {
+    "accountingReason": "no saved change touches any criterion with a finding, so every recorded finding is still open",
+    "findingsOpen": 1,
+    "findingsResolvedVerified": null,
+    "findingsTotal": 1,
+    "humanReviews": {
+     "accepted": 0,
+     "correctionRequested": 0,
+     "pending": 0,
+     "rejected": 0,
+     "stale": 0,
+     "unable": 0
+    },
+    "resolutionLedger": "none",
+    "savedChangesUnverified": 0,
+    "savedChangesVerified": 0
+   },
+   "approvals": {
+    "approvedAwaitingWrite": 0,
+    "note": "Approved in the review queue against a source version or proposed value that has since changed, so it needs a reviewer to approve it again against the current version. This report records that state; it does not re-queue or change the approval.",
+    "pending": 0,
+    "recheckRequired": [],
+    "source": "ok"
+   },
+   "assessment": {
+    "artifactAssessed": "source",
+    "assessedAt": "2026-09-01T05:05:00+00:00",
+    "assessedAtSource": "scan",
+    "engine": ".net/office",
+    "findingsComplete": true,
+    "findingsTotal": 1,
+    "rawStatus": "uncertain",
+    "score": 80,
+    "state": "assessed",
+    "stateReason": "the document was assessed and every in-scope rule was evaluated"
+   },
+   "comparison": {
+    "baseline": {
+     "file": "../../outside/escape.xlsx",
+     "generatedAt": "2026-08-01T05:05:00+00:00",
+     "runStatus": "done",
+     "scanId": "s-packets-prev",
+     "status": "uncertain"
+    },
+    "introduced": [],
+    "notComparable": {
+     "current": 0,
+     "previous": 0
+    },
+    "notComparableByCriterion": [],
+    "persisting": [
+     "6ffb14d4aa607569df54a8f44400219c"
+    ],
+    "reason": "matched finding by finding against the assessment of 2026-08-01T05:05:00+00:00 of the same document (same source and path), under the same rubric and scope",
+    "reasonCode": "compared",
+    "renamed": false,
+    "reopened": null,
+    "reopenedReason": "the earlier assessment has no per-finding resolution ledger, so whether a finding reported again had been fixed in between is not recorded",
+    "resolved": [],
+    "status": "compared"
+   },
+   "factsDigest": "c55cf2ddd5ddd07d61de9253af3427b9deb546adf652a72b0a7d9f1113ec98e8",
+   "factsVersion": 1,
+   "findings": [
+    {
+     "comparable": true,
+     "detail": "Table has no header row",
+     "id": "6ffb14d4aa607569df54a8f44400219c",
+     "instanceKey": "xlsx:sheet:budget:cell:b3",
+     "ledgerFindingId": null,
+     "location": {
+      "cell": "B3",
+      "element": "xlsx:sheet:Budget:cell:B3",
+      "kind": "cell",
+      "label": "Sheet Budget · cell B3",
+      "objectId": null,
+      "page": null,
+      "raw": "xlsx:sheet:Budget:cell:B3",
+      "sheet": "Budget",
+      "slide": null
+     },
+     "recommendedAction": null,
+     "recommendedActionSource": null,
+     "ruleId": "XLSX-HEADER-001",
+     "sc": "1.3.1",
+     "severity": "MODERATE",
+     "state": "open",
+     "stateReason": "recorded by the current assessment and not resolved by any per-finding record"
+    }
+   ],
+   "generatedAt": "2026-09-18T07:32:10.694214+00:00",
+   "identity": {
+    "correctedSha256": null,
+    "currentArtifact": {
+     "kind": "source",
+     "sha256": "md5-escape"
+    },
+    "file": "../../outside/escape.xlsx",
+    "platformVersion": "2026.9.17.9",
+    "remediatedAt": null,
+    "rubricHash": "h1",
+    "scanId": "s-packets",
+    "scanScope": null,
+    "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+    "sourceChecksum": "md5-escape",
+    "sourceChecksumKind": "other",
+    "sourceSha256": null,
+    "targetLevel": "AA",
+    "targetLevelSource": "workspace_config"
+   },
+   "kind": "file",
+   "limits": {
+    "findingsLimit": null,
+    "noteMaxChars": 500,
+    "savedChangesLimit": null,
+    "valueClippedIsUnrecoverable": true,
+    "valueMaxChars": 2000
+   },
+   "previous": {
+    "comparableFindings": 1,
+    "file": "../../outside/escape.xlsx",
+    "findings": [
+     {
+      "comparable": true,
+      "detail": "Table has no header row",
+      "id": "6ffb14d4aa607569df54a8f44400219c",
+      "location": {
+       "cell": "B3",
+       "element": "xlsx:sheet:Budget:cell:B3",
+       "kind": "cell",
+       "label": "Sheet Budget · cell B3",
+       "objectId": null,
+       "page": null,
+       "raw": "xlsx:sheet:Budget:cell:B3",
+       "sheet": "Budget",
+       "slide": null
+      },
+      "ruleId": "XLSX-HEADER-001",
+      "sc": "1.3.1"
+     }
+    ],
+    "generatedAt": "2026-08-01T05:05:00+00:00",
+    "matchedBy": "source_path",
+    "sameDocument": true,
+    "scanId": "s-packets-prev",
+    "scanScope": null,
+    "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+    "score": 80,
+    "sha256": null,
+    "sourceChecksum": "md5-escape",
+    "sourceChecksumKind": "other"
+   },
+   "previousReason": "an earlier assessment of the same document under the same rubric and scope",
+   "priorDecisions": null,
+   "priorDecisionsBounds": null,
+   "priorDecisionsReason": "Decisions recorded against earlier scans of this document are not shown: ACP cannot yet list them by document. They are not carried forward to this scan's changes, and their absence here is not evidence that there were none.",
+   "reviews": {},
+   "sameScanHistory": {
+    "baseline": null,
+    "introduced": [],
+    "notComparable": null,
+    "notComparableByCriterion": [],
+    "persisting": [],
+    "reason": "ACP cannot yet read an assessment that a re-assessment replaced inside this scan, so changes within one scan are not compared; this is not evidence that the document was assessed only once",
+    "reasonCode": "reader_unavailable",
+    "renamed": null,
+    "reopened": null,
+    "reopenedReason": null,
+    "resolved": [],
+    "snapshot": null,
+    "status": "not_available"
+   },
+   "savedChanges": [],
+   "savedChangesComplete": true,
+   "savedChangesLimit": null,
+   "savedChangesTotal": 0,
+   "savedChangesUnverifiedSource": "ok"
+  },
+  "Budget & notes (draft).xlsx": {
+   "accounting": {
+    "accountingReason": "no saved change touches any criterion with a finding, so every recorded finding is still open",
+    "findingsOpen": 0,
+    "findingsResolvedVerified": null,
+    "findingsTotal": 0,
+    "humanReviews": {
+     "accepted": 0,
+     "correctionRequested": 0,
+     "pending": 0,
+     "rejected": 0,
+     "stale": 0,
+     "unable": 0
+    },
+    "resolutionLedger": "none",
+    "savedChangesUnverified": 0,
+    "savedChangesVerified": 0
+   },
+   "approvals": {
+    "approvedAwaitingWrite": 0,
+    "note": "Approved in the review queue against a source version or proposed value that has since changed, so it needs a reviewer to approve it again against the current version. This report records that state; it does not re-queue or change the approval.",
+    "pending": 0,
+    "recheckRequired": [],
+    "source": "ok"
+   },
+   "assessment": {
+    "artifactAssessed": "source",
+    "assessedAt": "2026-09-01T05:05:00+00:00",
+    "assessedAtSource": "scan",
+    "engine": ".net/office",
+    "findingsComplete": true,
+    "findingsTotal": 0,
+    "rawStatus": "uncertain",
+    "score": 100,
+    "state": "assessed",
+    "stateReason": "the document was assessed and every in-scope rule was evaluated"
+   },
+   "comparison": {
+    "baseline": {
+     "file": "Budget & notes (draft).xlsx",
+     "generatedAt": "2026-08-01T05:05:00+00:00",
+     "runStatus": "done",
+     "scanId": "s-packets-prev",
+     "status": "uncertain"
+    },
+    "introduced": [],
+    "notComparable": {
+     "current": 0,
+     "previous": 0
+    },
+    "notComparableByCriterion": [],
+    "persisting": [],
+    "reason": "matched finding by finding against the assessment of 2026-08-01T05:05:00+00:00 of the same document (same source and path), under the same rubric and scope",
+    "reasonCode": "compared",
+    "renamed": false,
+    "reopened": null,
+    "reopenedReason": "the earlier assessment has no per-finding resolution ledger, so whether a finding reported again had been fixed in between is not recorded",
+    "resolved": [],
+    "status": "compared"
+   },
+   "factsDigest": "33106991975ee3158b7c115cb27950b2f43425246fb42a6903dae61f7b943877",
+   "factsVersion": 1,
+   "findings": [],
+   "generatedAt": "2026-09-18T07:32:10.700098+00:00",
+   "identity": {
+    "correctedSha256": null,
+    "currentArtifact": {
+     "kind": "source",
+     "sha256": "md5-budget"
+    },
+    "file": "Budget & notes (draft).xlsx",
+    "platformVersion": "2026.9.17.9",
+    "remediatedAt": null,
+    "rubricHash": "h1",
+    "scanId": "s-packets",
+    "scanScope": null,
+    "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+    "sourceChecksum": "md5-budget",
+    "sourceChecksumKind": "other",
+    "sourceSha256": null,
+    "targetLevel": "AA",
+    "targetLevelSource": "workspace_config"
+   },
+   "kind": "file",
+   "limits": {
+    "findingsLimit": null,
+    "noteMaxChars": 500,
+    "savedChangesLimit": null,
+    "valueClippedIsUnrecoverable": true,
+    "valueMaxChars": 2000
+   },
+   "previous": {
+    "comparableFindings": 0,
+    "file": "Budget & notes (draft).xlsx",
+    "findings": [],
+    "generatedAt": "2026-08-01T05:05:00+00:00",
+    "matchedBy": "source_path",
+    "sameDocument": true,
+    "scanId": "s-packets-prev",
+    "scanScope": null,
+    "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+    "score": 100,
+    "sha256": null,
+    "sourceChecksum": "md5-budget",
+    "sourceChecksumKind": "other"
+   },
+   "previousReason": "an earlier assessment of the same document under the same rubric and scope",
+   "priorDecisions": null,
+   "priorDecisionsBounds": null,
+   "priorDecisionsReason": "Decisions recorded against earlier scans of this document are not shown: ACP cannot yet list them by document. They are not carried forward to this scan's changes, and their absence here is not evidence that there were none.",
+   "reviews": {},
+   "sameScanHistory": {
+    "baseline": null,
+    "introduced": [],
+    "notComparable": null,
+    "notComparableByCriterion": [],
+    "persisting": [],
+    "reason": "ACP cannot yet read an assessment that a re-assessment replaced inside this scan, so changes within one scan are not compared; this is not evidence that the document was assessed only once",
+    "reasonCode": "reader_unavailable",
+    "renamed": null,
+    "reopened": null,
+    "reopenedReason": null,
+    "resolved": [],
+    "snapshot": null,
+    "status": "not_available"
+   },
+   "savedChanges": [],
+   "savedChangesComplete": true,
+   "savedChangesLimit": null,
+   "savedChangesTotal": 0,
+   "savedChangesUnverifiedSource": "ok"
+  },
+  "CON.pptx": {
+   "accounting": {
+    "accountingReason": "no saved change touches any criterion with a finding, so every recorded finding is still open",
+    "findingsOpen": 1,
+    "findingsResolvedVerified": null,
+    "findingsTotal": 1,
+    "humanReviews": {
+     "accepted": 0,
+     "correctionRequested": 0,
+     "pending": 0,
+     "rejected": 0,
+     "stale": 0,
+     "unable": 0
+    },
+    "resolutionLedger": "none",
+    "savedChangesUnverified": 0,
+    "savedChangesVerified": 0
+   },
+   "approvals": {
+    "approvedAwaitingWrite": 0,
+    "note": "Approved in the review queue against a source version or proposed value that has since changed, so it needs a reviewer to approve it again against the current version. This report records that state; it does not re-queue or change the approval.",
+    "pending": 0,
+    "recheckRequired": [],
+    "source": "ok"
+   },
+   "assessment": {
+    "artifactAssessed": "source",
+    "assessedAt": "2026-09-01T05:05:00+00:00",
+    "assessedAtSource": "scan",
+    "engine": ".net/office",
+    "findingsComplete": true,
+    "findingsTotal": 1,
+    "rawStatus": "uncertain",
+    "score": 64,
+    "state": "assessed",
+    "stateReason": "the document was assessed and every in-scope rule was evaluated"
+   },
+   "comparison": {
+    "baseline": {
+     "file": "CON.pptx",
+     "generatedAt": "2026-08-01T05:05:00+00:00",
+     "runStatus": "done",
+     "scanId": "s-packets-prev",
+     "status": "uncertain"
+    },
+    "introduced": [],
+    "notComparable": {
+     "current": 0,
+     "previous": 0
+    },
+    "notComparableByCriterion": [],
+    "persisting": [
+     "43ba80e01c2432767462b8a39e8411b6"
+    ],
+    "reason": "matched finding by finding against the assessment of 2026-08-01T05:05:00+00:00 of the same document (same source and path), under the same rubric and scope",
+    "reasonCode": "compared",
+    "renamed": false,
+    "reopened": null,
+    "reopenedReason": "the earlier assessment has no per-finding resolution ledger, so whether a finding reported again had been fixed in between is not recorded",
+    "resolved": [],
+    "status": "compared"
+   },
+   "factsDigest": "78a25852662f192d241d40b1960524df7e50d11b46b5ade4471863340a659ec9",
+   "factsVersion": 1,
+   "findings": [
+    {
+     "comparable": true,
+     "detail": "Picture has no alternative text",
+     "id": "43ba80e01c2432767462b8a39e8411b6",
+     "instanceKey": "pptx:slide:1",
+     "ledgerFindingId": null,
+     "location": {
+      "cell": null,
+      "element": "pptx:slide:1",
+      "kind": "slide",
+      "label": "Slide 2",
+      "objectId": null,
+      "page": 2,
+      "raw": "pptx:slide:1",
+      "sheet": null,
+      "slide": 2
+     },
+     "recommendedAction": null,
+     "recommendedActionSource": null,
+     "ruleId": "PPTX-ALT-001",
+     "sc": "1.1.1",
+     "severity": "SERIOUS",
+     "state": "open",
+     "stateReason": "recorded by the current assessment and not resolved by any per-finding record"
+    }
+   ],
+   "generatedAt": "2026-09-18T07:32:10.705876+00:00",
+   "identity": {
+    "correctedSha256": null,
+    "currentArtifact": {
+     "kind": "source",
+     "sha256": "md5-con"
+    },
+    "file": "CON.pptx",
+    "platformVersion": "2026.9.17.9",
+    "remediatedAt": null,
+    "rubricHash": "h1",
+    "scanId": "s-packets",
+    "scanScope": null,
+    "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+    "sourceChecksum": "md5-con",
+    "sourceChecksumKind": "other",
+    "sourceSha256": null,
+    "targetLevel": "AA",
+    "targetLevelSource": "workspace_config"
+   },
+   "kind": "file",
+   "limits": {
+    "findingsLimit": null,
+    "noteMaxChars": 500,
+    "savedChangesLimit": null,
+    "valueClippedIsUnrecoverable": true,
+    "valueMaxChars": 2000
+   },
+   "previous": {
+    "comparableFindings": 1,
+    "file": "CON.pptx",
+    "findings": [
+     {
+      "comparable": true,
+      "detail": "Picture has no alternative text",
+      "id": "43ba80e01c2432767462b8a39e8411b6",
+      "location": {
+       "cell": null,
+       "element": "pptx:slide:1",
+       "kind": "slide",
+       "label": "Slide 2",
+       "objectId": null,
+       "page": 2,
+       "raw": "pptx:slide:1",
+       "sheet": null,
+       "slide": 2
+      },
+      "ruleId": "PPTX-ALT-001",
+      "sc": "1.1.1"
+     }
+    ],
+    "generatedAt": "2026-08-01T05:05:00+00:00",
+    "matchedBy": "source_path",
+    "sameDocument": true,
+    "scanId": "s-packets-prev",
+    "scanScope": null,
+    "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+    "score": 64,
+    "sha256": null,
+    "sourceChecksum": "md5-con",
+    "sourceChecksumKind": "other"
+   },
+   "previousReason": "an earlier assessment of the same document under the same rubric and scope",
+   "priorDecisions": null,
+   "priorDecisionsBounds": null,
+   "priorDecisionsReason": "Decisions recorded against earlier scans of this document are not shown: ACP cannot yet list them by document. They are not carried forward to this scan's changes, and their absence here is not evidence that there were none.",
+   "reviews": {},
+   "sameScanHistory": {
+    "baseline": null,
+    "introduced": [],
+    "notComparable": null,
+    "notComparableByCriterion": [],
+    "persisting": [],
+    "reason": "ACP cannot yet read an assessment that a re-assessment replaced inside this scan, so changes within one scan are not compared; this is not evidence that the document was assessed only once",
+    "reasonCode": "reader_unavailable",
+    "renamed": null,
+    "reopened": null,
+    "reopenedReason": null,
+    "resolved": [],
+    "snapshot": null,
+    "status": "not_available"
+   },
+   "savedChanges": [],
+   "savedChangesComplete": true,
+   "savedChangesLimit": null,
+   "savedChangesTotal": 0,
+   "savedChangesUnverifiedSource": "ok"
+  },
+  "Policies/2026/Überblick – Richtlinie.docx": {
+   "accounting": {
+    "accountingReason": "saved changes exist for criteria that still have findings, but no per-finding ledger records which finding each change resolved",
+    "findingsOpen": null,
+    "findingsResolvedVerified": null,
+    "findingsTotal": 2,
+    "humanReviews": {
+     "accepted": 0,
+     "correctionRequested": 0,
+     "pending": 1,
+     "rejected": 0,
+     "stale": 0,
+     "unable": 0
+    },
+    "resolutionLedger": "none",
+    "savedChangesUnverified": 0,
+    "savedChangesVerified": 1
+   },
+   "approvals": {
+    "approvedAwaitingWrite": 0,
+    "note": "Approved in the review queue against a source version or proposed value that has since changed, so it needs a reviewer to approve it again against the current version. This report records that state; it does not re-queue or change the approval.",
+    "pending": 0,
+    "recheckRequired": [],
+    "source": "ok"
+   },
+   "assessment": {
+    "artifactAssessed": "unknown",
+    "assessedAt": "2026-09-01T05:05:00+00:00",
+    "assessedAtSource": "scan",
+    "engine": ".net/office",
+    "findingsComplete": true,
+    "findingsTotal": 2,
+    "rawStatus": "uncertain",
+    "score": 72,
+    "state": "assessed",
+    "stateReason": "the document was assessed and every in-scope rule was evaluated"
+   },
+   "comparison": {
+    "baseline": {
+     "file": "Policies/2026/Überblick – Richtlinie.docx",
+     "generatedAt": "2026-08-01T05:05:00+00:00",
+     "runStatus": "done",
+     "scanId": "s-packets-prev",
+     "status": "uncertain"
+    },
+    "introduced": [
+     "cf33822889806f75a1221992e8553991"
+    ],
+    "notComparable": {
+     "current": 0,
+     "previous": 0
+    },
+    "notComparableByCriterion": [],
+    "persisting": [
+     "7797d10c0bdd5bc5bb4a9142059d372d"
+    ],
+    "reason": "matched finding by finding against the assessment of 2026-08-01T05:05:00+00:00 of the same document (same source and path), under the same rubric and scope",
+    "reasonCode": "compared",
+    "renamed": false,
+    "reopened": null,
+    "reopenedReason": "the earlier assessment has no per-finding resolution ledger, so whether a finding reported again had been fixed in between is not recorded",
+    "resolved": [],
+    "status": "compared"
+   },
+   "factsDigest": "7c5b52d6f7b9e5832b8551f76b0c6be4589d0aa0e8e2cde299c74e4c7e81991c",
+   "factsVersion": 1,
+   "findings": [
+    {
+     "comparable": true,
+     "detail": "Image 1 has no description",
+     "id": "7797d10c0bdd5bc5bb4a9142059d372d",
+     "instanceKey": "docx:image:1",
+     "ledgerFindingId": null,
+     "location": {
+      "cell": null,
+      "element": "docx:image:1",
+      "kind": "object",
+      "label": "Image 1",
+      "objectId": "image:1",
+      "page": null,
+      "raw": "docx:image:1",
+      "sheet": null,
+      "slide": null
+     },
+     "recommendedAction": null,
+     "recommendedActionSource": null,
+     "ruleId": "DOCX-ALT-001",
+     "sc": "1.1.1",
+     "severity": "SERIOUS",
+     "state": "open",
+     "stateReason": "recorded by the current assessment and not resolved by any per-finding record"
+    },
+    {
+     "comparable": true,
+     "detail": "Paragraph styled as a heading is not a heading",
+     "id": "cf33822889806f75a1221992e8553991",
+     "instanceKey": "docx:paragraph:14",
+     "ledgerFindingId": null,
+     "location": {
+      "cell": null,
+      "element": "docx:paragraph:14",
+      "kind": "paragraph",
+      "label": "Paragraph 15",
+      "objectId": "paragraph:14",
+      "page": null,
+      "raw": "docx:paragraph:14",
+      "sheet": null,
+      "slide": null
+     },
+     "recommendedAction": null,
+     "recommendedActionSource": null,
+     "ruleId": "DOCX-HEAD-002",
+     "sc": "1.3.1",
+     "severity": "MODERATE",
+     "state": "open",
+     "stateReason": "recorded by the current assessment and not resolved by any per-finding record"
+    }
+   ],
+   "generatedAt": "2026-09-18T07:32:10.713476+00:00",
+   "identity": {
+    "correctedSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "currentArtifact": {
+     "kind": "corrected",
+     "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "file": "Policies/2026/Überblick – Richtlinie.docx",
+    "platformVersion": "2026.9.17.9",
+    "remediatedAt": "2026-09-18T07:32:10.650758+00:00",
+    "rubricHash": "h1",
+    "scanId": "s-packets",
+    "scanScope": null,
+    "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+    "sourceChecksum": "md5-uber-1",
+    "sourceChecksumKind": "other",
+    "sourceSha256": null,
+    "targetLevel": "AA",
+    "targetLevelSource": "workspace_config"
+   },
+   "kind": "file",
+   "limits": {
+    "findingsLimit": null,
+    "noteMaxChars": 500,
+    "savedChangesLimit": null,
+    "valueClippedIsUnrecoverable": true,
+    "valueMaxChars": 2000
+   },
+   "previous": {
+    "comparableFindings": 1,
+    "file": "Policies/2026/Überblick – Richtlinie.docx",
+    "findings": [
+     {
+      "comparable": true,
+      "detail": "Image 1 has no description",
+      "id": "7797d10c0bdd5bc5bb4a9142059d372d",
+      "location": {
+       "cell": null,
+       "element": "docx:image:1",
+       "kind": "object",
+       "label": "Image 1",
+       "objectId": "image:1",
+       "page": null,
+       "raw": "docx:image:1",
+       "sheet": null,
+       "slide": null
+      },
+      "ruleId": "DOCX-ALT-001",
+      "sc": "1.1.1"
+     }
+    ],
+    "generatedAt": "2026-08-01T05:05:00+00:00",
+    "matchedBy": "source_path",
+    "sameDocument": true,
+    "scanId": "s-packets-prev",
+    "scanScope": null,
+    "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+    "score": 72,
+    "sha256": null,
+    "sourceChecksum": "md5-uber-1",
+    "sourceChecksumKind": "other"
+   },
+   "previousReason": "an earlier assessment of the same document under the same rubric and scope",
+   "priorDecisions": null,
+   "priorDecisionsBounds": null,
+   "priorDecisionsReason": "Decisions recorded against earlier scans of this document are not shown: ACP cannot yet list them by document. They are not carried forward to this scan's changes, and their absence here is not evidence that there were none.",
+   "reviews": {},
+   "sameScanHistory": {
+    "baseline": null,
+    "introduced": [],
+    "notComparable": null,
+    "notComparableByCriterion": [],
+    "persisting": [],
+    "reason": "ACP cannot yet read an assessment that a re-assessment replaced inside this scan, so changes within one scan are not compared; this is not evidence that the document was assessed only once",
+    "reasonCode": "reader_unavailable",
+    "renamed": null,
+    "reopened": null,
+    "reopenedReason": null,
+    "resolved": [],
+    "snapshot": null,
+    "status": "not_available"
+   },
+   "savedChanges": [
+    {
+     "after": "Organisation chart: three directors report to the board.",
+     "artifactSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "before": "",
+     "changeDigest": "cd276758ddbf0fa8232d8a500e7097cf1b24f6b909ad540579ab6f8a5dd0b48e",
+     "findingIds": null,
+     "id": "Policies/2026/Überblick – Richtlinie.docx::1.1.1::0",
+     "location": null,
+     "locationSource": null,
+     "locator": null,
+     "note": "vision",
+     "ruleId": "1.1.1",
+     "sc": "1.1.1",
+     "seq": 0,
+     "source": "remediation_diff",
+     "valueClipped": false,
+     "verification": "verified",
+     "verificationDetail": "A re-check of the saved copy confirmed this change cleared the finding it was made for."
+    }
+   ],
+   "savedChangesComplete": true,
+   "savedChangesLimit": null,
+   "savedChangesTotal": 1,
+   "savedChangesUnverifiedSource": "ok"
+  },
+  "Reports/Q1 summary.pdf": {
+   "accounting": {
+    "accountingReason": "no saved change touches any criterion with a finding, so every recorded finding is still open",
+    "findingsOpen": 2,
+    "findingsResolvedVerified": null,
+    "findingsTotal": 2,
+    "humanReviews": {
+     "accepted": 0,
+     "correctionRequested": 0,
+     "pending": 0,
+     "rejected": 0,
+     "stale": 0,
+     "unable": 0
+    },
+    "resolutionLedger": "none",
+    "savedChangesUnverified": 0,
+    "savedChangesVerified": 0
+   },
+   "approvals": {
+    "approvedAwaitingWrite": 0,
+    "note": "Approved in the review queue against a source version or proposed value that has since changed, so it needs a reviewer to approve it again against the current version. This report records that state; it does not re-queue or change the approval.",
+    "pending": 0,
+    "recheckRequired": [],
+    "source": "ok"
+   },
+   "assessment": {
+    "artifactAssessed": "unknown",
+    "assessedAt": "2026-09-01T05:05:00+00:00",
+    "assessedAtSource": "scan",
+    "engine": ".net/office",
+    "findingsComplete": true,
+    "findingsTotal": 2,
+    "rawStatus": "uncertain",
+    "score": 55,
+    "state": "assessed",
+    "stateReason": "the document was assessed and every in-scope rule was evaluated"
+   },
+   "comparison": {
+    "baseline": {
+     "file": "Reports/Q1 summary.pdf",
+     "generatedAt": "2026-08-01T05:05:00+00:00",
+     "runStatus": "done",
+     "scanId": "s-packets-prev",
+     "status": "uncertain"
+    },
+    "introduced": [],
+    "notComparable": {
+     "current": 2,
+     "previous": 1
+    },
+    "notComparableByCriterion": [
+     {
+      "current": 1,
+      "previous": 1,
+      "ruleId": "PDF-CONTRAST-001",
+      "sc": "1.4.3"
+     },
+     {
+      "current": 1,
+      "previous": 0,
+      "ruleId": "PDF-LANG-001",
+      "sc": "3.1.1"
+     }
+    ],
+    "persisting": [],
+    "reason": "matched finding by finding against the assessment of 2026-08-01T05:05:00+00:00 of the same document (same source and path), under the same rubric and scope",
+    "reasonCode": "compared",
+    "renamed": false,
+    "reopened": null,
+    "reopenedReason": "the earlier assessment has no per-finding resolution ledger, so whether a finding reported again had been fixed in between is not recorded",
+    "resolved": [],
+    "status": "compared"
+   },
+   "factsDigest": "455b04606e69e9edfc1e850df175487b3a6d93842bac43a833cd9a68d1b496e7",
+   "factsVersion": 1,
+   "findings": [
+    {
+     "comparable": false,
+     "detail": "Grey text on white is 2.9:1",
+     "id": "c22ec64999888954a066a7744036cf89",
+     "instanceKey": "aggregate-instance:s-packets:000000000001",
+     "ledgerFindingId": null,
+     "location": {
+      "cell": null,
+      "element": null,
+      "kind": "page",
+      "label": "Page 3",
+      "objectId": null,
+      "page": 3,
+      "raw": null,
+      "sheet": null,
+      "slide": null
+     },
+     "recommendedAction": null,
+     "recommendedActionSource": null,
+     "ruleId": "PDF-CONTRAST-001",
+     "sc": "1.4.3",
+     "severity": "SERIOUS",
+     "state": "open",
+     "stateReason": "recorded by the current assessment and not resolved by any per-finding record"
+    },
+    {
+     "comparable": false,
+     "detail": "Document language is not set",
+     "id": "0b30677108ba590622178311aa1d136c",
+     "instanceKey": "aggregate-instance:s-packets:000000000001",
+     "ledgerFindingId": null,
+     "location": null,
+     "recommendedAction": null,
+     "recommendedActionSource": null,
+     "ruleId": "PDF-LANG-001",
+     "sc": "3.1.1",
+     "severity": "SERIOUS",
+     "state": "open",
+     "stateReason": "recorded by the current assessment and not resolved by any per-finding record"
+    }
+   ],
+   "generatedAt": "2026-09-18T07:32:10.721050+00:00",
+   "identity": {
+    "correctedSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "currentArtifact": {
+     "kind": "corrected",
+     "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "file": "Reports/Q1 summary.pdf",
+    "platformVersion": "2026.9.17.9",
+    "remediatedAt": "2026-09-18T07:32:10.653504+00:00",
+    "rubricHash": "h1",
+    "scanId": "s-packets",
+    "scanScope": null,
+    "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+    "sourceChecksum": "sha256:abababababababababababababababababababababababababababababababab",
+    "sourceChecksumKind": "sha256",
+    "sourceSha256": "abababababababababababababababababababababababababababababababab",
+    "targetLevel": "AA",
+    "targetLevelSource": "workspace_config"
+   },
+   "kind": "file",
+   "limits": {
+    "findingsLimit": null,
+    "noteMaxChars": 500,
+    "savedChangesLimit": null,
+    "valueClippedIsUnrecoverable": true,
+    "valueMaxChars": 2000
+   },
+   "previous": {
+    "comparableFindings": 0,
+    "file": "Reports/Q1 summary.pdf",
+    "findings": [
+     {
+      "comparable": false,
+      "detail": "Grey text on white is 2.9:1",
+      "id": "9e03474c89fe47169ae3b7cdd433e29d",
+      "location": {
+       "cell": null,
+       "element": null,
+       "kind": "page",
+       "label": "Page 3",
+       "objectId": null,
+       "page": 3,
+       "raw": null,
+       "sheet": null,
+       "slide": null
+      },
+      "ruleId": "PDF-CONTRAST-001",
+      "sc": "1.4.3"
+     }
+    ],
+    "generatedAt": "2026-08-01T05:05:00+00:00",
+    "matchedBy": "source_path",
+    "sameDocument": true,
+    "scanId": "s-packets-prev",
+    "scanScope": null,
+    "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+    "score": 55,
+    "sha256": "abababababababababababababababababababababababababababababababab",
+    "sourceChecksum": "sha256:abababababababababababababababababababababababababababababababab",
+    "sourceChecksumKind": "sha256"
+   },
+   "previousReason": "an earlier assessment of the same document under the same rubric and scope",
+   "priorDecisions": null,
+   "priorDecisionsBounds": null,
+   "priorDecisionsReason": "Decisions recorded against earlier scans of this document are not shown: ACP cannot yet list them by document. They are not carried forward to this scan's changes, and their absence here is not evidence that there were none.",
+   "reviews": {},
+   "sameScanHistory": {
+    "baseline": null,
+    "introduced": [],
+    "notComparable": null,
+    "notComparableByCriterion": [],
+    "persisting": [],
+    "reason": "ACP cannot yet read an assessment that a re-assessment replaced inside this scan, so changes within one scan are not compared; this is not evidence that the document was assessed only once",
+    "reasonCode": "reader_unavailable",
+    "renamed": null,
+    "reopened": null,
+    "reopenedReason": null,
+    "resolved": [],
+    "snapshot": null,
+    "status": "not_available"
+   },
+   "savedChanges": [],
+   "savedChangesComplete": true,
+   "savedChangesLimit": null,
+   "savedChangesTotal": 0,
+   "savedChangesUnverifiedSource": "ok"
+  },
+  "broken.docx": {
+   "accounting": {
+    "accountingReason": "the analyser did not produce a result for this document — the number of open findings is not known",
+    "findingsOpen": null,
+    "findingsResolvedVerified": null,
+    "findingsTotal": 0,
+    "humanReviews": {
+     "accepted": 0,
+     "correctionRequested": 0,
+     "pending": 0,
+     "rejected": 0,
+     "stale": 0,
+     "unable": 0
+    },
+    "resolutionLedger": "none",
+    "savedChangesUnverified": 0,
+    "savedChangesVerified": 0
+   },
+   "approvals": {
+    "approvedAwaitingWrite": 0,
+    "note": "Approved in the review queue against a source version or proposed value that has since changed, so it needs a reviewer to approve it again against the current version. This report records that state; it does not re-queue or change the approval.",
+    "pending": 0,
+    "recheckRequired": [],
+    "source": "ok"
+   },
+   "assessment": {
+    "artifactAssessed": "source",
+    "assessedAt": "2026-09-01T05:05:00+00:00",
+    "assessedAtSource": "scan",
+    "engine": ".net/office",
+    "findingsComplete": true,
+    "findingsTotal": 0,
+    "rawStatus": "error",
+    "score": null,
+    "state": "error",
+    "stateReason": "the analyser did not produce a result for this document"
+   },
+   "comparison": {
+    "baseline": {
+     "file": "broken.docx",
+     "generatedAt": "2026-08-01T05:05:00+00:00",
+     "runStatus": "done",
+     "scanId": "s-packets-prev",
+     "status": "error"
+    },
+    "introduced": [],
+    "notComparable": null,
+    "notComparableByCriterion": [],
+    "persisting": [],
+    "reason": "the most recent earlier assessment of this document did not produce a result (recorded status: error), so it is not a baseline — its empty finding list would make every current finding look new",
+    "reasonCode": "baseline_error",
+    "renamed": null,
+    "reopened": null,
+    "reopenedReason": null,
+    "resolved": [],
+    "status": "baseline_unusable"
+   },
+   "factsDigest": "9406db458c9c78b94775cbc8e5e0f409c797fac88a96910f160f6ab01c12e6ad",
+   "factsVersion": 1,
+   "findings": [],
+   "generatedAt": "2026-09-18T07:32:10.726446+00:00",
+   "identity": {
+    "correctedSha256": null,
+    "currentArtifact": {
+     "kind": "unknown",
+     "sha256": null
+    },
+    "file": "broken.docx",
+    "platformVersion": "2026.9.17.9",
+    "remediatedAt": null,
+    "rubricHash": "h1",
+    "scanId": "s-packets",
+    "scanScope": null,
+    "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+    "sourceChecksum": null,
+    "sourceChecksumKind": null,
+    "sourceSha256": null,
+    "targetLevel": "AA",
+    "targetLevelSource": "workspace_config"
+   },
+   "kind": "file",
+   "limits": {
+    "findingsLimit": null,
+    "noteMaxChars": 500,
+    "savedChangesLimit": null,
+    "valueClippedIsUnrecoverable": true,
+    "valueMaxChars": 2000
+   },
+   "previous": null,
+   "previousReason": "the most recent earlier assessment of this document did not produce a result (recorded status: error), so it is not a baseline — its empty finding list would make every current finding look new",
+   "priorDecisions": null,
+   "priorDecisionsBounds": null,
+   "priorDecisionsReason": "Decisions recorded against earlier scans of this document are not shown: ACP cannot yet list them by document. They are not carried forward to this scan's changes, and their absence here is not evidence that there were none.",
+   "reviews": {},
+   "sameScanHistory": {
+    "baseline": null,
+    "introduced": [],
+    "notComparable": null,
+    "notComparableByCriterion": [],
+    "persisting": [],
+    "reason": "ACP cannot yet read an assessment that a re-assessment replaced inside this scan, so changes within one scan are not compared; this is not evidence that the document was assessed only once",
+    "reasonCode": "reader_unavailable",
+    "renamed": null,
+    "reopened": null,
+    "reopenedReason": null,
+    "resolved": [],
+    "snapshot": null,
+    "status": "not_available"
+   },
+   "savedChanges": [],
+   "savedChangesComplete": true,
+   "savedChangesLimit": null,
+   "savedChangesTotal": 0,
+   "savedChangesUnverifiedSource": "ok"
+  },
+  "not-yet.pdf": {
+   "accounting": {
+    "accountingReason": "this document was never assessed in this scan (recorded status: discovered) — the number of open findings is not known",
+    "findingsOpen": null,
+    "findingsResolvedVerified": null,
+    "findingsTotal": 0,
+    "humanReviews": {
+     "accepted": 0,
+     "correctionRequested": 0,
+     "pending": 0,
+     "rejected": 0,
+     "stale": 0,
+     "unable": 0
+    },
+    "resolutionLedger": "none",
+    "savedChangesUnverified": 0,
+    "savedChangesVerified": 0
+   },
+   "approvals": {
+    "approvedAwaitingWrite": 0,
+    "note": "Approved in the review queue against a source version or proposed value that has since changed, so it needs a reviewer to approve it again against the current version. This report records that state; it does not re-queue or change the approval.",
+    "pending": 0,
+    "recheckRequired": [],
+    "source": "ok"
+   },
+   "assessment": {
+    "artifactAssessed": "source",
+    "assessedAt": "2026-09-01T05:05:00+00:00",
+    "assessedAtSource": "scan",
+    "engine": ".net/office",
+    "findingsComplete": true,
+    "findingsTotal": 0,
+    "rawStatus": "discovered",
+    "score": null,
+    "state": "not_assessed",
+    "stateReason": "this document was never assessed in this scan (recorded status: discovered)"
+   },
+   "comparison": {
+    "baseline": null,
+    "introduced": [],
+    "notComparable": null,
+    "notComparableByCriterion": [],
+    "persisting": [],
+    "reason": "no earlier assessment of this same document under the same rubric and scope is recorded",
+    "reasonCode": "no_earlier_assessment",
+    "renamed": null,
+    "reopened": null,
+    "reopenedReason": null,
+    "resolved": [],
+    "status": "no_baseline"
+   },
+   "factsDigest": "aa725c90ae3bcfeaafa520ca747e91b65cc391238092a1f5957e626b2aa8184a",
+   "factsVersion": 1,
+   "findings": [],
+   "generatedAt": "2026-09-18T07:32:10.731784+00:00",
+   "identity": {
+    "correctedSha256": null,
+    "currentArtifact": {
+     "kind": "unknown",
+     "sha256": null
+    },
+    "file": "not-yet.pdf",
+    "platformVersion": "2026.9.17.9",
+    "remediatedAt": null,
+    "rubricHash": "h1",
+    "scanId": "s-packets",
+    "scanScope": null,
+    "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+    "sourceChecksum": null,
+    "sourceChecksumKind": null,
+    "sourceSha256": null,
+    "targetLevel": "AA",
+    "targetLevelSource": "workspace_config"
+   },
+   "kind": "file",
+   "limits": {
+    "findingsLimit": null,
+    "noteMaxChars": 500,
+    "savedChangesLimit": null,
+    "valueClippedIsUnrecoverable": true,
+    "valueMaxChars": 2000
+   },
+   "previous": null,
+   "previousReason": "no earlier assessment of this same document under the same rubric and scope is recorded",
+   "priorDecisions": null,
+   "priorDecisionsBounds": null,
+   "priorDecisionsReason": "Decisions recorded against earlier scans of this document are not shown: ACP cannot yet list them by document. They are not carried forward to this scan's changes, and their absence here is not evidence that there were none.",
+   "reviews": {},
+   "sameScanHistory": {
+    "baseline": null,
+    "introduced": [],
+    "notComparable": null,
+    "notComparableByCriterion": [],
+    "persisting": [],
+    "reason": "ACP cannot yet read an assessment that a re-assessment replaced inside this scan, so changes within one scan are not compared; this is not evidence that the document was assessed only once",
+    "reasonCode": "reader_unavailable",
+    "renamed": null,
+    "reopened": null,
+    "reopenedReason": null,
+    "resolved": [],
+    "snapshot": null,
+    "status": "not_available"
+   },
+   "savedChanges": [],
+   "savedChangesComplete": true,
+   "savedChangesLimit": null,
+   "savedChangesTotal": 0,
+   "savedChangesUnverifiedSource": "ok"
+  },
+  "reports/q1 SUMMARY.pdf": {
+   "accounting": {
+    "accountingReason": "no saved change touches any criterion with a finding, so every recorded finding is still open",
+    "findingsOpen": 1,
+    "findingsResolvedVerified": null,
+    "findingsTotal": 1,
+    "humanReviews": {
+     "accepted": 0,
+     "correctionRequested": 0,
+     "pending": 0,
+     "rejected": 0,
+     "stale": 0,
+     "unable": 0
+    },
+    "resolutionLedger": "none",
+    "savedChangesUnverified": 0,
+    "savedChangesVerified": 0
+   },
+   "approvals": {
+    "approvedAwaitingWrite": 0,
+    "note": "Approved in the review queue against a source version or proposed value that has since changed, so it needs a reviewer to approve it again against the current version. This report records that state; it does not re-queue or change the approval.",
+    "pending": 0,
+    "recheckRequired": [],
+    "source": "ok"
+   },
+   "assessment": {
+    "artifactAssessed": "source",
+    "assessedAt": "2026-09-01T05:05:00+00:00",
+    "assessedAtSource": "scan",
+    "engine": ".net/office",
+    "findingsComplete": true,
+    "findingsTotal": 1,
+    "rawStatus": "uncertain",
+    "score": 90,
+    "state": "assessed",
+    "stateReason": "the document was assessed and every in-scope rule was evaluated"
+   },
+   "comparison": {
+    "baseline": {
+     "file": "reports/q1 SUMMARY.pdf",
+     "generatedAt": "2026-08-01T05:05:00+00:00",
+     "runStatus": "done",
+     "scanId": "s-packets-prev",
+     "status": "uncertain"
+    },
+    "introduced": [],
+    "notComparable": {
+     "current": 1,
+     "previous": 1
+    },
+    "notComparableByCriterion": [
+     {
+      "current": 1,
+      "previous": 1,
+      "ruleId": "PDF-TITLE-001",
+      "sc": "2.4.2"
+     }
+    ],
+    "persisting": [],
+    "reason": "matched finding by finding against the assessment of 2026-08-01T05:05:00+00:00 of the same document (same source and path), under the same rubric and scope",
+    "reasonCode": "compared",
+    "renamed": false,
+    "reopened": null,
+    "reopenedReason": "the earlier assessment has no per-finding resolution ledger, so whether a finding reported again had been fixed in between is not recorded",
+    "resolved": [],
+    "status": "compared"
+   },
+   "factsDigest": "e71b1285bcabc058a7f1fa029d797c5c0508fb87a53ead1cd9bdab486e329130",
+   "factsVersion": 1,
+   "findings": [
+    {
+     "comparable": false,
+     "detail": "Document title is not set",
+     "id": "cc9a17d7e721c4f558f8169b2c34bf1d",
+     "instanceKey": "aggregate-instance:s-packets:000000000001",
+     "ledgerFindingId": null,
+     "location": null,
+     "recommendedAction": null,
+     "recommendedActionSource": null,
+     "ruleId": "PDF-TITLE-001",
+     "sc": "2.4.2",
+     "severity": "MODERATE",
+     "state": "open",
+     "stateReason": "recorded by the current assessment and not resolved by any per-finding record"
+    }
+   ],
+   "generatedAt": "2026-09-18T07:32:10.737485+00:00",
+   "identity": {
+    "correctedSha256": null,
+    "currentArtifact": {
+     "kind": "source",
+     "sha256": "md5-q1-lower"
+    },
+    "file": "reports/q1 SUMMARY.pdf",
+    "platformVersion": "2026.9.17.9",
+    "remediatedAt": null,
+    "rubricHash": "h1",
+    "scanId": "s-packets",
+    "scanScope": null,
+    "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+    "sourceChecksum": "md5-q1-lower",
+    "sourceChecksumKind": "other",
+    "sourceSha256": null,
+    "targetLevel": "AA",
+    "targetLevelSource": "workspace_config"
+   },
+   "kind": "file",
+   "limits": {
+    "findingsLimit": null,
+    "noteMaxChars": 500,
+    "savedChangesLimit": null,
+    "valueClippedIsUnrecoverable": true,
+    "valueMaxChars": 2000
+   },
+   "previous": {
+    "comparableFindings": 0,
+    "file": "reports/q1 SUMMARY.pdf",
+    "findings": [
+     {
+      "comparable": false,
+      "detail": "Document title is not set",
+      "id": "eb08719fe1a563ab07fac2870720b2fc",
+      "location": null,
+      "ruleId": "PDF-TITLE-001",
+      "sc": "2.4.2"
+     }
+    ],
+    "generatedAt": "2026-08-01T05:05:00+00:00",
+    "matchedBy": "source_path",
+    "sameDocument": true,
+    "scanId": "s-packets-prev",
+    "scanScope": null,
+    "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+    "score": 90,
+    "sha256": null,
+    "sourceChecksum": "md5-q1-lower",
+    "sourceChecksumKind": "other"
+   },
+   "previousReason": "an earlier assessment of the same document under the same rubric and scope",
+   "priorDecisions": null,
+   "priorDecisionsBounds": null,
+   "priorDecisionsReason": "Decisions recorded against earlier scans of this document are not shown: ACP cannot yet list them by document. They are not carried forward to this scan's changes, and their absence here is not evidence that there were none.",
+   "reviews": {},
+   "sameScanHistory": {
+    "baseline": null,
+    "introduced": [],
+    "notComparable": null,
+    "notComparableByCriterion": [],
+    "persisting": [],
+    "reason": "ACP cannot yet read an assessment that a re-assessment replaced inside this scan, so changes within one scan are not compared; this is not evidence that the document was assessed only once",
+    "reasonCode": "reader_unavailable",
+    "renamed": null,
+    "reopened": null,
+    "reopenedReason": null,
+    "resolved": [],
+    "snapshot": null,
+    "status": "not_available"
+   },
+   "savedChanges": [],
+   "savedChangesComplete": true,
+   "savedChangesLimit": null,
+   "savedChangesTotal": 0,
+   "savedChangesUnverifiedSource": "ok"
+  }
+ },
+ "finalCheck": {
+  "mutated": {
+   "accounting": {
+    "accountingReason": "at least one document has no per-finding ledger, so the scan-level resolved count cannot be stated",
+    "findingsOpen": null,
+    "findingsResolvedVerified": null,
+    "findingsTotal": 7,
+    "humanReviews": {
+     "accepted": 1,
+     "correctionRequested": 0,
+     "pending": 0,
+     "rejected": 0,
+     "stale": 0,
+     "unable": 0
+    },
+    "resolutionLedger": "none",
+    "savedChangesUnverified": 0,
+    "savedChangesVerified": 1
+   },
+   "comparison": {
+    "complete": true,
+    "notes": [
+     "Re-assessing a document inside the same scan replaces its earlier finding list, so changes within one scan are not compared.",
+     "3 current finding(s) have no detector location, so they cannot be matched one by one and are neither new nor resolved."
+    ],
+    "reason": "6 of 8 document(s) were compared finding by finding with their own most recent earlier assessment; 1 has no earlier assessment at all; 1 has an earlier assessment that did not finish or used a different rubric or scope, so it is not a baseline.",
+    "sameScan": {
+     "filesBaselineUnusable": 0,
+     "filesCompared": 0,
+     "filesNotAvailable": 8,
+     "filesNotComparable": 0,
+     "filesNotRecorded": 0,
+     "introduced": 0,
+     "persisting": 0,
+     "resolved": 0
+    },
+    "status": "compared",
+    "totals": {
+     "filesBaselineUnusable": 1,
+     "filesCompared": 6,
+     "filesNew": 1,
+     "filesNoBaseline": 1,
+     "filesNotComparable": 0,
+     "filesRenamed": 0,
+     "filesReopenedUndetermined": 6,
+     "introduced": 1,
+     "notComparable": 3,
+     "persisting": 3,
+     "reopened": null,
+     "reopenedDetermined": 0,
+     "resolved": 0
+    }
+   },
+   "complete": false,
+   "factsDigest": "5c62ecc0dded71fe68f1c6f052241805f76832341df011412069c06bcf2d401b",
+   "factsVersion": 1,
+   "files": [
+    {
+     "approvalsRecheckRequired": 0,
+     "assessment": {
+      "state": "assessed",
+      "stateReason": "the document was assessed and every in-scope rule was evaluated"
+     },
+     "comparison": {
+      "baseline": {
+       "file": "../../outside/escape.xlsx",
+       "generatedAt": "2026-08-01T05:05:00+00:00",
+       "runStatus": "done",
+       "scanId": "s-packets-prev",
+       "status": "uncertain"
+      },
+      "introduced": 0,
+      "notComparable": {
+       "current": 0,
+       "previous": 0
+      },
+      "persisting": 1,
+      "reason": "matched finding by finding against the assessment of 2026-08-01T05:05:00+00:00 of the same document (same source and path), under the same rubric and scope",
+      "reasonCode": "compared",
+      "renamed": false,
+      "reopened": null,
+      "resolved": 0,
+      "status": "compared"
+     },
+     "currentArtifact": {
+      "kind": "source",
+      "sha256": "md5-escape"
+     },
+     "factsDigest": "c55cf2ddd5ddd07d61de9253af3427b9deb546adf652a72b0a7d9f1113ec98e8",
+     "file": "../../outside/escape.xlsx",
+     "findingsOpen": 1,
+     "findingsResolvedVerified": null,
+     "findingsTotal": 1,
+     "humanReviews": {
+      "accepted": 0,
+      "correctionRequested": 0,
+      "pending": 0,
+      "rejected": 0,
+      "stale": 0,
+      "unable": 0
+     },
+     "resolutionLedger": "none",
+     "savedChangesComplete": true,
+     "savedChangesUnverified": 0,
+     "savedChangesVerified": 0,
+     "score": 80
+    }
+   ],
+   "filesTotal": 8,
+   "generatedAt": "2026-09-18T07:32:10.889887+00:00",
+   "identity": {
+    "file": null,
+    "platformVersion": "2026.9.17.9",
+    "rubricHash": "h1",
+    "scanId": "s-packets",
+    "scanScope": null,
+    "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+    "source": "local",
+    "targetLevel": "AA",
+    "targetLevelSource": "workspace_config"
+   },
+   "kind": "scan",
+   "limit": 1,
+   "limits": {
+    "filePageMax": 1000,
+    "savedChangesLimit": null,
+    "valueMaxChars": 2000
+   },
+   "offset": 0,
+   "previous": null,
+   "previousReason": "the estate comparison is aggregated from each document's own comparison with its most recent earlier assessment",
+   "scan": {
+    "assessedAt": "2026-09-01T05:05:00+00:00",
+    "startedAt": "2026-09-01T05:00:00+00:00",
+    "status": "done"
+   },
+   "snapshot": {
+    "builtAt": "2026-09-18T07:32:10.889887+00:00",
+    "factsDigest": "5c62ecc0dded71fe68f1c6f052241805f76832341df011412069c06bcf2d401b",
+    "filesTotal": 8,
+    "servedFrom": "fresh",
+    "ttlSeconds": 60
+   },
+   "totals": {
+    "approvalsRecheckRequired": 0,
+    "assessed": 6,
+    "documents": 8,
+    "error": 1,
+    "findingsTotal": 7,
+    "notAssessed": 1,
+    "partial": 0,
+    "savedChangesUnverified": 0,
+    "savedChangesVerified": 1
+   }
+  },
+  "unchanged": {
+   "accounting": {
+    "accountingReason": "at least one document has no per-finding ledger, so the scan-level resolved count cannot be stated",
+    "findingsOpen": null,
+    "findingsResolvedVerified": null,
+    "findingsTotal": 7,
+    "humanReviews": {
+     "accepted": 0,
+     "correctionRequested": 0,
+     "pending": 1,
+     "rejected": 0,
+     "stale": 0,
+     "unable": 0
+    },
+    "resolutionLedger": "none",
+    "savedChangesUnverified": 0,
+    "savedChangesVerified": 1
+   },
+   "comparison": {
+    "complete": true,
+    "notes": [
+     "Re-assessing a document inside the same scan replaces its earlier finding list, so changes within one scan are not compared.",
+     "3 current finding(s) have no detector location, so they cannot be matched one by one and are neither new nor resolved."
+    ],
+    "reason": "6 of 8 document(s) were compared finding by finding with their own most recent earlier assessment; 1 has no earlier assessment at all; 1 has an earlier assessment that did not finish or used a different rubric or scope, so it is not a baseline.",
+    "sameScan": {
+     "filesBaselineUnusable": 0,
+     "filesCompared": 0,
+     "filesNotAvailable": 8,
+     "filesNotComparable": 0,
+     "filesNotRecorded": 0,
+     "introduced": 0,
+     "persisting": 0,
+     "resolved": 0
+    },
+    "status": "compared",
+    "totals": {
+     "filesBaselineUnusable": 1,
+     "filesCompared": 6,
+     "filesNew": 1,
+     "filesNoBaseline": 1,
+     "filesNotComparable": 0,
+     "filesRenamed": 0,
+     "filesReopenedUndetermined": 6,
+     "introduced": 1,
+     "notComparable": 3,
+     "persisting": 3,
+     "reopened": null,
+     "reopenedDetermined": 0,
+     "resolved": 0
+    }
+   },
+   "complete": false,
+   "factsDigest": "1262feb203727ddd18a5a95db2a812cb0082e8964194057d10c39e4733faa5c1",
+   "factsVersion": 1,
+   "files": [
+    {
+     "approvalsRecheckRequired": 0,
+     "assessment": {
+      "state": "assessed",
+      "stateReason": "the document was assessed and every in-scope rule was evaluated"
+     },
+     "comparison": {
+      "baseline": {
+       "file": "../../outside/escape.xlsx",
+       "generatedAt": "2026-08-01T05:05:00+00:00",
+       "runStatus": "done",
+       "scanId": "s-packets-prev",
+       "status": "uncertain"
+      },
+      "introduced": 0,
+      "notComparable": {
+       "current": 0,
+       "previous": 0
+      },
+      "persisting": 1,
+      "reason": "matched finding by finding against the assessment of 2026-08-01T05:05:00+00:00 of the same document (same source and path), under the same rubric and scope",
+      "reasonCode": "compared",
+      "renamed": false,
+      "reopened": null,
+      "resolved": 0,
+      "status": "compared"
+     },
+     "currentArtifact": {
+      "kind": "source",
+      "sha256": "md5-escape"
+     },
+     "factsDigest": "c55cf2ddd5ddd07d61de9253af3427b9deb546adf652a72b0a7d9f1113ec98e8",
+     "file": "../../outside/escape.xlsx",
+     "findingsOpen": 1,
+     "findingsResolvedVerified": null,
+     "findingsTotal": 1,
+     "humanReviews": {
+      "accepted": 0,
+      "correctionRequested": 0,
+      "pending": 0,
+      "rejected": 0,
+      "stale": 0,
+      "unable": 0
+     },
+     "resolutionLedger": "none",
+     "savedChangesComplete": true,
+     "savedChangesUnverified": 0,
+     "savedChangesVerified": 0,
+     "score": 80
+    }
+   ],
+   "filesTotal": 8,
+   "generatedAt": "2026-09-18T07:32:10.805159+00:00",
+   "identity": {
+    "file": null,
+    "platformVersion": "2026.9.17.9",
+    "rubricHash": "h1",
+    "scanId": "s-packets",
+    "scanScope": null,
+    "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+    "source": "local",
+    "targetLevel": "AA",
+    "targetLevelSource": "workspace_config"
+   },
+   "kind": "scan",
+   "limit": 1,
+   "limits": {
+    "filePageMax": 1000,
+    "savedChangesLimit": null,
+    "valueMaxChars": 2000
+   },
+   "offset": 0,
+   "previous": null,
+   "previousReason": "the estate comparison is aggregated from each document's own comparison with its most recent earlier assessment",
+   "scan": {
+    "assessedAt": "2026-09-01T05:05:00+00:00",
+    "startedAt": "2026-09-01T05:00:00+00:00",
+    "status": "done"
+   },
+   "snapshot": {
+    "builtAt": "2026-09-18T07:32:10.805159+00:00",
+    "factsDigest": "1262feb203727ddd18a5a95db2a812cb0082e8964194057d10c39e4733faa5c1",
+    "filesTotal": 8,
+    "servedFrom": "fresh",
+    "ttlSeconds": 60
+   },
+   "totals": {
+    "approvalsRecheckRequired": 0,
+    "assessed": 6,
+    "documents": 8,
+    "error": 1,
+    "findingsTotal": 7,
+    "notAssessed": 1,
+    "partial": 0,
+    "savedChangesUnverified": 0,
+    "savedChangesVerified": 1
+   }
+  }
+ },
+ "pageLimit": 3,
+ "remediationState": {
+  "../../outside/escape.xlsx": [],
+  "Budget & notes (draft).xlsx": [],
+  "CON.pptx": [],
+  "Policies/2026/Überblick – Richtlinie.docx": [],
+  "Reports/Q1 summary.pdf": [],
+  "broken.docx": [],
+  "not-yet.pdf": [],
+  "reports/q1 SUMMARY.pdf": []
+ },
+ "rubric": {
+  "criteria": {
+   "SC_1_1_1": {
+    "level": "A",
+    "name": "Non-text Content"
+   },
+   "SC_1_3_1": {
+    "level": "A",
+    "name": "Info and Relationships"
+   },
+   "SC_1_3_2": {
+    "level": "A",
+    "name": "Meaningful Sequence"
+   },
+   "SC_1_4_3": {
+    "level": "AA",
+    "name": "Contrast (Minimum)"
+   },
+   "SC_2_4_2": {
+    "level": "A",
+    "name": "Page Titled"
+   },
+   "SC_2_4_4": {
+    "level": "A",
+    "name": "Link Purpose (In Context)"
+   },
+   "SC_3_1_1": {
+    "level": "A",
+    "name": "Language of Page"
+   },
+   "SC_3_1_2": {
+    "level": "AA",
+    "name": "Language of Parts"
+   },
+   "SC_4_1_2": {
+    "level": "A",
+    "name": "Name, Role, Value"
+   }
+  },
+  "hash": "7b203f6db1997327",
+  "name": "WCAG 2.1 AA — default",
+  "target": "WCAG 2.1 AA",
+  "threshold": 90,
+  "version": "2026.06.1"
+ },
+ "rules": {
+  "docx": [
+   {
+    "description": "Every non-decorative image must carry a description in its <wp:docPr descr> attribute. Screen readers announce this text in place of the image.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "DOCX-ALT-001",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "api/formats/docx/detectors/non_text_content.py",
+    "title": "Image missing alt text",
+    "wcag": "SC_1_1_1",
+    "wcag_display": "Non-text Content",
+    "wcag_level": "A",
+    "wcag_sc": "1.1.1"
+   },
+   {
+    "description": "The core properties <dc:title> element must be non-empty. Assistive technology announces the title when the document is opened.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "DOCX-TITLE-001",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Docx/Rules/DocumentTitleRule.cs",
+    "title": "Document title not set",
+    "wcag": "SC_2_4_2",
+    "wcag_display": "Page Titled",
+    "wcag_level": "A",
+    "wcag_sc": "2.4.2"
+   },
+   {
+    "description": "The <w:lang> element in settings.xml must declare a BCP 47 language code (e.g. 'en-US'). Screen readers use this to select the correct pronunciation engine.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "DOCX-LANG-001",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Docx/Rules/DocumentLanguageRule.cs",
+    "title": "Document language not declared",
+    "wcag": "SC_3_1_1",
+    "wcag_display": "Language of Page",
+    "wcag_level": "A",
+    "wcag_sc": "3.1.1"
+   },
+   {
+    "description": "Every data table must mark its first row as a header row (<w:tblHeader>) so assistive technology can announce column labels when navigating cells.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "DOCX-TABLE-001",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Docx/Rules/TableHeaderRule.cs",
+    "title": "Table has no header row",
+    "wcag": "SC_1_3_1",
+    "wcag_display": "Info and Relationships",
+    "wcag_level": "A",
+    "wcag_sc": "1.3.1"
+   },
+   {
+    "description": "Text colour against its background must meet the 4.5:1 minimum contrast ratio for normal-sized text (3:1 for large text ≥18pt or 14pt bold).",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "DOCX-CONTRAST-001",
+    "level": "AA",
+    "severity": "SERIOUS",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Docx/Rules/ColourContrastRule.cs",
+    "title": "Insufficient colour contrast",
+    "wcag": "SC_1_4_3",
+    "wcag_display": "Contrast (Minimum)",
+    "wcag_level": "AA",
+    "wcag_sc": "1.4.3"
+   },
+   {
+    "description": "Heading styles must not skip levels (e.g. Heading 1 → Heading 3 with no Heading 2). Skipped levels break navigation for screen reader users who jump by heading.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "DOCX-HEAD-001",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Docx/Rules/HeadingStructureRule.cs",
+    "title": "Heading structure incorrect",
+    "wcag": "SC_1_3_1",
+    "wcag_display": "Info and Relationships",
+    "wcag_level": "A",
+    "wcag_sc": "1.3.1"
+   },
+   {
+    "description": "Hyperlink display text must describe the destination. Generic phrases such as 'click here', 'read more', or bare URLs are not descriptive out of context.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "DOCX-LINK-001",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Docx/Rules/LinkPurposeRule.cs",
+    "title": "Link text not descriptive",
+    "wcag": "SC_2_4_4",
+    "wcag_display": "Link Purpose (In Context)",
+    "wcag_level": "A",
+    "wcag_sc": "2.4.4"
+   },
+   {
+    "description": "Runs of text in a different language from the document default must declare their language via <w:lang>. Without this, screen readers mispronounce foreign words.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "DOCX-LANGPART-001",
+    "level": "AA",
+    "severity": "MODERATE",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Docx/Rules/LanguageOfPartsRule.cs",
+    "title": "Language of parts not set",
+    "wcag": "SC_3_1_2",
+    "wcag_display": "Language of Parts",
+    "wcag_level": "AA",
+    "wcag_sc": "3.1.2"
+   },
+   {
+    "description": "Documents longer than 10 pages should contain named bookmarks so users can jump to key sections without reading linearly.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "DOCX-BOOKMARK-001",
+    "level": "A",
+    "severity": "MINOR",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Docx/Rules/BookmarksRule.cs",
+    "title": "Long document has no bookmarks",
+    "wcag": "SC_2_4_2",
+    "wcag_display": "Page Titled",
+    "wcag_level": "A",
+    "wcag_sc": "2.4.2"
+   },
+   {
+    "description": "Text boxes and other floating shapes have an undefined position in the document's reading order. Screen readers may announce them out of sequence relative to surrounding paragraph text.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "DOCX-ORDER-001",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "api/office_structure.py",
+    "title": "Floating text may disrupt reading order",
+    "wcag": "SC_1_3_2",
+    "wcag_display": "Meaningful Sequence",
+    "wcag_level": "A",
+    "wcag_sc": "1.3.2"
+   },
+   {
+    "description": "Instructions that identify content solely by shape, visual position, size, or sound cannot be understood by users who are blind or deaf. Re-word to include a non-sensory alternative.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "DOCX-SENSORY-001",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "api/textchecks.py",
+    "title": "Instructions rely on sensory characteristics",
+    "wcag": "SC_1_3_3",
+    "wcag_display": "Sensory Characteristics",
+    "wcag_level": "A",
+    "wcag_sc": "1.3.3"
+   },
+   {
+    "description": "Hyperlinks with underlines removed rely on colour as the sole visual cue. Users who cannot distinguish colours will miss the link indicator. Restore the underline or add another non-colour cue.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "DOCX-COLOR-001",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "api/office_structure.py",
+    "title": "Information conveyed by colour alone",
+    "wcag": "SC_1_4_1",
+    "wcag_display": "Use of Color",
+    "wcag_level": "A",
+    "wcag_sc": "1.4.1"
+   },
+   {
+    "description": "An image appears to contain readable text. Text rendered into images cannot be resized, translated, or read by assistive technology. Replace with real document text.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "DOCX-IMGTEXT-001",
+    "level": "AA",
+    "severity": "MODERATE",
+    "source": "api/textchecks.py",
+    "title": "Text baked into an image",
+    "wcag": "SC_1_4_5",
+    "wcag_display": "Images of Text",
+    "wcag_level": "AA",
+    "wcag_sc": "1.4.5"
+   },
+   {
+    "description": "A shape border or drawing element has a contrast ratio below 3:1 against its adjacent background. Informational graphics and UI components must meet this threshold so they remain visible to low-vision users.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "DOCX-NTCONTRAST-001",
+    "level": "AA",
+    "severity": "MODERATE",
+    "source": "api/office_structure.py",
+    "title": "Non-text element has insufficient contrast",
+    "wcag": "SC_1_4_11",
+    "wcag_display": "Non-text Contrast",
+    "wcag_level": "AA",
+    "wcag_sc": "1.4.11"
+   },
+   {
+    "description": "The document contains an interactive control (form field, ActiveX object, or embedded object) that may not allow keyboard focus to leave. Verify the user can move away using Tab or Escape.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "human-only",
+    "id": "DOCX-KBTRAP-001",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "api/office_structure.py",
+    "title": "Embedded control may trap keyboard focus",
+    "wcag": "SC_2_1_2",
+    "wcag_display": "No Keyboard Trap",
+    "wcag_level": "A",
+    "wcag_sc": "2.1.2"
+   },
+   {
+    "description": "Every heading must clearly describe the topic of its section. Vague or empty headings (e.g. 'Section 1', 'Untitled') prevent screen reader users from understanding the document's structure at a glance.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "DOCX-HEADLABEL-001",
+    "level": "AA",
+    "severity": "MODERATE",
+    "source": "api/office_structure.py",
+    "title": "Heading or label is not descriptive",
+    "wcag": "SC_2_4_6",
+    "wcag_display": "Headings and Labels",
+    "wcag_level": "AA",
+    "wcag_sc": "2.4.6"
+   },
+   {
+    "description": "A structured document tag (content control) does not carry an accessible name in its w:alias or w:tag attribute. Assistive technology announces this name when focus reaches the control.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "DOCX-NRV-001",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "api/formats/docx/detectors/name_role_value.py",
+    "title": "Content control has no accessible name",
+    "wcag": "SC_4_1_2",
+    "wcag_display": "Name, Role, Value",
+    "wcag_level": "A",
+    "wcag_sc": "4.1.2"
+   }
+  ],
+  "pdf": [
+   {
+    "description": "Every non-decorative Figure tag in the tag tree must have an /Alt entry. Screen readers read this entry when they encounter the figure.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "pdf.missing-alt-text",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "api/formats/pdf/detectors/non_text_content.py",
+    "title": "Image missing alt text",
+    "wcag": "SC_1_1_1",
+    "wcag_display": "Non-text Content",
+    "wcag_level": "A",
+    "wcag_sc": "1.1.1"
+   },
+   {
+    "description": "The document catalog must have MarkInfo.Marked=true and a complete structure (tag) tree. Without tags, screen readers have no semantic structure to navigate.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "pdf.tagged",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "engine/pdf-analyser/analysers/rules/pdf/tagged_pdf.py",
+    "title": "PDF is not tagged",
+    "wcag": "SC_1_3_1",
+    "wcag_display": "Info and Relationships",
+    "wcag_level": "A",
+    "wcag_sc": "1.3.1"
+   },
+   {
+    "description": "The document's /Info dictionary or XMP metadata must contain a non-empty /Title entry.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "pdf.document-title",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "engine/pdf-analyser/analysers/rules/pdf/document_title.py",
+    "title": "Document title not set",
+    "wcag": "SC_2_4_2",
+    "wcag_display": "Page Titled",
+    "wcag_level": "A",
+    "wcag_sc": "2.4.2"
+   },
+   {
+    "description": "The document catalog must include a /Lang entry with a BCP 47 language code. Screen readers use this to select the correct speech engine.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "pdf.document-language",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "engine/pdf-analyser/analysers/rules/pdf/document_language.py",
+    "title": "Document language not declared",
+    "wcag": "SC_3_1_1",
+    "wcag_display": "Language of Page",
+    "wcag_level": "A",
+    "wcag_sc": "3.1.1"
+   },
+   {
+    "description": "The logical order of tags in the structure tree must match the visual reading order on each page. Mismatched order causes screen readers to announce content out of sequence.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "pdf.reading-order",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "engine/pdf-analyser/analysers/rules/pdf/reading_order.py",
+    "title": "Reading order undefined",
+    "wcag": "SC_1_3_2",
+    "wcag_display": "Meaningful Sequence",
+    "wcag_level": "A",
+    "wcag_sc": "1.3.2"
+   },
+   {
+    "description": "The viewer preferences dictionary must set /DisplayDocTitle to true so the window title bar shows the document title instead of the filename.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "pdf.display-doc-title",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "engine/pdf-analyser/analysers/rules/pdf/display_title.py",
+    "title": "Viewer not set to show title",
+    "wcag": "SC_2_4_2",
+    "wcag_display": "Page Titled",
+    "wcag_level": "A",
+    "wcag_sc": "2.4.2"
+   },
+   {
+    "description": "Navigation advisory: PDFs with at least 10 pages benefit from an Outlines (bookmarks) tree. Missing bookmarks alone do not establish a WCAG failure.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "human-only",
+    "id": "pdf.missing-bookmarks",
+    "level": "AA",
+    "severity": "REVIEW",
+    "source": "engine/pdf-analyser/analysers/rules/pdf/bookmarks.py",
+    "title": "No navigation bookmarks",
+    "wcag": "SC_2_4_5",
+    "wcag_display": "Multiple Ways",
+    "wcag_level": "AA",
+    "wcag_sc": "2.4.5"
+   },
+   {
+    "description": "Instructions that identify content solely by shape, visual position, size, or sound cannot be understood by users who are blind or deaf. Re-word to include a non-sensory alternative.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "pdf.sensory-characteristics",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "api/textchecks.py",
+    "title": "Instructions rely on sensory characteristics",
+    "wcag": "SC_1_3_3",
+    "wcag_display": "Sensory Characteristics",
+    "wcag_level": "A",
+    "wcag_sc": "1.3.3"
+   },
+   {
+    "description": "Text fill colours in content streams must meet the 4.5:1 minimum contrast ratio against the resolved background for normal-sized text. The engine recolours failing text where the background can be structurally resolved.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "pdf.low-contrast",
+    "level": "AA",
+    "severity": "SERIOUS",
+    "source": "api/office_structure.py",
+    "title": "Insufficient colour contrast",
+    "wcag": "SC_1_4_3",
+    "wcag_display": "Contrast (Minimum)",
+    "wcag_level": "AA",
+    "wcag_sc": "1.4.3"
+   },
+   {
+    "description": "An image appears to contain readable text. Text rendered into images cannot be resized, translated, or read by assistive technology. Extract the text into real PDF content.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "pdf.images-of-text",
+    "level": "AA",
+    "severity": "MODERATE",
+    "source": "api/office_structure.py",
+    "title": "Text baked into an image",
+    "wcag": "SC_1_4_5",
+    "wcag_display": "Images of Text",
+    "wcag_level": "AA",
+    "wcag_sc": "1.4.5"
+   },
+   {
+    "description": "Pages containing AcroForm widgets must set /Tabs = /S in their page dictionary so the PDF viewer follows structure order when Tab is pressed. Without this, keyboard navigation order is undefined.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "pdf.focus-order",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "api/formats/pdf/detectors/focus_order.py",
+    "title": "Tab order not set to structure order",
+    "wcag": "SC_2_4_3",
+    "wcag_display": "Focus Order",
+    "wcag_level": "A",
+    "wcag_sc": "2.4.3"
+   },
+   {
+    "description": "A hyperlink's visible text is the raw URL rather than a description of the destination. Screen reader users who navigate by links cannot determine the purpose of a raw URL link out of context.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "human-only",
+    "id": "pdf.link-purpose",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "api/office_structure.py",
+    "title": "Link text is a raw URL",
+    "wcag": "SC_2_4_4",
+    "wcag_display": "Link Purpose (In Context)",
+    "wcag_level": "A",
+    "wcag_sc": "2.4.4"
+   },
+   {
+    "description": "A tagged PDF with no heading tags (H1–H6) provides no navigable structure. Screen reader users who jump by heading cannot skim the document. The engine proposes a heading map derived from font-size hierarchy for human confirmation.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "pdf.headings-labels",
+    "level": "AA",
+    "severity": "MODERATE",
+    "source": "api/office_structure.py",
+    "title": "Tagged PDF has no heading structure",
+    "wcag": "SC_2_4_6",
+    "wcag_display": "Headings and Labels",
+    "wcag_level": "AA",
+    "wcag_sc": "2.4.6"
+   },
+   {
+    "description": "Passages of text in a language different from the document's /Lang must carry a /Lang attribute on their enclosing structure element. Without it, screen readers mispronounce foreign-language passages.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "pdf.language-of-parts",
+    "level": "AA",
+    "severity": "MODERATE",
+    "source": "api/office_structure.py",
+    "title": "Language of parts not marked",
+    "wcag": "SC_3_1_2",
+    "wcag_display": "Language of Parts",
+    "wcag_level": "AA",
+    "wcag_sc": "3.1.2"
+   },
+   {
+    "description": "An AcroForm terminal field's /TU (tooltip / accessible name) entry is absent or generic. Screen readers announce /TU when focus reaches the field. The engine copies a meaningful /T value into /TU where available.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "pdf.form-field-name",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "api/formats/pdf/detectors/name_role_value.py",
+    "title": "Form field has no accessible name",
+    "wcag": "SC_4_1_2",
+    "wcag_display": "Name, Role, Value",
+    "wcag_level": "A",
+    "wcag_sc": "4.1.2"
+   }
+  ],
+  "pptx": [
+   {
+    "description": "Every non-decorative image must have a non-empty description in the picture alternative text field. Screen readers announce this when moving through slides.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "PPTX-ALT-001",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "api/formats/pptx/detectors/non_text_content.py",
+    "title": "Image missing alt text",
+    "wcag": "SC_1_1_1",
+    "wcag_display": "Non-text Content",
+    "wcag_level": "A",
+    "wcag_sc": "1.1.1"
+   },
+   {
+    "description": "Each slide must have a Title placeholder with non-empty text. Assistive technology reads the slide title when the user moves between slides.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "PPTX-TITLE-001",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Pptx/Rules/SlideTitleRule.cs",
+    "title": "Slide title not set",
+    "wcag": "SC_2_4_2",
+    "wcag_display": "Page Titled",
+    "wcag_level": "A",
+    "wcag_sc": "2.4.2"
+   },
+   {
+    "description": "Each slide's title should be unique across the deck. Duplicate titles make it impossible to distinguish slides by title alone when navigating by ear.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "PPTX-TITLE-002",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Pptx/Rules/SlideTitleUniquenessRule.cs",
+    "title": "Slide title duplicates another slide",
+    "wcag": "SC_2_4_2",
+    "wcag_display": "Page Titled",
+    "wcag_level": "A",
+    "wcag_sc": "2.4.2"
+   },
+   {
+    "description": "The presentation must declare a default BCP 47 language code in its core document properties.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "PPTX-LANG-001",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Pptx/Rules/DocumentLanguageRule.cs",
+    "title": "Document language not declared",
+    "wcag": "SC_3_1_1",
+    "wcag_display": "Language of Page",
+    "wcag_level": "A",
+    "wcag_sc": "3.1.1"
+   },
+   {
+    "description": "The tab order of shapes on each slide must match the intended visual reading order. Undefined or reversed order causes screen readers to announce content out of sequence.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "PPTX-ORDER-001",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Pptx/Rules/ReadingOrderRule.cs",
+    "title": "Reading order undefined",
+    "wcag": "SC_1_3_2",
+    "wcag_display": "Meaningful Sequence",
+    "wcag_level": "A",
+    "wcag_sc": "1.3.2"
+   },
+   {
+    "description": "Every table must have a header row defined in the table style so assistive technology can announce column labels when navigating cells.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "PPTX-TABLE-001",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Pptx/Rules/TableHeaderRule.cs",
+    "title": "Table has no header row",
+    "wcag": "SC_1_3_1",
+    "wcag_display": "Info and Relationships",
+    "wcag_level": "A",
+    "wcag_sc": "1.3.1"
+   },
+   {
+    "description": "Text colour against the slide background must meet the 4.5:1 minimum contrast ratio for normal-sized text.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "PPTX-CONTRAST-001",
+    "level": "AA",
+    "severity": "SERIOUS",
+    "source": "api/office_structure.py",
+    "title": "Insufficient colour contrast",
+    "wcag": "SC_1_4_3",
+    "wcag_display": "Contrast (Minimum)",
+    "wcag_level": "AA",
+    "wcag_sc": "1.4.3"
+   },
+   {
+    "description": "Hyperlink display text must describe the destination. Generic phrases such as 'click here' or bare URLs are not descriptive out of context.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "PPTX-LINK-001",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Pptx/Rules/LinkPurposeRule.cs",
+    "title": "Link text not descriptive",
+    "wcag": "SC_2_4_4",
+    "wcag_display": "Link Purpose (In Context)",
+    "wcag_level": "A",
+    "wcag_sc": "2.4.4"
+   },
+   {
+    "description": "Slide animations must not hide or reorder content during playback in a way that prevents assistive technology from reading the slide correctly.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "human-only",
+    "id": "PPTX-ANIM-001",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Pptx/Rules/AnimationOrderRule.cs",
+    "title": "Animation interferes with reading",
+    "wcag": "SC_2_1_1",
+    "wcag_display": "Keyboard",
+    "wcag_level": "A",
+    "wcag_sc": "2.1.1"
+   },
+   {
+    "description": "Instructions that identify content solely by shape, visual position, size, or sound cannot be understood by users who are blind or deaf. Re-word to include a non-sensory alternative.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "PPTX-SENSORY-001",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "api/textchecks.py",
+    "title": "Instructions rely on sensory characteristics",
+    "wcag": "SC_1_3_3",
+    "wcag_display": "Sensory Characteristics",
+    "wcag_level": "A",
+    "wcag_sc": "1.3.3"
+   },
+   {
+    "description": "A text box with fixed dimensions may clip its content when text is enlarged to 200%. Users who need large text should be able to read all slide content without horizontal scrolling or loss of content.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "human-only",
+    "id": "PPTX-RESIZE-001",
+    "level": "AA",
+    "severity": "MODERATE",
+    "source": "api/office_structure.py",
+    "title": "Text box clips content at 200% zoom",
+    "wcag": "SC_1_4_4",
+    "wcag_display": "Resize Text",
+    "wcag_level": "AA",
+    "wcag_sc": "1.4.4"
+   },
+   {
+    "description": "An image appears to contain readable text. Text rendered into images cannot be resized, translated, or read by assistive technology. Replace with real slide text.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "PPTX-IMGTEXT-001",
+    "level": "AA",
+    "severity": "MODERATE",
+    "source": "api/textchecks.py",
+    "title": "Text baked into an image",
+    "wcag": "SC_1_4_5",
+    "wcag_display": "Images of Text",
+    "wcag_level": "AA",
+    "wcag_sc": "1.4.5"
+   },
+   {
+    "description": "A table wider than the slide content area may require two-dimensional scrolling when the presentation is viewed at 320 CSS pixels. Prefer narrower tables or portrait layouts that reflow to one column.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "human-only",
+    "id": "PPTX-REFLOW-001",
+    "level": "AA",
+    "severity": "MODERATE",
+    "source": "api/office_structure.py",
+    "title": "Wide table may not reflow at narrow viewport",
+    "wcag": "SC_1_4_10",
+    "wcag_display": "Reflow",
+    "wcag_level": "AA",
+    "wcag_sc": "1.4.10"
+   },
+   {
+    "description": "A shape border or informational graphic has a contrast ratio below 3:1 against its background. UI components and graphics that convey meaning must meet this threshold for low-vision users.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "human-only",
+    "id": "PPTX-NTCONTRAST-001",
+    "level": "AA",
+    "severity": "MODERATE",
+    "source": "api/office_structure.py",
+    "title": "Non-text element has insufficient contrast",
+    "wcag": "SC_1_4_11",
+    "wcag_display": "Non-text Contrast",
+    "wcag_level": "AA",
+    "wcag_sc": "1.4.11"
+   },
+   {
+    "description": "Text runs with an exact (fixed) line height setting may clip descenders or clip adjacent lines when a user's OS increases text spacing. Prefer proportional line spacing over an exact point value.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "human-only",
+    "id": "PPTX-SPACING-001",
+    "level": "AA",
+    "severity": "MODERATE",
+    "source": "api/office_structure.py",
+    "title": "Fixed line spacing may clip text",
+    "wcag": "SC_1_4_12",
+    "wcag_display": "Text Spacing",
+    "wcag_level": "AA",
+    "wcag_sc": "1.4.12"
+   },
+   {
+    "description": "The presentation contains an embedded control (ActiveX, OLE object) that may not allow keyboard focus to move away. Verify the user can leave the control using Tab or Escape.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "human-only",
+    "id": "PPTX-KBTRAP-001",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "api/office_structure.py",
+    "title": "Embedded control may trap keyboard focus",
+    "wcag": "SC_2_1_2",
+    "wcag_display": "No Keyboard Trap",
+    "wcag_level": "A",
+    "wcag_sc": "2.1.2"
+   },
+   {
+    "description": "The tab order of placeholders on a slide is determined by their z-index, which may not match the intended visual reading sequence. Reorder placeholders so keyboard navigation follows reading order.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "human-only",
+    "id": "PPTX-FOCUSORDER-001",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "api/office_structure.py",
+    "title": "Placeholder focus order may not match reading order",
+    "wcag": "SC_2_4_3",
+    "wcag_display": "Focus Order",
+    "wcag_level": "A",
+    "wcag_sc": "2.4.3"
+   },
+   {
+    "description": "A slide has a Title placeholder that exists but contains no text. An empty title provides no navigation landmark for screen reader users jumping between slides by heading.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "PPTX-HEADLABEL-001",
+    "level": "AA",
+    "severity": "MODERATE",
+    "source": "api/office_structure.py",
+    "title": "Slide title placeholder is empty",
+    "wcag": "SC_2_4_6",
+    "wcag_display": "Headings and Labels",
+    "wcag_level": "AA",
+    "wcag_sc": "2.4.6"
+   },
+   {
+    "description": "Text runs in a language different from the presentation's default must declare their language via the a:rPr lang attribute. Without this, screen readers mispronounce foreign-language passages.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "PPTX-LANGPART-001",
+    "level": "AA",
+    "severity": "MODERATE",
+    "source": "api/office_structure.py",
+    "title": "Language of parts not marked",
+    "wcag": "SC_3_1_2",
+    "wcag_display": "Language of Parts",
+    "wcag_level": "AA",
+    "wcag_sc": "3.1.2"
+   },
+   {
+    "description": "An ActiveX or OLE control embedded in the presentation does not expose an accessible name or role. Assistive technology cannot identify or operate a control whose name and role are not declared.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "human-only",
+    "id": "PPTX-NRV-001",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "api/office_structure.py",
+    "title": "Embedded control has no accessible name",
+    "wcag": "SC_4_1_2",
+    "wcag_display": "Name, Role, Value",
+    "wcag_level": "A",
+    "wcag_sc": "4.1.2"
+   }
+  ],
+  "xlsx": [
+   {
+    "description": "Embedded images must have alternative text in the picture properties. Screen readers announce this when focus reaches the image.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "XLSX-ALT-001",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "api/formats/xlsx/detectors/non_text_content.py",
+    "title": "Image missing alt text",
+    "wcag": "SC_1_1_1",
+    "wcag_display": "Non-text Content",
+    "wcag_level": "A",
+    "wcag_sc": "1.1.1"
+   },
+   {
+    "description": "The workbook's core properties <dc:title> element must be non-empty. Assistive technology announces the title when the file is opened.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "XLSX-TITLE-001",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Xlsx/Rules/DocumentTitleRule.cs",
+    "title": "Document title not set",
+    "wcag": "SC_2_4_2",
+    "wcag_display": "Page Titled",
+    "wcag_level": "A",
+    "wcag_sc": "2.4.2"
+   },
+   {
+    "description": "The workbook must declare a language in its styles.xml. Without this, screen readers cannot select the correct pronunciation engine.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "XLSX-LANG-001",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Xlsx/Rules/DocumentLanguageRule.cs",
+    "title": "Document language not declared",
+    "wcag": "SC_3_1_1",
+    "wcag_display": "Language of Page",
+    "wcag_level": "A",
+    "wcag_sc": "3.1.1"
+   },
+   {
+    "description": "Every ListObject (formal table) must have a header row. Without headers, assistive technology cannot identify what each column represents.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "XLSX-TABLE-001",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Xlsx/Rules/TableHeaderRule.cs",
+    "title": "Data range has no header row",
+    "wcag": "SC_1_3_1",
+    "wcag_display": "Info and Relationships",
+    "wcag_level": "A",
+    "wcag_sc": "1.3.1"
+   },
+   {
+    "description": "A formal table's DisplayName must not use Excel's auto-generated default (Table1, Table2, etc.). A descriptive name helps assistive technology and formula users identify the table's purpose.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "XLSX-TABLE-NAME-001",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Xlsx/Rules/TableNameRule.cs",
+    "title": "Generic table name",
+    "wcag": "SC_2_4_2",
+    "wcag_display": "Page Titled",
+    "wcag_level": "A",
+    "wcag_sc": "2.4.2"
+   },
+   {
+    "description": "Worksheet tab names should be unique across the workbook, even when they're not Excel's generic defaults. Duplicate names make it impossible to distinguish sheets by name alone.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "XLSX-SHEET-002",
+    "level": "AA",
+    "severity": "MODERATE",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Xlsx/Rules/SheetNameUniquenessRule.cs",
+    "title": "Sheet name duplicates another sheet",
+    "wcag": "SC_2_4_6",
+    "wcag_display": "Headings and Labels",
+    "wcag_level": "AA",
+    "wcag_sc": "2.4.6"
+   },
+   {
+    "description": "Worksheet tab names must not use Excel's defaults (Sheet1, Sheet2, etc.). Meaningful names let screen reader users understand what each sheet contains before navigating to it.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "XLSX-SHEET-001",
+    "level": "AA",
+    "severity": "MODERATE",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Xlsx/Rules/SheetNameRule.cs",
+    "title": "Generic sheet name",
+    "wcag": "SC_2_4_6",
+    "wcag_display": "Headings and Labels",
+    "wcag_level": "AA",
+    "wcag_sc": "2.4.6"
+   },
+   {
+    "description": "Merged cells break keyboard navigation for screen reader users. Use unmerged cells with visual centering as a substitute.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "human-only",
+    "id": "XLSX-MERGE-001",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Xlsx/Rules/MergedCellsRule.cs",
+    "title": "Merged cells break navigation",
+    "wcag": "SC_1_3_2",
+    "wcag_display": "Meaningful Sequence",
+    "wcag_level": "A",
+    "wcag_sc": "1.3.2"
+   },
+   {
+    "description": "Hidden rows, columns, or sheets may contain information that assistive technology cannot reach, creating a gap between what the visual user sees and what is accessible.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "human-only",
+    "id": "XLSX-HIDDEN-001",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Xlsx/Rules/HiddenContentRule.cs",
+    "title": "Hidden content",
+    "wcag": "SC_1_3_2",
+    "wcag_display": "Meaningful Sequence",
+    "wcag_level": "A",
+    "wcag_sc": "1.3.2"
+   },
+   {
+    "description": "A visible sheet with no cell data, charts, or images is an empty stop for screen reader users tabbing through the workbook. Delete it or add content.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "human-only",
+    "id": "XLSX-BLANK-001",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Xlsx/Rules/BlankWorksheetRule.cs",
+    "title": "Blank worksheet",
+    "wcag": "SC_1_3_2",
+    "wcag_display": "Meaningful Sequence",
+    "wcag_level": "A",
+    "wcag_sc": "1.3.2"
+   },
+   {
+    "description": "A cell hyperlink's display text is empty, generic ('click here'), or the raw URL. Covers both standard cell hyperlinks and =HYPERLINK() formula cells, which never appear in the worksheet's own hyperlinks list.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "XLSX-LINK-001",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "engine/office-analysers/DigitalA11y.Analysers.DotNet/Xlsx/Rules/LinkPurposeRule.cs",
+    "title": "Link text not descriptive",
+    "wcag": "SC_2_4_4",
+    "wcag_display": "Link Purpose (In Context)",
+    "wcag_level": "A",
+    "wcag_sc": "2.4.4"
+   },
+   {
+    "description": "Instructions that identify content solely by shape, visual position, size, or sound cannot be understood by users who are blind or deaf. Re-word to include a non-sensory alternative.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "XLSX-SENSORY-001",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "api/textchecks.py",
+    "title": "Instructions rely on sensory characteristics",
+    "wcag": "SC_1_3_3",
+    "wcag_display": "Sensory Characteristics",
+    "wcag_level": "A",
+    "wcag_sc": "1.3.3"
+   },
+   {
+    "description": "A conditional-format colour scale or colour-coded status indicator conveys meaning through colour alone. Users who cannot distinguish colours will miss this information. Add a text label, icon, or pattern to supplement the colour cue.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "human-only",
+    "id": "XLSX-COLOR-001",
+    "level": "A",
+    "severity": "MODERATE",
+    "source": "api/office_structure.py",
+    "title": "Information conveyed by colour alone",
+    "wcag": "SC_1_4_1",
+    "wcag_display": "Use of Color",
+    "wcag_level": "A",
+    "wcag_sc": "1.4.1"
+   },
+   {
+    "description": "Cell text colour against its background must meet the 4.5:1 minimum contrast ratio for normal-sized text (3:1 for large text ≥18pt or 14pt bold).",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "auto",
+    "id": "XLSX-CONTRAST-001",
+    "level": "AA",
+    "severity": "SERIOUS",
+    "source": "api/office_structure.py",
+    "title": "Insufficient colour contrast",
+    "wcag": "SC_1_4_3",
+    "wcag_display": "Contrast (Minimum)",
+    "wcag_level": "AA",
+    "wcag_sc": "1.4.3"
+   },
+   {
+    "description": "An embedded image appears to contain readable text. Text rendered into images cannot be resized, translated, or read by assistive technology. Replace with real cell content.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "ai-assisted",
+    "id": "XLSX-IMGTEXT-001",
+    "level": "AA",
+    "severity": "MODERATE",
+    "source": "api/textchecks.py",
+    "title": "Text baked into an image",
+    "wcag": "SC_1_4_5",
+    "wcag_display": "Images of Text",
+    "wcag_level": "AA",
+    "wcag_sc": "1.4.5"
+   },
+   {
+    "description": "A drawing shape border or fill has a contrast ratio below 3:1 against its background. Informational graphics and UI components must meet this threshold so they remain visible to low-vision users.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "human-only",
+    "id": "XLSX-NTCONTRAST-001",
+    "level": "AA",
+    "severity": "MODERATE",
+    "source": "api/office_structure.py",
+    "title": "Non-text element has insufficient contrast",
+    "wcag": "SC_1_4_11",
+    "wcag_display": "Non-text Contrast",
+    "wcag_level": "AA",
+    "wcag_sc": "1.4.11"
+   },
+   {
+    "description": "SpreadsheetML rich-text run properties (CT_RPrElt) have no language element, so language-of-parts cannot be recorded in the file. Text in a language different from the workbook default cannot be marked up and must be re-authored to avoid mispronunciation.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "human-only",
+    "id": "XLSX-LANGPART-001",
+    "level": "AA",
+    "severity": "MODERATE",
+    "source": "api/office_structure.py",
+    "title": "Language of parts cannot be declared",
+    "wcag": "SC_3_1_2",
+    "wcag_display": "Language of Parts",
+    "wcag_level": "AA",
+    "wcag_sc": "3.1.2"
+   },
+   {
+    "description": "An ActiveX or OLE control embedded in the workbook does not expose an accessible name or role in a form that static analysis can read. Assistive technology cannot identify or operate the control without it.",
+    "enabled": true,
+    "findings": 0,
+    "fix_mode": "human-only",
+    "id": "XLSX-NRV-001",
+    "level": "A",
+    "severity": "SERIOUS",
+    "source": "api/office_structure.py",
+    "title": "Embedded control has no accessible name",
+    "wcag": "SC_4_1_2",
+    "wcag_display": "Name, Role, Value",
+    "wcag_level": "A",
+    "wcag_sc": "4.1.2"
+   }
+  ]
+ },
+ "scan": {
+  "files": [
+   {
+    "acp_stamped": null,
+    "compliant": 0,
+    "corrected_sha256": null,
+    "drive_file_id": null,
+    "drive_write_url": null,
+    "engine": ".net/office",
+    "file": "../../outside/escape.xlsx",
+    "issues": [
+     {
+      "detail": "Table has no header row",
+      "location": "xlsx:sheet:Budget:cell:B3",
+      "page": null,
+      "rule_id": "XLSX-HEADER-001",
+      "severity": "MODERATE",
+      "wcag": "1.3.1"
+     }
+    ],
+    "owner": null,
+    "pages": null,
+    "parent_folder": null,
+    "published_at": null,
+    "remediated_at": null,
+    "score": 80,
+    "sheets": null,
+    "size_kb": null,
+    "skipped_rules": 0,
+    "sourceName": "Local upload",
+    "source_modified": null,
+    "source_relative_path": null,
+    "status": "uncertain"
+   },
+   {
+    "acp_stamped": null,
+    "compliant": 0,
+    "corrected_sha256": null,
+    "drive_file_id": null,
+    "drive_write_url": null,
+    "engine": ".net/office",
+    "file": "Budget & notes (draft).xlsx",
+    "issues": [],
+    "owner": null,
+    "pages": null,
+    "parent_folder": null,
+    "published_at": null,
+    "remediated_at": null,
+    "score": 100,
+    "sheets": null,
+    "size_kb": null,
+    "skipped_rules": 0,
+    "sourceName": "Local upload",
+    "source_modified": null,
+    "source_relative_path": null,
+    "status": "uncertain"
+   },
+   {
+    "acp_stamped": null,
+    "compliant": 0,
+    "corrected_sha256": null,
+    "drive_file_id": null,
+    "drive_write_url": null,
+    "engine": ".net/office",
+    "file": "CON.pptx",
+    "issues": [
+     {
+      "detail": "Picture has no alternative text",
+      "location": "pptx:slide:1",
+      "page": 2,
+      "rule_id": "PPTX-ALT-001",
+      "severity": "SERIOUS",
+      "wcag": "1.1.1"
+     }
+    ],
+    "owner": null,
+    "pages": null,
+    "parent_folder": null,
+    "published_at": null,
+    "remediated_at": null,
+    "score": 64,
+    "sheets": null,
+    "size_kb": null,
+    "skipped_rules": 0,
+    "sourceName": "Local upload",
+    "source_modified": null,
+    "source_relative_path": null,
+    "status": "uncertain"
+   },
+   {
+    "acp_stamped": null,
+    "compliant": 0,
+    "corrected_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "drive_file_id": null,
+    "drive_write_url": null,
+    "engine": ".net/office",
+    "file": "Policies/2026/Überblick – Richtlinie.docx",
+    "issues": [
+     {
+      "detail": "Image 1 has no description",
+      "location": "docx:image:1",
+      "page": null,
+      "rule_id": "DOCX-ALT-001",
+      "severity": "SERIOUS",
+      "wcag": "1.1.1 Non-text Content"
+     },
+     {
+      "detail": "Paragraph styled as a heading is not a heading",
+      "location": "docx:paragraph:14",
+      "page": null,
+      "rule_id": "DOCX-HEAD-002",
+      "severity": "MODERATE",
+      "wcag": "SC_1_3_1"
+     }
+    ],
+    "owner": null,
+    "pages": null,
+    "parent_folder": null,
+    "published_at": null,
+    "remediated_at": "2026-09-18T07:32:10.650758+00:00",
+    "score": 72,
+    "sheets": null,
+    "size_kb": null,
+    "skipped_rules": 0,
+    "sourceName": "Local upload",
+    "source_modified": null,
+    "source_relative_path": null,
+    "status": "uncertain"
+   },
+   {
+    "acp_stamped": null,
+    "compliant": 0,
+    "corrected_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "drive_file_id": null,
+    "drive_write_url": null,
+    "engine": ".net/office",
+    "file": "Reports/Q1 summary.pdf",
+    "issues": [
+     {
+      "detail": "Grey text on white is 2.9:1",
+      "location": null,
+      "page": 3,
+      "rule_id": "PDF-CONTRAST-001",
+      "severity": "SERIOUS",
+      "wcag": "1.4.3"
+     },
+     {
+      "detail": "Document language is not set",
+      "location": null,
+      "page": null,
+      "rule_id": "PDF-LANG-001",
+      "severity": "SERIOUS",
+      "wcag": "3.1.1"
+     }
+    ],
+    "owner": null,
+    "pages": null,
+    "parent_folder": null,
+    "published_at": null,
+    "remediated_at": "2026-09-18T07:32:10.653504+00:00",
+    "score": 55,
+    "sheets": null,
+    "size_kb": null,
+    "skipped_rules": 0,
+    "sourceName": "Local upload",
+    "source_modified": null,
+    "source_relative_path": null,
+    "status": "uncertain"
+   },
+   {
+    "acp_stamped": null,
+    "assessment_blocked": true,
+    "assessment_blocked_category": "assessment_failed",
+    "assessment_blocked_reason": "Assessment could not complete for this file. Retry assessment before remediation; its findings are not yet fully known.",
+    "compliant": 0,
+    "corrected_sha256": null,
+    "drive_file_id": null,
+    "drive_write_url": null,
+    "engine": ".net/office",
+    "file": "broken.docx",
+    "issues": [],
+    "owner": null,
+    "pages": null,
+    "parent_folder": null,
+    "published_at": null,
+    "remediated_at": null,
+    "score": null,
+    "sheets": null,
+    "size_kb": null,
+    "skipped_rules": 0,
+    "sourceName": "Local upload",
+    "source_modified": null,
+    "source_relative_path": null,
+    "status": "error"
+   },
+   {
+    "acp_stamped": null,
+    "compliant": 0,
+    "corrected_sha256": null,
+    "drive_file_id": null,
+    "drive_write_url": null,
+    "engine": ".net/office",
+    "file": "not-yet.pdf",
+    "issues": [],
+    "owner": null,
+    "pages": null,
+    "parent_folder": null,
+    "published_at": null,
+    "remediated_at": null,
+    "score": null,
+    "sheets": null,
+    "size_kb": null,
+    "skipped_rules": 0,
+    "sourceName": "Local upload",
+    "source_modified": null,
+    "source_relative_path": null,
+    "status": "discovered"
+   },
+   {
+    "acp_stamped": null,
+    "compliant": 0,
+    "corrected_sha256": null,
+    "drive_file_id": null,
+    "drive_write_url": null,
+    "engine": ".net/office",
+    "file": "reports/q1 SUMMARY.pdf",
+    "issues": [
+     {
+      "detail": "Document title is not set",
+      "location": null,
+      "page": null,
+      "rule_id": "PDF-TITLE-001",
+      "severity": "MODERATE",
+      "wcag": "2.4.2"
+     }
+    ],
+    "owner": null,
+    "pages": null,
+    "parent_folder": null,
+    "published_at": null,
+    "remediated_at": null,
+    "score": 90,
+    "sheets": null,
+    "size_kb": null,
+    "skipped_rules": 0,
+    "sourceName": "Local upload",
+    "source_modified": null,
+    "source_relative_path": null,
+    "status": "uncertain"
+   }
+  ]
+ },
+ "scanFactsPages": [
+  {
+   "digest": null,
+   "limit": 3,
+   "offset": 0,
+   "response": {
+    "accounting": {
+     "accountingReason": "at least one document has no per-finding ledger, so the scan-level resolved count cannot be stated",
+     "findingsOpen": null,
+     "findingsResolvedVerified": null,
+     "findingsTotal": 7,
+     "humanReviews": {
+      "accepted": 0,
+      "correctionRequested": 0,
+      "pending": 1,
+      "rejected": 0,
+      "stale": 0,
+      "unable": 0
+     },
+     "resolutionLedger": "none",
+     "savedChangesUnverified": 0,
+     "savedChangesVerified": 1
+    },
+    "comparison": {
+     "complete": true,
+     "notes": [
+      "Re-assessing a document inside the same scan replaces its earlier finding list, so changes within one scan are not compared.",
+      "3 current finding(s) have no detector location, so they cannot be matched one by one and are neither new nor resolved."
+     ],
+     "reason": "6 of 8 document(s) were compared finding by finding with their own most recent earlier assessment; 1 has no earlier assessment at all; 1 has an earlier assessment that did not finish or used a different rubric or scope, so it is not a baseline.",
+     "sameScan": {
+      "filesBaselineUnusable": 0,
+      "filesCompared": 0,
+      "filesNotAvailable": 8,
+      "filesNotComparable": 0,
+      "filesNotRecorded": 0,
+      "introduced": 0,
+      "persisting": 0,
+      "resolved": 0
+     },
+     "status": "compared",
+     "totals": {
+      "filesBaselineUnusable": 1,
+      "filesCompared": 6,
+      "filesNew": 1,
+      "filesNoBaseline": 1,
+      "filesNotComparable": 0,
+      "filesRenamed": 0,
+      "filesReopenedUndetermined": 6,
+      "introduced": 1,
+      "notComparable": 3,
+      "persisting": 3,
+      "reopened": null,
+      "reopenedDetermined": 0,
+      "resolved": 0
+     }
+    },
+    "complete": false,
+    "factsDigest": "1262feb203727ddd18a5a95db2a812cb0082e8964194057d10c39e4733faa5c1",
+    "factsVersion": 1,
+    "files": [
+     {
+      "approvalsRecheckRequired": 0,
+      "assessment": {
+       "state": "assessed",
+       "stateReason": "the document was assessed and every in-scope rule was evaluated"
+      },
+      "comparison": {
+       "baseline": {
+        "file": "../../outside/escape.xlsx",
+        "generatedAt": "2026-08-01T05:05:00+00:00",
+        "runStatus": "done",
+        "scanId": "s-packets-prev",
+        "status": "uncertain"
+       },
+       "introduced": 0,
+       "notComparable": {
+        "current": 0,
+        "previous": 0
+       },
+       "persisting": 1,
+       "reason": "matched finding by finding against the assessment of 2026-08-01T05:05:00+00:00 of the same document (same source and path), under the same rubric and scope",
+       "reasonCode": "compared",
+       "renamed": false,
+       "reopened": null,
+       "resolved": 0,
+       "status": "compared"
+      },
+      "currentArtifact": {
+       "kind": "source",
+       "sha256": "md5-escape"
+      },
+      "factsDigest": "c55cf2ddd5ddd07d61de9253af3427b9deb546adf652a72b0a7d9f1113ec98e8",
+      "file": "../../outside/escape.xlsx",
+      "findingsOpen": 1,
+      "findingsResolvedVerified": null,
+      "findingsTotal": 1,
+      "humanReviews": {
+       "accepted": 0,
+       "correctionRequested": 0,
+       "pending": 0,
+       "rejected": 0,
+       "stale": 0,
+       "unable": 0
+      },
+      "resolutionLedger": "none",
+      "savedChangesComplete": true,
+      "savedChangesUnverified": 0,
+      "savedChangesVerified": 0,
+      "score": 80
+     },
+     {
+      "approvalsRecheckRequired": 0,
+      "assessment": {
+       "state": "assessed",
+       "stateReason": "the document was assessed and every in-scope rule was evaluated"
+      },
+      "comparison": {
+       "baseline": {
+        "file": "Budget & notes (draft).xlsx",
+        "generatedAt": "2026-08-01T05:05:00+00:00",
+        "runStatus": "done",
+        "scanId": "s-packets-prev",
+        "status": "uncertain"
+       },
+       "introduced": 0,
+       "notComparable": {
+        "current": 0,
+        "previous": 0
+       },
+       "persisting": 0,
+       "reason": "matched finding by finding against the assessment of 2026-08-01T05:05:00+00:00 of the same document (same source and path), under the same rubric and scope",
+       "reasonCode": "compared",
+       "renamed": false,
+       "reopened": null,
+       "resolved": 0,
+       "status": "compared"
+      },
+      "currentArtifact": {
+       "kind": "source",
+       "sha256": "md5-budget"
+      },
+      "factsDigest": "33106991975ee3158b7c115cb27950b2f43425246fb42a6903dae61f7b943877",
+      "file": "Budget & notes (draft).xlsx",
+      "findingsOpen": 0,
+      "findingsResolvedVerified": null,
+      "findingsTotal": 0,
+      "humanReviews": {
+       "accepted": 0,
+       "correctionRequested": 0,
+       "pending": 0,
+       "rejected": 0,
+       "stale": 0,
+       "unable": 0
+      },
+      "resolutionLedger": "none",
+      "savedChangesComplete": true,
+      "savedChangesUnverified": 0,
+      "savedChangesVerified": 0,
+      "score": 100
+     },
+     {
+      "approvalsRecheckRequired": 0,
+      "assessment": {
+       "state": "assessed",
+       "stateReason": "the document was assessed and every in-scope rule was evaluated"
+      },
+      "comparison": {
+       "baseline": {
+        "file": "CON.pptx",
+        "generatedAt": "2026-08-01T05:05:00+00:00",
+        "runStatus": "done",
+        "scanId": "s-packets-prev",
+        "status": "uncertain"
+       },
+       "introduced": 0,
+       "notComparable": {
+        "current": 0,
+        "previous": 0
+       },
+       "persisting": 1,
+       "reason": "matched finding by finding against the assessment of 2026-08-01T05:05:00+00:00 of the same document (same source and path), under the same rubric and scope",
+       "reasonCode": "compared",
+       "renamed": false,
+       "reopened": null,
+       "resolved": 0,
+       "status": "compared"
+      },
+      "currentArtifact": {
+       "kind": "source",
+       "sha256": "md5-con"
+      },
+      "factsDigest": "78a25852662f192d241d40b1960524df7e50d11b46b5ade4471863340a659ec9",
+      "file": "CON.pptx",
+      "findingsOpen": 1,
+      "findingsResolvedVerified": null,
+      "findingsTotal": 1,
+      "humanReviews": {
+       "accepted": 0,
+       "correctionRequested": 0,
+       "pending": 0,
+       "rejected": 0,
+       "stale": 0,
+       "unable": 0
+      },
+      "resolutionLedger": "none",
+      "savedChangesComplete": true,
+      "savedChangesUnverified": 0,
+      "savedChangesVerified": 0,
+      "score": 64
+     }
+    ],
+    "filesTotal": 8,
+    "generatedAt": "2026-09-18T07:32:10.684640+00:00",
+    "identity": {
+     "file": null,
+     "platformVersion": "2026.9.17.9",
+     "rubricHash": "h1",
+     "scanId": "s-packets",
+     "scanScope": null,
+     "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+     "source": "local",
+     "targetLevel": "AA",
+     "targetLevelSource": "workspace_config"
+    },
+    "kind": "scan",
+    "limit": 3,
+    "limits": {
+     "filePageMax": 1000,
+     "savedChangesLimit": null,
+     "valueMaxChars": 2000
+    },
+    "offset": 0,
+    "previous": null,
+    "previousReason": "the estate comparison is aggregated from each document's own comparison with its most recent earlier assessment",
+    "scan": {
+     "assessedAt": "2026-09-01T05:05:00+00:00",
+     "startedAt": "2026-09-01T05:00:00+00:00",
+     "status": "done"
+    },
+    "snapshot": {
+     "builtAt": "2026-09-18T07:32:10.684640+00:00",
+     "factsDigest": "1262feb203727ddd18a5a95db2a812cb0082e8964194057d10c39e4733faa5c1",
+     "filesTotal": 8,
+     "servedFrom": "fresh",
+     "ttlSeconds": 60
+    },
+    "totals": {
+     "approvalsRecheckRequired": 0,
+     "assessed": 6,
+     "documents": 8,
+     "error": 1,
+     "findingsTotal": 7,
+     "notAssessed": 1,
+     "partial": 0,
+     "savedChangesUnverified": 0,
+     "savedChangesVerified": 1
+    }
+   }
+  },
+  {
+   "digest": "1262feb203727ddd18a5a95db2a812cb0082e8964194057d10c39e4733faa5c1",
+   "limit": 3,
+   "offset": 3,
+   "response": {
+    "accounting": {
+     "accountingReason": "at least one document has no per-finding ledger, so the scan-level resolved count cannot be stated",
+     "findingsOpen": null,
+     "findingsResolvedVerified": null,
+     "findingsTotal": 7,
+     "humanReviews": {
+      "accepted": 0,
+      "correctionRequested": 0,
+      "pending": 1,
+      "rejected": 0,
+      "stale": 0,
+      "unable": 0
+     },
+     "resolutionLedger": "none",
+     "savedChangesUnverified": 0,
+     "savedChangesVerified": 1
+    },
+    "comparison": {
+     "complete": true,
+     "notes": [
+      "Re-assessing a document inside the same scan replaces its earlier finding list, so changes within one scan are not compared.",
+      "3 current finding(s) have no detector location, so they cannot be matched one by one and are neither new nor resolved."
+     ],
+     "reason": "6 of 8 document(s) were compared finding by finding with their own most recent earlier assessment; 1 has no earlier assessment at all; 1 has an earlier assessment that did not finish or used a different rubric or scope, so it is not a baseline.",
+     "sameScan": {
+      "filesBaselineUnusable": 0,
+      "filesCompared": 0,
+      "filesNotAvailable": 8,
+      "filesNotComparable": 0,
+      "filesNotRecorded": 0,
+      "introduced": 0,
+      "persisting": 0,
+      "resolved": 0
+     },
+     "status": "compared",
+     "totals": {
+      "filesBaselineUnusable": 1,
+      "filesCompared": 6,
+      "filesNew": 1,
+      "filesNoBaseline": 1,
+      "filesNotComparable": 0,
+      "filesRenamed": 0,
+      "filesReopenedUndetermined": 6,
+      "introduced": 1,
+      "notComparable": 3,
+      "persisting": 3,
+      "reopened": null,
+      "reopenedDetermined": 0,
+      "resolved": 0
+     }
+    },
+    "complete": false,
+    "factsDigest": "1262feb203727ddd18a5a95db2a812cb0082e8964194057d10c39e4733faa5c1",
+    "factsVersion": 1,
+    "files": [
+     {
+      "approvalsRecheckRequired": 0,
+      "assessment": {
+       "state": "assessed",
+       "stateReason": "the document was assessed and every in-scope rule was evaluated"
+      },
+      "comparison": {
+       "baseline": {
+        "file": "Policies/2026/Überblick – Richtlinie.docx",
+        "generatedAt": "2026-08-01T05:05:00+00:00",
+        "runStatus": "done",
+        "scanId": "s-packets-prev",
+        "status": "uncertain"
+       },
+       "introduced": 1,
+       "notComparable": {
+        "current": 0,
+        "previous": 0
+       },
+       "persisting": 1,
+       "reason": "matched finding by finding against the assessment of 2026-08-01T05:05:00+00:00 of the same document (same source and path), under the same rubric and scope",
+       "reasonCode": "compared",
+       "renamed": false,
+       "reopened": null,
+       "resolved": 0,
+       "status": "compared"
+      },
+      "currentArtifact": {
+       "kind": "corrected",
+       "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "factsDigest": "7c5b52d6f7b9e5832b8551f76b0c6be4589d0aa0e8e2cde299c74e4c7e81991c",
+      "file": "Policies/2026/Überblick – Richtlinie.docx",
+      "findingsOpen": null,
+      "findingsResolvedVerified": null,
+      "findingsTotal": 2,
+      "humanReviews": {
+       "accepted": 0,
+       "correctionRequested": 0,
+       "pending": 1,
+       "rejected": 0,
+       "stale": 0,
+       "unable": 0
+      },
+      "resolutionLedger": "none",
+      "savedChangesComplete": true,
+      "savedChangesUnverified": 0,
+      "savedChangesVerified": 1,
+      "score": 72
+     },
+     {
+      "approvalsRecheckRequired": 0,
+      "assessment": {
+       "state": "assessed",
+       "stateReason": "the document was assessed and every in-scope rule was evaluated"
+      },
+      "comparison": {
+       "baseline": {
+        "file": "Reports/Q1 summary.pdf",
+        "generatedAt": "2026-08-01T05:05:00+00:00",
+        "runStatus": "done",
+        "scanId": "s-packets-prev",
+        "status": "uncertain"
+       },
+       "introduced": 0,
+       "notComparable": {
+        "current": 2,
+        "previous": 1
+       },
+       "persisting": 0,
+       "reason": "matched finding by finding against the assessment of 2026-08-01T05:05:00+00:00 of the same document (same source and path), under the same rubric and scope",
+       "reasonCode": "compared",
+       "renamed": false,
+       "reopened": null,
+       "resolved": 0,
+       "status": "compared"
+      },
+      "currentArtifact": {
+       "kind": "corrected",
+       "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "factsDigest": "455b04606e69e9edfc1e850df175487b3a6d93842bac43a833cd9a68d1b496e7",
+      "file": "Reports/Q1 summary.pdf",
+      "findingsOpen": 2,
+      "findingsResolvedVerified": null,
+      "findingsTotal": 2,
+      "humanReviews": {
+       "accepted": 0,
+       "correctionRequested": 0,
+       "pending": 0,
+       "rejected": 0,
+       "stale": 0,
+       "unable": 0
+      },
+      "resolutionLedger": "none",
+      "savedChangesComplete": true,
+      "savedChangesUnverified": 0,
+      "savedChangesVerified": 0,
+      "score": 55
+     },
+     {
+      "approvalsRecheckRequired": 0,
+      "assessment": {
+       "state": "error",
+       "stateReason": "the analyser did not produce a result for this document"
+      },
+      "comparison": {
+       "baseline": {
+        "file": "broken.docx",
+        "generatedAt": "2026-08-01T05:05:00+00:00",
+        "runStatus": "done",
+        "scanId": "s-packets-prev",
+        "status": "error"
+       },
+       "introduced": null,
+       "notComparable": null,
+       "persisting": null,
+       "reason": "the most recent earlier assessment of this document did not produce a result (recorded status: error), so it is not a baseline — its empty finding list would make every current finding look new",
+       "reasonCode": "baseline_error",
+       "renamed": null,
+       "reopened": null,
+       "resolved": null,
+       "status": "baseline_unusable"
+      },
+      "currentArtifact": {
+       "kind": "unknown",
+       "sha256": null
+      },
+      "factsDigest": "9406db458c9c78b94775cbc8e5e0f409c797fac88a96910f160f6ab01c12e6ad",
+      "file": "broken.docx",
+      "findingsOpen": null,
+      "findingsResolvedVerified": null,
+      "findingsTotal": 0,
+      "humanReviews": {
+       "accepted": 0,
+       "correctionRequested": 0,
+       "pending": 0,
+       "rejected": 0,
+       "stale": 0,
+       "unable": 0
+      },
+      "resolutionLedger": "none",
+      "savedChangesComplete": true,
+      "savedChangesUnverified": 0,
+      "savedChangesVerified": 0,
+      "score": null
+     }
+    ],
+    "filesTotal": 8,
+    "generatedAt": "2026-09-18T07:32:10.684640+00:00",
+    "identity": {
+     "file": null,
+     "platformVersion": "2026.9.17.9",
+     "rubricHash": "h1",
+     "scanId": "s-packets",
+     "scanScope": null,
+     "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+     "source": "local",
+     "targetLevel": "AA",
+     "targetLevelSource": "workspace_config"
+    },
+    "kind": "scan",
+    "limit": 3,
+    "limits": {
+     "filePageMax": 1000,
+     "savedChangesLimit": null,
+     "valueMaxChars": 2000
+    },
+    "offset": 3,
+    "previous": null,
+    "previousReason": "the estate comparison is aggregated from each document's own comparison with its most recent earlier assessment",
+    "scan": {
+     "assessedAt": "2026-09-01T05:05:00+00:00",
+     "startedAt": "2026-09-01T05:00:00+00:00",
+     "status": "done"
+    },
+    "snapshot": {
+     "builtAt": "2026-09-18T07:32:10.684640+00:00",
+     "factsDigest": "1262feb203727ddd18a5a95db2a812cb0082e8964194057d10c39e4733faa5c1",
+     "filesTotal": 8,
+     "servedFrom": "memo",
+     "ttlSeconds": 60
+    },
+    "totals": {
+     "approvalsRecheckRequired": 0,
+     "assessed": 6,
+     "documents": 8,
+     "error": 1,
+     "findingsTotal": 7,
+     "notAssessed": 1,
+     "partial": 0,
+     "savedChangesUnverified": 0,
+     "savedChangesVerified": 1
+    }
+   }
+  },
+  {
+   "digest": "1262feb203727ddd18a5a95db2a812cb0082e8964194057d10c39e4733faa5c1",
+   "limit": 3,
+   "offset": 6,
+   "response": {
+    "accounting": {
+     "accountingReason": "at least one document has no per-finding ledger, so the scan-level resolved count cannot be stated",
+     "findingsOpen": null,
+     "findingsResolvedVerified": null,
+     "findingsTotal": 7,
+     "humanReviews": {
+      "accepted": 0,
+      "correctionRequested": 0,
+      "pending": 1,
+      "rejected": 0,
+      "stale": 0,
+      "unable": 0
+     },
+     "resolutionLedger": "none",
+     "savedChangesUnverified": 0,
+     "savedChangesVerified": 1
+    },
+    "comparison": {
+     "complete": true,
+     "notes": [
+      "Re-assessing a document inside the same scan replaces its earlier finding list, so changes within one scan are not compared.",
+      "3 current finding(s) have no detector location, so they cannot be matched one by one and are neither new nor resolved."
+     ],
+     "reason": "6 of 8 document(s) were compared finding by finding with their own most recent earlier assessment; 1 has no earlier assessment at all; 1 has an earlier assessment that did not finish or used a different rubric or scope, so it is not a baseline.",
+     "sameScan": {
+      "filesBaselineUnusable": 0,
+      "filesCompared": 0,
+      "filesNotAvailable": 8,
+      "filesNotComparable": 0,
+      "filesNotRecorded": 0,
+      "introduced": 0,
+      "persisting": 0,
+      "resolved": 0
+     },
+     "status": "compared",
+     "totals": {
+      "filesBaselineUnusable": 1,
+      "filesCompared": 6,
+      "filesNew": 1,
+      "filesNoBaseline": 1,
+      "filesNotComparable": 0,
+      "filesRenamed": 0,
+      "filesReopenedUndetermined": 6,
+      "introduced": 1,
+      "notComparable": 3,
+      "persisting": 3,
+      "reopened": null,
+      "reopenedDetermined": 0,
+      "resolved": 0
+     }
+    },
+    "complete": false,
+    "factsDigest": "1262feb203727ddd18a5a95db2a812cb0082e8964194057d10c39e4733faa5c1",
+    "factsVersion": 1,
+    "files": [
+     {
+      "approvalsRecheckRequired": 0,
+      "assessment": {
+       "state": "not_assessed",
+       "stateReason": "this document was never assessed in this scan (recorded status: discovered)"
+      },
+      "comparison": {
+       "baseline": null,
+       "introduced": null,
+       "notComparable": null,
+       "persisting": null,
+       "reason": "no earlier assessment of this same document under the same rubric and scope is recorded",
+       "reasonCode": "no_earlier_assessment",
+       "renamed": null,
+       "reopened": null,
+       "resolved": null,
+       "status": "no_baseline"
+      },
+      "currentArtifact": {
+       "kind": "unknown",
+       "sha256": null
+      },
+      "factsDigest": "aa725c90ae3bcfeaafa520ca747e91b65cc391238092a1f5957e626b2aa8184a",
+      "file": "not-yet.pdf",
+      "findingsOpen": null,
+      "findingsResolvedVerified": null,
+      "findingsTotal": 0,
+      "humanReviews": {
+       "accepted": 0,
+       "correctionRequested": 0,
+       "pending": 0,
+       "rejected": 0,
+       "stale": 0,
+       "unable": 0
+      },
+      "resolutionLedger": "none",
+      "savedChangesComplete": true,
+      "savedChangesUnverified": 0,
+      "savedChangesVerified": 0,
+      "score": null
+     },
+     {
+      "approvalsRecheckRequired": 0,
+      "assessment": {
+       "state": "assessed",
+       "stateReason": "the document was assessed and every in-scope rule was evaluated"
+      },
+      "comparison": {
+       "baseline": {
+        "file": "reports/q1 SUMMARY.pdf",
+        "generatedAt": "2026-08-01T05:05:00+00:00",
+        "runStatus": "done",
+        "scanId": "s-packets-prev",
+        "status": "uncertain"
+       },
+       "introduced": 0,
+       "notComparable": {
+        "current": 1,
+        "previous": 1
+       },
+       "persisting": 0,
+       "reason": "matched finding by finding against the assessment of 2026-08-01T05:05:00+00:00 of the same document (same source and path), under the same rubric and scope",
+       "reasonCode": "compared",
+       "renamed": false,
+       "reopened": null,
+       "resolved": 0,
+       "status": "compared"
+      },
+      "currentArtifact": {
+       "kind": "source",
+       "sha256": "md5-q1-lower"
+      },
+      "factsDigest": "e71b1285bcabc058a7f1fa029d797c5c0508fb87a53ead1cd9bdab486e329130",
+      "file": "reports/q1 SUMMARY.pdf",
+      "findingsOpen": 1,
+      "findingsResolvedVerified": null,
+      "findingsTotal": 1,
+      "humanReviews": {
+       "accepted": 0,
+       "correctionRequested": 0,
+       "pending": 0,
+       "rejected": 0,
+       "stale": 0,
+       "unable": 0
+      },
+      "resolutionLedger": "none",
+      "savedChangesComplete": true,
+      "savedChangesUnverified": 0,
+      "savedChangesVerified": 0,
+      "score": 90
+     }
+    ],
+    "filesTotal": 8,
+    "generatedAt": "2026-09-18T07:32:10.684640+00:00",
+    "identity": {
+     "file": null,
+     "platformVersion": "2026.9.17.9",
+     "rubricHash": "h1",
+     "scanId": "s-packets",
+     "scanScope": null,
+     "scopeDigest": "367c07dfbb1f556e60bc39999155445062fb3bc0f1586d8ed62277a25a0c2391",
+     "source": "local",
+     "targetLevel": "AA",
+     "targetLevelSource": "workspace_config"
+    },
+    "kind": "scan",
+    "limit": 3,
+    "limits": {
+     "filePageMax": 1000,
+     "savedChangesLimit": null,
+     "valueMaxChars": 2000
+    },
+    "offset": 6,
+    "previous": null,
+    "previousReason": "the estate comparison is aggregated from each document's own comparison with its most recent earlier assessment",
+    "scan": {
+     "assessedAt": "2026-09-01T05:05:00+00:00",
+     "startedAt": "2026-09-01T05:00:00+00:00",
+     "status": "done"
+    },
+    "snapshot": {
+     "builtAt": "2026-09-18T07:32:10.684640+00:00",
+     "factsDigest": "1262feb203727ddd18a5a95db2a812cb0082e8964194057d10c39e4733faa5c1",
+     "filesTotal": 8,
+     "servedFrom": "memo",
+     "ttlSeconds": 60
+    },
+    "totals": {
+     "approvalsRecheckRequired": 0,
+     "assessed": 6,
+     "documents": 8,
+     "error": 1,
+     "findingsTotal": 7,
+     "notAssessed": 1,
+     "partial": 0,
+     "savedChangesUnverified": 0,
+     "savedChangesVerified": 1
+    }
+   }
+  }
+ ],
+ "scanId": "s-packets"
+}

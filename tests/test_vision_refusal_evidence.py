@@ -172,14 +172,16 @@ def test_the_cause_carries_fixed_codes_only_never_provider_or_document_text(isol
 def test_the_scheduled_block_carries_the_cause_end_to_end(isolated_store):
     """The user-visible block event, through the real `schedule`, on real seeded work."""
     from test_vision_recovery import FILE, SID, seed
-    job, _ = seed(isolated_store)
+    job, payload = seed(isolated_store)
     with run_context(isolated_store, job['payload'], job) as context:
         context.deferred.append({'reason': REFUSAL, 'kind': 'text'})
         vision_recovery.schedule(isolated_store, context, job, ['vision_timeout'])
     event = isolated_store.list_scan_events(SID)[-1]
     assert event['kind'] == 'remediate.vision_retry_blocked'
     assert event['document'] == FILE
-    assert event['detail'] == {'reason_code': 'vision_recovery_unresolved', 'cause': [REFUSAL]}
+    # item_id binds the block to its review row (internal id, not document content).
+    assert event['detail'] == {'reason_code': 'vision_recovery_unresolved', 'cause': [REFUSAL],
+                               'item_id': payload['item_id']}
 
 
 def test_a_refusal_that_already_reached_the_ledger_is_not_recorded_twice(quality_first_run):

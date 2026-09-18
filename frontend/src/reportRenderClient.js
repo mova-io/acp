@@ -2,8 +2,10 @@
 // api/routes/report_render.py → api/report_render.py).
 //
 // Why this exists: the browser PDF path (jsPDF, pdfReport.js) produced untagged PDFs with no
-// bookmarks and a WinAnsi font that silently dropped ✓ and →. Every PDF download now goes through
-// the server, which renders the same report MODEL into a tagged PDF with embedded fonts.
+// bookmarks and a WinAnsi font that silently dropped ✓ and →. Every report PDF now goes through
+// the server, which renders the same report MODEL into a tagged PDF with embedded fonts. The one
+// exception is the Overview's quarterly governance summary (pdfReport.exportGovernanceReport),
+// which is still drawn in the browser and is labelled as untagged in the menu and on its first page.
 //
 // There is deliberately NO jsPDF fallback. When the server cannot be used (SIM/demo mode, the API
 // is unreachable, or it fails with a 5xx) the report is downloaded as the accessible HTML export
@@ -77,41 +79,59 @@ async function htmlFallback(model, reason) {
   return { ok: false, fallback: 'html', message: HTML_FALLBACK_MESSAGE }
 }
 
-// Render `model` on the server and download the PDF.
-// Resolves { ok: true, filename } | { ok: false, fallback: 'html' | 'none', message, status? }.
-export async function renderReportPdf({ scanId, kind, file = null, mode = 'reviewer', model, filename = null, factsDigest = undefined } = {}) {
-  if (!model || typeof model !== 'object') return { ok: false, fallback: 'none', message: 'No report content to render.' }
-  if (!REPORT_KINDS.includes(kind)) return { ok: false, fallback: 'none', message: `Unknown report kind: ${kind}` }
-  if (!REPORT_MODES[mode]) return { ok: false, fallback: 'none', message: `Unknown report mode: ${mode}` }
-  if (!scanId) return htmlFallback(model, 'no scan id')
+export const CANCELLED_MESSAGE = 'The report was cancelled before it finished rendering; nothing was produced.'
+export const SIZE_LIMIT_HTML_MESSAGE =
+  'The report exceeds the PDF size limit. An HTML copy containing the same evidence was downloaded instead.'
+export const SCAN_TOO_LARGE_STEER =
+  'For a scan this large, use "Per-file packets (ZIP)": each document gets its own PDF, with a master index of every document.'
 
+const abortError = () => Object.assign(new Error('aborted'), { name: 'AbortError' })
+const isAbort = (e) => e?.name === 'AbortError'
+// Settle with `promise`, or reject the moment `signal` aborts — so a cancelled export stops
+// waiting even when the transport underneath does not honour the signal itself.
+function abortable(promise, signal) {
+  if (!signal) return promise
+  if (signal.aborted) return Promise.reject(abortError())
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(abortError())
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      (v) => { signal.removeEventListener('abort', onAbort); resolve(v) },
+      (e) => { signal.removeEventListener('abort', onAbort); reject(e) },
+    )
+  })
+}
+
+// One server round-trip, classified. Nothing here downloads anything:
+//   { outcome: 'pdf', blob }
+//   { outcome: 'fallback', reason, status }     — no server / unreachable / 5xx / 413
+//   { outcome: 'refused', status, message, regenerate? }
+//   { outcome: 'aborted' }
+async function renderOnServer({ scanId, kind, file, mode, model, factsDigest, signal }) {
+  if (!scanId) return { outcome: 'fallback', reason: 'no scan id', status: null }
   // The digest travels on the MODEL (identity.factsDigest) so every builder — file, scan,
   // remediation — binds its render without each caller having to remember to thread it.
   const digest = factsDigest !== undefined && factsDigest !== null ? factsDigest
     : (typeof model?.identity?.factsDigest === 'string' ? model.identity.factsDigest : null)
-
+  if (signal?.aborted) return { outcome: 'aborted' }
   let res
   try {
-    res = await postReportRender(scanId, { kind, file: file ?? null, mode, factsDigest: digest, model: { ...model, mode, kind } })
+    res = await abortable(postReportRender(scanId, { kind, file: file ?? null, mode, factsDigest: digest, model: { ...model, mode, kind } }, signal ? { signal } : undefined), signal)
   } catch (e) {
-    return htmlFallback(model, `request failed: ${e?.message || e}`)
+    if (isAbort(e) || signal?.aborted) return { outcome: 'aborted' }
+    return { outcome: 'fallback', reason: `request failed: ${e?.message || e}`, status: null }
   }
-  if (!res) return htmlFallback(model, 'demo mode has no report server')
-
+  if (!res) return { outcome: 'fallback', reason: 'demo mode has no report server', status: null }
   if (res.ok) {
-    const name = filename || reportPdfFilename({ kind, mode, scanId, file })
-    downloadBlob(await res.blob(), name)
-    return { ok: true, filename: name }
+    try { return { outcome: 'pdf', blob: await abortable(res.blob(), signal) } } catch (e) {
+      if (isAbort(e) || signal?.aborted) return { outcome: 'aborted' }
+      return { outcome: 'fallback', reason: `the PDF could not be read: ${e?.message || e}`, status: res.status }
+    }
   }
-  if (res.status === 413) {
-    // Keep the complete model accessible when the PDF's resource limit is reached.
-    // Permission refusals and stale-evidence refusals still never produce a fallback.
-    const fallback = await htmlFallback(model, 'PDF size limit exceeded')
-    if (fallback.fallback === 'html') fallback.message =
-      'The report exceeds the PDF size limit. An HTML copy containing the same evidence was downloaded instead.'
-    return fallback
-  }
-  if (res.status >= 500) return htmlFallback(model, `server answered ${res.status}`)
+  // Keep the complete model accessible when the PDF's resource limit is reached. Permission
+  // refusals and stale-evidence refusals still never produce a fallback.
+  if (res.status === 413) return { outcome: 'fallback', reason: 'PDF size limit exceeded', status: 413 }
+  if (res.status >= 500) return { outcome: 'fallback', reason: `server answered ${res.status}`, status: res.status }
   if (res.status === 401 && res.headers?.get?.('X-Acp-Auth') === 'session') {
     window.dispatchEvent(new CustomEvent('acp:session-expired', { detail: { reason: SESSION_EXPIRED } }))
   }
@@ -122,8 +142,84 @@ export async function renderReportPdf({ scanId, kind, file = null, mode = 'revie
   // refusal exists to prevent, with nothing on its face to say so.
   const quiet = res.status === 404 || res.status === 409
   return {
-    ok: false, fallback: 'none', status: res.status,
+    outcome: 'refused', status: res.status,
     ...(res.status === 409 ? { regenerate: true } : {}),
     message: detail && !quiet ? `${base} ${detail}` : base,
   }
+}
+
+const invalidRequest = ({ model, kind, mode }) => {
+  if (!model || typeof model !== 'object') return 'No report content to render.'
+  if (!REPORT_KINDS.includes(kind)) return `Unknown report kind: ${kind}`
+  if (!REPORT_MODES[mode]) return `Unknown report mode: ${mode}`
+  return null
+}
+
+export const reportHtmlFilename = ({ kind, mode, scanId, file }) =>
+  reportPdfFilename({ kind, mode, scanId, file }).replace(/\.pdf$/, '.html')
+
+/**
+ * Contract 5 — render WITHOUT downloading. For callers that assemble several reports (the per-file
+ * packet ZIP) and need the bytes, not a click.
+ *
+ * Resolves
+ *   { ok: true,  format: 'pdf', blob, filename }
+ *   { ok: false, status, message, regenerate?, fallback: 'html'|'none', aborted?,
+ *     format?: 'html', htmlBlob?, htmlFilename? }
+ *
+ * When the server cannot produce the PDF (no server, unreachable, 5xx, 413) and `htmlFallback` is
+ * on, the SAME model is returned as an accessible HTML blob, labelled `format: 'html'` — never
+ * called a PDF. A refusal (401/403/404/409/422) and a cancellation produce no document at all.
+ * `buildHtml(model)` may be supplied to control how that HTML is written (default:
+ * htmlReport.reportHtmlFromModel).
+ */
+export async function renderReportBlob({ scanId, kind, file = null, mode = 'reviewer', model, factsDigest = undefined, signal = null, htmlFallback: wantHtml = true, buildHtml = null, filename = null } = {}) {
+  const bad = invalidRequest({ model, kind, mode })
+  if (bad) return { ok: false, status: null, fallback: 'none', message: bad }
+  const got = await renderOnServer({ scanId, kind, file, mode, model, factsDigest, signal })
+  if (got.outcome === 'pdf') {
+    return { ok: true, format: 'pdf', blob: got.blob, filename: filename || reportPdfFilename({ kind, mode, scanId, file }) }
+  }
+  if (got.outcome === 'aborted') return { ok: false, status: null, aborted: true, fallback: 'none', message: CANCELLED_MESSAGE }
+  if (got.outcome === 'refused') {
+    const { outcome, ...rest } = got
+    return { ok: false, fallback: 'none', ...rest }
+  }
+  // fallback
+  const cause = got.status === 413 ? 'The report exceeds the PDF size limit' : 'The PDF service was not available'
+  const why = `${cause}, so the report was produced as accessible HTML instead of PDF.`
+  if (!wantHtml) return { ok: false, status: got.status, fallback: 'html', reason: got.reason, message: why }
+  if (signal?.aborted) return { ok: false, status: null, aborted: true, fallback: 'none', message: CANCELLED_MESSAGE }
+  try {
+    const html = buildHtml ? await buildHtml(model) : (await import('./htmlReport.js')).reportHtmlFromModel(model)
+    if (typeof html !== 'string' || !html) throw new Error('the HTML export produced nothing')
+    return {
+      ok: false, status: got.status, fallback: 'html', reason: got.reason, message: why,
+      format: 'html', htmlBlob: new Blob([html], { type: 'text/html;charset=utf-8' }),
+      htmlFilename: reportHtmlFilename({ kind, mode, scanId, file }),
+    }
+  } catch (e) {
+    return { ok: false, status: got.status, fallback: 'none', reason: got.reason, message: `${cause}, and the HTML copy could not be built either: ${e?.message || e}` }
+  }
+}
+
+// Render `model` on the server and download the PDF. Built on renderReportBlob.
+// Resolves { ok: true, filename } | { ok: false, fallback: 'html' | 'none', message, status? }.
+export async function renderReportPdf({ scanId, kind, file = null, mode = 'reviewer', model, filename = null, factsDigest = undefined, signal = null } = {}) {
+  const res = await renderReportBlob({ scanId, kind, file, mode, model, factsDigest, signal, filename, htmlFallback: false })
+  if (res.ok) {
+    downloadBlob(res.blob, res.filename)
+    return { ok: true, filename: res.filename }
+  }
+  if (res.fallback === 'html') {
+    // The single-report path keeps the established download: the HTML export of the SAME model,
+    // with the mova logo, and a message that says a PDF was NOT produced.
+    const fallback = await htmlFallback(model, res.reason || 'PDF unavailable')
+    if (fallback.fallback === 'html' && res.status === 413) {
+      fallback.message = kind === 'scan' ? `${SIZE_LIMIT_HTML_MESSAGE} ${SCAN_TOO_LARGE_STEER}` : SIZE_LIMIT_HTML_MESSAGE
+    }
+    return fallback
+  }
+  const { reason, format, htmlBlob, htmlFilename, ...rest } = res
+  return rest
 }

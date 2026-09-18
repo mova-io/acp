@@ -1,22 +1,31 @@
 import { reviewWorkBreakdown } from './reviewWorkBreakdown.js'
 import { unresolvedWorkSummary } from './unresolvedWorkSummary.js'
 import { pendingReviewRows } from './remediationCountSummary.js'
+import { matchesAutomaticReview } from './automaticReviewResponsibility.js'
+import { VISION_NOTICE_KINDS, visionNoticeOpen, visionSettles } from './remediationEventFeed.js'
 
 // Recent event evidence is narration, never a substitute for the reconciled counters.
-const VISION = new Set(['remediate.vision_retry_pending', 'remediate.vision_retry_blocked', 'remediate.vision_retry_recovered', 'remediate.delivered'])
+//
+// Image-description notices: every record that can be a notice (queued retry, genuine block,
+// recovered with images still missing or with coverage unknown) stays current until a LATER record
+// bound to the same run (and, for a replacement, the same review item) settles it. Delivery never does — see visionSettles in remediationEventFeed.js. Order is seq, never
+// arrival. Obsolete retries never open a notice (history keeps them). Missing binding keeps the
+// notice. Counted row notices (other criteria in the same file) come from `rows` and are untouched.
 export function remainingWorkStatus({ events = [], rows = [], decisions = {}, snapshot = null, automatic = false } = {}) {
-  const latest = new Map()
-  const ordered = [...events].sort((a, b) => Number(b.id) - Number(a.id))
-  for (const event of ordered) {
-    if (!event.documentKey || !VISION.has(event.kind) || latest.has(event.documentKey)) continue
-    latest.set(event.documentKey, event)
-  }
+  const bound = events.filter(event => event.documentKey && Number.isFinite(Number(event.id))
+    && (VISION_NOTICE_KINDS.has(event.kind) || event.kind === 'remediate.review_target_replaced'))
+  const current = bound.filter(event => visionNoticeOpen(event) && !bound.some(later => visionSettles(event, later)))
+    .sort((a, b) => Number(b.id) - Number(a.id))
   const notices = []
   const spendingFiles = new Set()
   const blockedCaptionFiles = new Set()
   const now = Date.parse(snapshot?.generated_at || '')
-  for (const event of latest.values()) {
+  for (const event of current) {
     if (event.kind === 'remediate.vision_retry_pending') notices.push({ key: event.key, label: 'AI retry queued', responsibility: 'ACP will retry automatically. No individual approval is needed for this retry.', tone: 'automatic' })
+    if (event.kind === 'remediate.vision_retry_recovered' && !(event.missing > 0) && event.coverageUnknown) notices.push({ key: event.key, label: 'Image description coverage not confirmed',
+      responsibility: "ACP could not confirm that every image in this document has a description draft. Check the document's images in Review before relying on it; nothing is counted as complete.", tone: 'review' })
+    if (event.kind === 'remediate.vision_retry_recovered' && event.missing > 0) notices.push({ key: event.key, label: 'Image description still needed',
+      responsibility: `${event.missing.toLocaleString()} image${event.missing === 1 ? '' : 's'} in this document still need${event.missing === 1 ? 's' : ''} a description. No usable AI draft exists for ${event.missing === 1 ? 'it' : 'them'}; provide the description in Review, or check AI activity for the generation reason before retrying.`, tone: 'review' })
     if (event.kind === 'remediate.vision_retry_blocked') {
       if (event.documentName && ['vision_permission_or_budget_blocked', 'vision_spending_reconciliation_required', 'vision_local_endpoint_required', 'vision_provider_access_denied', 'vision_budget_admission_denied', 'vision_budget_exhausted', 'vision_run_permission_unavailable', 'vision_ai_disabled_or_budget_zero', 'vision_pricing_not_verified', 'vision_provider_limit_exceeded', 'vision_provider_request_rejected'].includes(event.reasonCode)) blockedCaptionFiles.add(event.documentName)
       if (event.reasonCode === 'vision_spending_reconciliation_required') {
@@ -61,12 +70,19 @@ export function remainingWorkStatus({ events = [], rows = [], decisions = {}, sn
     ['status-checks', 'Recorded status needs checking', 'have a blocker without a confirmed failure reason. Check saved evidence; these are not automatically classified as human decisions.', 'waiting'],
     ['review', 'Your review needed', 'need a decision on an available suggestion. Auto-apply does not bypass requirements for individual judgment.', 'review'],
     ['manual', 'Manual document edit needed', 'need a person to edit or resolve the document. These do not drain through AI automatically.', 'manual'],
+    ['processing', 'Saved change awaiting its check', 'have a saved change that has not been re-checked yet. The corrected copy still has to be assessed; no further approval is needed.', 'waiting'],
   ]
   // The human population is exactly the one used by the review tab badge.
   // Status checks are a separate population, not additional human decisions.
   const humanRows = pendingReviewRows(rows, decisions, automatic)
   const humanIds = new Set(humanRows)
-  const statusRows = pendingReviewRows(rows, decisions, false).filter(row => !humanIds.has(row))
+  // Under automatic approval the status population is exactly the Status checks pill's — including
+  // a saved change awaiting its re-check, which the pill lists and the old pending-only filter did
+  // not (production: pill 2, this panel 1, for the same two tasks). Optional inspection of an
+  // already-applied change stays out, as it does from every pending count (#1888).
+  const statusRows = automatic
+    ? rows.filter(row => !humanIds.has(row) && !row.autoApplied && matchesAutomaticReview(row, 'status-check', decisions, true))
+    : pendingReviewRows(rows, decisions, false).filter(row => !humanIds.has(row))
   const humanCounts = reviewWorkBreakdown(humanRows, decisions, blockedCaptionFiles)
   const statusCounts = reviewWorkBreakdown(statusRows, decisions, blockedCaptionFiles)
   for (const [population, breakdown] of [['human', humanCounts], ['status', statusCounts]]) {

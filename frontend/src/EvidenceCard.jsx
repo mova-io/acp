@@ -5,7 +5,7 @@ import { aiProvenance, getCopilotGuidance, getFileGeometry, getFileRemediationDi
 import Thumbnail from './Thumbnail.jsx'
 import BeforeAfterEvidence from './BeforeAfterEvidence.jsx'
 import RiskChip from './RiskChip.jsx'
-import { applyOutcomeCopy, authoringScaffold, buildEvidenceCard, DESCRIBED_NOT_REPLACED, describedImageType, evidenceOf, evidenceSignals, firstProposed, groupPages, guidanceSentence, houseStyleOf, imagesOfTextException, isReviewedCropEvidence, isValueFix, leadWithIsolatedImage, primaryActionLabel, proposalsOf, reviewIntent, reviewTelemetry, thumbAlt, thumbSize, trustStates, validationChecklist, verificationLadder, whyHumanReview, whyRecommendation, whySafeToApprove } from './reviewCard.js'
+import { applyOutcomeCopy, authoringScaffold, buildEvidenceCard, DESCRIBED_NOT_REPLACED, describedImageType, evidenceOf, evidenceSignals, firstProposed, groupPages, guidanceSentence, houseStyleOf, imagesOfTextException, isReviewedCropEvidence, isValueFix, leadWithIsolatedImage, pageOf, primaryActionLabel, proposalsOf, reviewIntent, reviewTelemetry, thumbAlt, thumbSize, trustStates, validationChecklist, verificationLadder, whyHumanReview, whyRecommendation, whySafeToApprove } from './reviewCard.js'
 import ProposalThumb, { isSafeThumb } from './ProposalThumb.jsx'
 import ProposalEditors, { seedValues } from './ProposalEditors.jsx'
 import CaptionEditor from './CaptionEditor.jsx'
@@ -172,14 +172,6 @@ export default function EvidenceCard({ item, onAct, onResolved, traceUrl = null,
   // through each one, so a reviewer verifies every finding in place, not just the first.
   const [heroIdx, setHeroIdx] = useState(0)
   const [sourceLink, setSourceLink] = useState(null)   // {url, label} or null
-  useEffect(() => {
-    setSourceLink(null)
-    if (!item?.scan_id || !item?.file) return
-    let live = true
-    getSourceLink(item.scan_id, item.file, item.page || 1)
-      .then((d) => { if (live && d?.url) setSourceLink(d) })
-    return () => { live = false }
-  }, [item?.scan_id, item?.file, item?.page])
   // Page heatmap (#121 / vision §17): which pages/slides the flagged objects live on, from
   // MEASURED geometry only (the same bbox lookup the hero overlay uses — never guessed). A
   // multi-image finding renders a clickable page strip; a page the geometry can't attribute
@@ -199,6 +191,21 @@ export default function EvidenceCard({ item, onAct, onResolved, traceUrl = null,
     return () => { live = false }
   }, [item?.scan_id, item?.file, locatorSig]) // eslint-disable-line react-hooks/exhaustive-deps
   const pageStrip = useMemo(() => groupPages(pageMap), [pageMap])
+  // The page the HERO is on, following the pager: the measured page of the current image, else
+  // the item's recorded page when there is only one image. With several images and no measured
+  // page for this one, it is unknown — null, never the first image's page and never 1.
+  const heroPage = pageMap[heroIdx] ?? (instances.length <= 1 ? pageOf(item) : null)
+  // "Open in SharePoint" for the page the reviewer is LOOKING at. It used to be fetched once with
+  // `item.page || 1`, so paging to image 3 on slide 7 still opened slide 1. Unknown page → the
+  // link opens the document without a slide anchor (api.getSourceLink(…, null)).
+  useEffect(() => {
+    setSourceLink(null)
+    if (!item?.scan_id || !item?.file) return
+    let live = true
+    getSourceLink(item.scan_id, item.file, heroPage)
+      .then((d) => { if (live && d?.url) setSourceLink(d) })
+    return () => { live = false }
+  }, [item?.scan_id, item?.file, heroPage])
   const shownAt = useRef(Date.now())               // reviewer-time metric starts when the card mounts
   // The value the AI actually proposed — reviewTelemetry diffs the human's final value against
   // this to derive the `edited` calibration signal, so it must be the proposal, not the draft.
@@ -810,8 +817,9 @@ export default function EvidenceCard({ item, onAct, onResolved, traceUrl = null,
 
 
       {/* Large page preview (ADR 0018) — the visual "where": the finding's page rendered big, the
-          hero of the card (Principle 2). Self-hides when the backend can't rasterize (Thumbnail
-          returns null): PDF always; Office (pptx/docx/xlsx) once LibreOffice is in the image. The
+          hero of the card (Principle 2). When the backend can't rasterize, or no page is recorded
+          for the image in view, Thumbnail says "Preview unavailable" and why — it never falls back
+          to page 1: PDF always; Office (pptx/docx/xlsx) once LibreOffice is in the image. The
           bounding-box overlay pinpointing the object is the next slice (needs per-shape geometry). */}
       {card.scanId && card.file && (
         <div className="evcard-hero" style={{ margin: '0 0 12px' }}>
@@ -849,7 +857,7 @@ export default function EvidenceCard({ item, onAct, onResolved, traceUrl = null,
               <figcaption className="muted">The flagged image, shown on its own (isolated from the sheet)</figcaption>
             </figure>
           ) : (
-            <Thumbnail scanId={card.scanId} file={card.file} page={card.page || 1} locator={heroLocator} maxHeight={360}
+            <Thumbnail scanId={card.scanId} file={card.file} page={heroPage} locator={heroLocator} maxHeight={360}
                        kindLabel={imgKind?.label?.toLowerCase() || null} />
           )}
           {sourceLink?.url && (

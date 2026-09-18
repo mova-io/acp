@@ -77,6 +77,62 @@ describe('ReportModeMenu', () => {
     expect(run).toHaveBeenCalledTimes(1)
   })
 
+  it('each mode states its own purpose, not a length', async () => {
+    const c = await mount({ formats: [{ key: 'pdf', label: 'PDF', run: vi.fn() }], modeNotes: { full: 'Large scan: use per-file packets.' } })
+    const rows = [...c.querySelectorAll('.reportmode-row')].map((r) => r.textContent)
+    expect(rows[0]).toMatch(/For a decision: one page/)
+    expect(rows[1]).toMatch(/For the person confirming the work: each change to confirm and each remaining action/)
+    expect(rows[2]).toMatch(/For audit: every recorded finding, change and decision, with no caps/)
+    expect(rows[2]).toMatch(/Large scan: use per-file packets\./)
+    expect(rows[0]).not.toMatch(/Large scan/)
+  })
+
+  it('a cancellable format gets a signal, live progress text and a Cancel button', async () => {
+    let seen
+    const run = vi.fn((mode, ctx) => new Promise((resolve) => {
+      seen = ctx
+      ctx.onProgress({ n: 3 })
+      ctx.signal.addEventListener('abort', () => resolve({ ok: false, cancelled: true, message: '3 of 9 done; 6 not.' }))
+    }))
+    const c = await mount({ formats: [{ key: 'zip', label: 'ZIP', cancellable: true, progressText: (p) => `${p.n} of 9 done`, run }] })
+    await act(async () => { btn(c, 'Full evidence — ZIP').click() })
+    await flush()
+    expect(run).toHaveBeenCalledWith('full', expect.objectContaining({ signal: expect.any(AbortSignal) }))
+    expect(c.querySelector('[role="status"]').textContent).toBe('3 of 9 done')
+    const cancel = c.querySelector('button.reportmode-cancel')
+    await act(async () => { cancel.click() })
+    await flush()
+    expect(seen.signal.aborted).toBe(true)
+    expect(c.querySelector('[role="alert"]').textContent).toBe('Full evidence (ZIP) was cancelled. 3 of 9 done; 6 not.')
+    expect(c.querySelector('button.reportmode-cancel')).toBeNull()
+  })
+
+  it('an incomplete export is neither "generated" nor "not generated", and its extra downloads are offered', async () => {
+    const run = async () => ({ ok: false, incomplete: true, message: 'Exported 7 of 8.', downloads: [{ label: 'Master index (CSV)', filename: 'i.csv', blob: new Blob(['x']) }] })
+    const c = await mount({ formats: [{ key: 'zip', label: 'ZIP', cancellable: true, run }] })
+    await act(async () => { btn(c, 'Summary — ZIP').click() })
+    await flush()
+    expect(c.querySelector('[role="alert"]').textContent).toBe('Summary (ZIP) was downloaded but is INCOMPLETE. Exported 7 of 8.')
+    expect(c.querySelector('[role="status"]').textContent).toBe('')
+    expect([...c.querySelectorAll('.reportmode-downloads button')].map((b) => b.textContent)).toEqual(['Download Master index (CSV)'])
+  })
+
+  it('a snapshot-only export (every packet made, final check not current) is not called current or incomplete', async () => {
+    const run = async () => ({ ok: false, incomplete: true, snapshotOnly: true, message: 'All 8 documents exported, but this archive is a SNAPSHOT ONLY (evidence changed during export).', downloads: [] })
+    const c = await mount({ formats: [{ key: 'zip', label: 'ZIP', cancellable: true, run }] })
+    await act(async () => { btn(c, 'Summary — ZIP').click() })
+    await flush()
+    const text = c.querySelector('[role="alert"]').textContent
+    expect(text).toBe('Summary (ZIP) was downloaded as a SNAPSHOT, not verified current. All 8 documents exported, but this archive is a SNAPSHOT ONLY (evidence changed during export).')
+    expect(c.querySelector('[role="status"]').textContent).toBe('')
+  })
+
+  it('a format can be limited to some modes', async () => {
+    const c = await mount({ formats: [{ key: 'pdf', label: 'PDF', run: vi.fn() }, { key: 'zip', label: 'ZIP', modes: ['full'], run: vi.fn() }] })
+    expect(btn(c, 'Full evidence — ZIP')).toBeTruthy()
+    expect(btn(c, 'Summary — ZIP')).toBeNull()
+  })
+
   it('inline variant renders a labeled group without its own disclosure', async () => {
     const c = await mount({ inline: true, label: 'Scan report', formats: [{ key: 'pdf', label: 'PDF', run: vi.fn() }] })
     expect(c.querySelector('details')).toBeNull()

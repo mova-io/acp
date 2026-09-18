@@ -275,22 +275,84 @@ def _color(value) -> str | None:
 
 
 def safe_href(href, base_url: str | None = None) -> str | None:
-    """An absolute https URL the PDF may link to, or None (the renderer prints text only)."""
+    """An absolute https URL the PDF may link to, or None (the renderer prints text only).
+
+    An app-relative href is absolutized against `base_url` — which must itself be a trusted app
+    origin (see trusted_app_origin); with none, the relative path is NOT linked, because a
+    relative link in a downloaded PDF resolves against the reader's own disk."""
     if not isinstance(href, str) or not href or len(href) > 2048:
         return None
     if re.search(r"[\s<>\"'\\\x00-\x1f]", href):
         return None
     if href.startswith("/") and not href.startswith("//"):
-        if not base_url:
+        base = trusted_app_origin(base_url)
+        if not base:
             return None
-        href = base_url.rstrip("/") + href
+        href = base + href
     try:
         parts = urlsplit(href)
     except ValueError:
         return None
-    if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
+    if parts.username or parts.password or not parts.hostname:
+        return None
+    if parts.scheme != "https" and not (parts.scheme == "http" and _is_loopback(parts.hostname)):
         return None
     return href
+
+
+_LOOPBACK = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _is_loopback(host) -> bool:
+    return isinstance(host, str) and host.lower() in _LOOPBACK
+
+
+def trusted_app_origin(*candidates) -> str | None:
+    """The FIRST candidate that is a usable ACP app origin, normalised without a trailing slash.
+
+    Candidates are, in order, the configured `ACP_PUBLIC_URL` and the request's own origin (the
+    render route derives that from the request it is answering — never from the model). A
+    candidate qualifies when it is https (or http on a loopback host, for local development), has
+    a host, carries no credentials, query or fragment. Anything else yields None, and the renderer
+    then prints locations as text rather than inventing a link."""
+    for cand in candidates:
+        if not isinstance(cand, str) or not cand or len(cand) > 512:
+            continue
+        if re.search(r"[\s<>\"'\\\x00-\x1f]", cand):
+            continue
+        try:
+            parts = urlsplit(cand)
+        except ValueError:
+            continue
+        if not parts.hostname or parts.username or parts.password or parts.query or parts.fragment:
+            continue
+        if parts.scheme != "https" and not (parts.scheme == "http" and _is_loopback(parts.hostname)):
+            continue
+        return f"{parts.scheme}://{parts.netloc}{parts.path}".rstrip("/")
+    return None
+
+
+def safe_app_href(href, base_url: str | None) -> str | None:
+    """A link to a place INSIDE ACP (a finding, a change): absolute, and on the trusted app origin.
+
+    Report models carry these as RELATIVE hrefs (`/?view=evidence&…`). They are absolutized
+    against the trusted origin; an ABSOLUTE href is accepted only when it already points at that
+    same origin. A model cannot promote some other host into an "open in ACP" link — that link
+    would carry the reader, and anything they type, to a site that is not ACP."""
+    base = trusted_app_origin(base_url)
+    if not base or not isinstance(href, str):
+        return None
+    if href.startswith("/") and not href.startswith("//"):
+        return safe_href(href, base)
+    url = safe_href(href, None)
+    if not url:
+        return None
+    b, u = urlsplit(base), urlsplit(url)
+    if (u.scheme, u.netloc.lower()) != (b.scheme, b.netloc.lower()):
+        return None
+    if b.path and not (u.path == b.path or u.path.startswith(b.path + "/")):
+        return None
+    return url
 
 
 def css_string(text: str) -> str:
@@ -406,6 +468,10 @@ table { width: 100%%; border-collapse: collapse; table-layout: fixed; margin: 4p
    WeasyPrint's tagger then meets a table wrapper box holding no table and raises
    "Table wrapper without a table", which fails the whole render. Keep them together. */
 caption { text-align: left; font-weight: 700; color: #4B3460; padding-bottom: 3pt; break-after: avoid; }
+/* Eight or more columns (the per-document index): smaller type in that table only, and words
+   hyphenated at syllables rather than cut at an arbitrary letter. Body text is untouched. */
+table.wide { font-size: 7.2pt; }
+table.wide th, table.wide td { padding: 2pt 2.6pt; overflow-wrap: break-word; hyphens: auto; }
 thead { display: table-header-group; }
 tr { break-inside: avoid; }
 th, td { text-align: left; vertical-align: top; padding: 3.2pt 5pt; border-bottom: 0.6pt solid #E4E0E8; }
@@ -515,6 +581,7 @@ SUMMARY_DROPPED_LABEL = {
     "beforeAfter": "before/after records", "appendixTable": "evidence appendix tables",
     "table": "detail tables", "image": "document previews", "donut": "charts",
     "barChart": "charts", "metricGrid": "metric tiles", "checklist": "checklists",
+    "comparison": "comparison with the previous assessment",
 }
 # Sections this renderer removes in summary mode even when the model still contains them, so a
 # client that has not been updated cannot turn the decision page back into a two-page document.
@@ -580,8 +647,19 @@ def summary_blocks(blocks: list, trim: int = 0) -> tuple[list, list[str]]:
         kept.append(block)
     # Trailing prose is the model's own footer (generation stamp, printed-copy notice); the page
     # footer already carries the stamp and the summary is not where the notice earns its space.
-    while kept and block_kind(kept[-1]) in ("text", "gap", "pageBreak", "link"):
+    # It stops at BOLD text: that is a decision line, not a footer — the scan report's comparison
+    # headline ("N newly reported since the previous assessment") is the last section of its
+    # summary, and this loop used to strip it on every scan Summary, at every trim level.
+    while kept and block_kind(kept[-1]) in ("text", "gap", "pageBreak", "link") and not (
+            block_kind(kept[-1]) == "text" and (kept[-1].get("o") or {}).get("bold")):
         kept.pop()
+    # Under pressure the comparison's own heading goes: the summary callout opens with "Since the
+    # previous assessment", so the heading says it twice, and one heading's height is what stood
+    # between a real summary and its one page.
+    if trim >= 2:
+        kept = [b for i, b in enumerate(kept)
+                if not (block_kind(b) == "heading" and i + 1 < len(kept)
+                        and block_kind(kept[i + 1]) == "comparison")]
     # A heading with nothing under it is noise. "Nothing under it" means the next block is a
     # heading at the same or a higher level (a subheading still counts as content).
     def _level(block) -> int | None:
@@ -647,11 +725,15 @@ class _Renderer:
         self.ids.add(candidate)
         return candidate
 
-    def _link(self, text, href) -> str:
-        url = safe_href(href, self.base_url)
+    def _link(self, text, href, *, app: bool = False) -> str:
+        url = safe_app_href(href, self.base_url) if app else safe_href(href, self.base_url)
         label = _t(text) or _t(href)
         if url:
             return f'<a href="{escape(url, quote=True)}">{label}</a>'
+        if app:
+            # An in-app location with no trusted origin to anchor it: the location text only. A
+            # raw "/?view=…" query string printed beside it helps nobody holding a paper copy.
+            return _t(text) or escape(LOCATION_NOT_RECORDED)
         if isinstance(href, str) and href.startswith("/") and not href.startswith("//") and label != _t(href):
             return f"{label} (in ACP: {_t(href)})"
         return label
@@ -861,13 +943,22 @@ class _Renderer:
         rows = [r for r in _list(b.get("rows")) if isinstance(r, list)]
         widths = [w for w in _list(b.get("widths")) if isinstance(w, (int, float)) and w > 0]
         cols = ""
+        wide = len(headers) >= WIDE_TABLE_COLUMNS
         if widths and len(widths) == len(headers) and sum(widths) > 0:
             total = sum(widths)
             cols = "<colgroup>" + "".join(f'<col style="width:{100 * w / total:.2f}%">' for w in widths) + "</colgroup>"
+        elif wide:
+            # A per-document index row starts with a path; equal columns gave it 9% of the width
+            # and broke every name one letter per line (PDF QA, scan Full evidence).
+            rest = (100 - WIDE_FIRST_COLUMN_PCT) / (len(headers) - 1)
+            cols = ("<colgroup>" + f'<col style="width:{WIDE_FIRST_COLUMN_PCT}%">'
+                    + "".join(f'<col style="width:{rest:.2f}%">' for _ in headers[1:]) + "</colgroup>")
+        if wide:
+            extra_class = f"{extra_class} wide".strip()
         head = "".join(f'<th scope="col">{_t(h) or "<span class=muted>(unlabelled)</span>"}</th>' for h in headers)
         body = []
         for r in rows:
-            cells = "".join(f"<td>{_t(c)}</td>" for c in r)
+            cells = "".join(f"<td>{self._cell_html(c)}</td>" for c in r)
             body.append(f"<tr>{cells}</tr>")
         if not body:
             # NOT colspan. WeasyPrint's tagger does not write /ColSpan into the structure tree, so
@@ -893,11 +984,22 @@ class _Renderer:
         note = ""
         if b.get("complete") is not True:
             total = b.get("totalRecords")
-            total_txt = f"{total:,}" if isinstance(total, int) else "an unknown number of"
-            limit = _s(b.get("sourceLimit")) or _s(b.get("limitReason")) or _s(b.get("note")) \
-                or "the records the source returned to this report"
-            note = (f'<p class="partial">Partial: {shown:,} of {total_txt} records '
-                    f"(source limited to {escape(limit)}).</p>")
+            # `limitNote` is the key every frontend builder writes (reportModel.js, scanReport.js).
+            # Reading only the older names printed a generic reason and lost the real one.
+            reason = (_s(b.get("limitNote")) or _s(b.get("sourceLimit"))
+                      or _s(b.get("limitReason")) or _s(b.get("note")))
+            known_total = isinstance(total, int) and not isinstance(total, bool)
+            if known_total and total <= shown:
+                # Every COUNTED record is printed, yet the set is marked incomplete — the count
+                # itself is what is limited. "Partial: 3 of 3" would contradict itself.
+                note = (f'<p class="partial">Incomplete record set: all {shown:,} counted records '
+                        "are shown, but the source marks this set as incomplete. Limit: "
+                        f"{escape(reason or REASON_NOT_RECORDED)}.</p>")
+            else:
+                total_txt = f"{total:,}" if known_total else "an unknown number of"
+                limit = reason or "the records the source returned to this report"
+                note = (f'<p class="partial">Partial: {shown:,} of {total_txt} records '
+                        f"(source limited to {escape(limit)}).</p>")
         stable = f'<p class="muted">Record set: {_t(b.get("id"))}</p>' if _s(b.get("id")) else ""
         return note + self._table(b, "appendix", anchor) + stable
 
@@ -964,10 +1066,25 @@ class _Renderer:
                          + "</li>")
         return f'<ol class="stages">{"".join(items)}</ol>' if items else ""
 
+    def _cell_html(self, cell) -> str:
+        """A table cell: text, or `{text, href}` (scanReport.docCell — a document's evidence view).
+
+        The href is an APP link, so it goes through safe_app_href: absolute against the trusted
+        origin, or the text alone. A cell never becomes a link to another host.
+        """
+        if isinstance(cell, dict) and cell.get("href"):
+            return self._link(cell.get("text"), cell.get("href"), app=True)
+        return _t(cell)
+
     def _location_html(self, location) -> str:
         text = _location_text(location)
         href = location.get("href") if isinstance(location, dict) else None
-        return self._link(text, href) if href else escape(text)
+        if href and text == LOCATION_NOT_RECORDED:
+            # A record with no recorded place still has a record in ACP (contract 2). Linking the
+            # words "Location not recorded" reads as a link TO a location; say what the link is.
+            link = self._link("open this record in ACP", href, app=True)
+            return escape(text) + (f" · {link}" if "<a " in link else "")
+        return self._link(text, href, app=True) if href else escape(text)
 
     def _response(self, options, notice, title="Your response") -> str:
         opts = [o for o in _list(options) if _s(o)] or list(DEFAULT_RESPONSE_OPTIONS)
@@ -1161,8 +1278,42 @@ class _Renderer:
                 + (f'<p class="muted">Finding id: {_t(b.get("id"))}</p>' if _s(b.get("id")) else "")
                 + "</section>")
 
+    @staticmethod
+    def _comparison_counts(b) -> list[str]:
+        """'1 newly reported', … — counts only, for the one-page summary."""
+        totals = b.get("totals") if isinstance(b.get("totals"), dict) else None
+        src = totals if totals is not None else b
+        parts = []
+        for key, label in (("introduced", "newly reported"), ("reopened", "reported again after being resolved"),
+                           ("resolved", "no longer reported"), ("persisting", "still reported")):
+            value = src.get(key)
+            n = len(value) if isinstance(value, list) else value if isinstance(value, int) and not isinstance(value, bool) else None
+            if n is None and key == "reopened":
+                continue                      # not classified: say nothing rather than "0"
+            parts.append(f"{n:,} {label}" if n is not None else f"{label}: {NOT_RECORDED.lower()}")
+        nc = src.get("notComparable")
+        if isinstance(nc, dict) and (nc.get("current") or nc.get("previous")):
+            parts.append(f"{_s(nc.get('current')) or '0'} now and {_s(nc.get('previous')) or '0'} before not comparable")
+        elif isinstance(nc, int) and not isinstance(nc, bool) and nc:
+            parts.append(f"{nc:,} not comparable")
+        return parts
+
     def b_comparison(self, b):
         prev = b.get("previous") if isinstance(b.get("previous"), dict) else None
+        if self.mode == "summary":
+            # The decision page carries the COUNTS; the finding-by-finding lists are the Reviewer
+            # packet's job. Measured: the lists pushed a real one-page summary onto a second page.
+            if b.get("status") != "compared" and not isinstance(b.get("totals"), dict):
+                return (f'<div class="callout"><p><strong>Change since the previous assessment: '
+                        f'Unknown.</strong> {_t(b.get("reason"))}</p></div>')
+            counts = "; ".join(self._comparison_counts(b))
+            stamp = _s(prev.get("generatedAt")) if prev else None
+            when = f" ({escape(stamp[:10])})" if stamp and re.match(r"\d{4}-\d{2}-\d{2}", stamp) else \
+                (f" ({_t(stamp)})" if stamp else "")
+            if "finding-by-finding comparison with the previous assessment" not in self.dropped:
+                self.dropped.append("finding-by-finding comparison with the previous assessment")
+            return (f'<div class="callout"><p><strong>Since the previous assessment{when}:</strong> '
+                    f'{escape(counts)}.</p></div>')
         out = ['<div class="callout">']
         if b.get("status") != "compared":
             out.append(f'<p><strong>Change since the previous report: Unknown.</strong> {_t(b.get("reason"))}</p>')
@@ -1172,9 +1323,28 @@ class _Renderer:
             out.append(f'<p class="small">Previous: scan {_nr(prev.get("scanId"))} · '
                        f'{_nr(prev.get("generatedAt"))} · SHA-256 {_nr(prev.get("sha256"))}</p>')
         out.append("</div>")
-        if b.get("status") == "compared":
+        totals = b.get("totals") if isinstance(b.get("totals"), dict) else None
+        if totals is not None or b.get("status") == "compared":
             persisting = b.get("persisting")
-            for key, label in (("resolved", "No longer reported"), ("introduced", "Newly reported")):
+            if totals is not None:
+                # Estate level: counts across documents, never lists that would run to thousands.
+                rows = [("Newly reported", "introduced"), ("Reported again after being resolved", "reopened"),
+                        ("No longer reported", "resolved"), ("Still reported", "persisting"),
+                        ("Not comparable (no detector location)", "notComparable"),
+                        ("Documents compared", "filesCompared"), ("Documents with no earlier assessment", "filesNoBaseline"),
+                        ("Documents whose earlier assessment is not usable", "filesBaselineUnusable"),
+                        ("Documents new in this scan", "filesNew")]
+                out.append('<table><caption>Change since the previous assessment, across documents</caption>'
+                           '<thead><tr><th scope="col">Measure</th><th scope="col" style="width:20%">Count</th></tr></thead><tbody>'
+                           + "".join(f'<tr><th scope="row">{escape(label)}</th><td>{_nr(totals.get(key))}</td></tr>'
+                                     for label, key in rows if key in totals)
+                           + "</tbody></table>")
+                return "".join(out)
+            lists = [("resolved", "No longer reported"), ("introduced", "Newly reported")]
+            # `reopened` is null when the server did not classify it, and a list when it did.
+            if isinstance(b.get("reopened"), list):
+                lists.append(("reopened", "Reported again after being resolved"))
+            for key, label in lists:
                 items = [i for i in _list(b.get(key)) if isinstance(i, dict)]
                 out.append(f'<p class="label">{label}: {len(items)}</p>')
                 if items:
@@ -1182,6 +1352,10 @@ class _Renderer:
                         f'<li>{_t(i.get("title"))} · {escape(_location_text(i.get("location")))}'
                         f' <span class="muted">({_t(i.get("id"))})</span></li>' for i in items) + "</ul>")
             out.append(f'<p class="label">Still reported: {_nr(persisting)}</p>')
+            nc = b.get("notComparable") if isinstance(b.get("notComparable"), dict) else None
+            if nc and (nc.get("current") or nc.get("previous")):
+                out.append(f'<p class="small">Not comparable — no detector location, so counted as neither new '
+                           f'nor resolved: {_nr(nc.get("current"))} now, {_nr(nc.get("previous"))} before.</p>')
         return "".join(out)
 
 
@@ -1241,7 +1415,9 @@ def _fetcher(url, *args, **kwargs):
     raise ValueError("the report renderer loads only embedded PNG images and bundled fonts")
 
 
-SUMMARY_TRIM_LEVELS = 3
+WIDE_TABLE_COLUMNS = 8
+WIDE_FIRST_COLUMN_PCT = 20
+SUMMARY_TRIM_LEVELS = 4          # 0..3: trim 3 (drop the comparison) was unreachable at 3
 
 
 def render_pdf(model: dict, identity: dict | None = None, mode: str = "full",

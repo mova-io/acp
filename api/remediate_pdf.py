@@ -104,7 +104,22 @@ def _colours_text(ops, idx: int, in_text: bool) -> bool:
     return False
 
 
-def _fix_pdf_text_contrast(pdf) -> int:
+def _known_page(value) -> int | None:
+    """A real one-based page number, or None. `bool` is an int in Python and is refused."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def _single_page(pages) -> int | None:
+    """The page an aggregate edit touched, when it touched exactly one; None otherwise.
+
+    Several of these fixers write one diff record for a whole pass ("3 run(s) rewritten").
+    A record that spans pages has no single page, and picking the first would locate the
+    other pages' edits wrongly — so a multi-page pass records no page at all."""
+    distinct = {p for p in (pages or ()) if _known_page(p)}
+    return next(iter(distinct)) if len(distinct) == 1 else None
+
+
+def _fix_pdf_text_contrast(pdf, *, pages: list | None = None) -> int:
     """Recolour failing TEXT fill colours in every page's content stream so the document's
     text meets the contrast floors (WCAG 1.4.3/1.4.6). Deterministic content-stream rewrite
     via pikepdf, gated on `office_structure.pdf_contrast_recolor_plan`: a colour moves only
@@ -113,7 +128,10 @@ def _fix_pdf_text_contrast(pdf) -> int:
     dark cover, which already passes at 21:1, is left alone. Two guards, both required: the
     plan says WHICH colour and WHAT to, `_colours_text` says the operator colours TEXT, so
     shapes, backgrounds and images are never altered. Anything unresolved is left untouched
-    rather than guessed at. Returns the number of colour operations recoloured."""
+    rather than guessed at. Returns the number of colour operations recoloured.
+
+    `pages`, when given, receives the one-based number of every page whose content stream was
+    actually rewritten — not every page the plan named, since a page can fail to rewrite."""
     import io
     import pikepdf
     import office_structure as _os
@@ -166,6 +184,8 @@ def _fix_pdf_text_contrast(pdf) -> int:
                 page.Contents = pdf.make_stream(pikepdf.unparse_content_stream(
                     [(operands, operator) for operands, operator in ops]))
                 changed_total += changed
+                if pages is not None:
+                    pages.append(page_index + 1)
             except Exception:
                 continue                          # one unwritable page never sinks the rest
     return changed_total
@@ -346,9 +366,14 @@ def remediate_pdf(path: Path, *, lang: str = "en", ai_enabled: bool = True,
       fixed_path — Path to the remediated PDF, or None if nothing was applied.
       applied/skipped — human-readable change descriptions.
     """
-    def _rec(rule_id, before, after, note=""):
+    def _rec(rule_id, before, after, note="", *, page=None):
+        # `page` only when the edited object's real page is known (see _single_page). The key is
+        # absent otherwise: document-level edits (catalog /Lang, /Title, the outline) have no page.
         if diffs is not None:
-            diffs.append({"rule_id": rule_id, "before": before, "after": after, "note": note})
+            entry = {"rule_id": rule_id, "before": before, "after": after, "note": note}
+            if _known_page(page):
+                entry["page"] = page
+            diffs.append(entry)
     from scanner import WP  # vendored worker-python root (engine + fixers)
     sys.path.insert(0, str(WP))
     import pikepdf
@@ -451,8 +476,10 @@ def remediate_pdf(path: Path, *, lang: str = "en", ai_enabled: bool = True,
         try:
             # One recolour pass satisfies both contrast criteria, so it runs when EITHER is in
             # scope — excluding only the AAA band must not switch off the AA fix.
-            n_recoloured = (_fix_pdf_text_contrast(pdf)
+            recoloured_pages: list = []
+            n_recoloured = (_fix_pdf_text_contrast(pdf, pages=recoloured_pages)
                             if (_sc_ok(in_scope, "1.4.3") or _sc_ok(in_scope, "1.4.6")) else 0)
+            recoloured_page = _single_page(recoloured_pages)
             if n_recoloured:
                 applied.append(f"Recoloured {n_recoloured} low-contrast text colour(s) to meet "
                                "the contrast floors · 1.4.3")
@@ -464,11 +491,13 @@ def remediate_pdf(path: Path, *, lang: str = "en", ai_enabled: bool = True,
                 if _sc_ok(in_scope, "1.4.3"):
                     _rec("1.4.3", "text colour fails 4.5:1 against the background behind it",
                          "moved away from that background, hue preserved",
-                         f"{n_recoloured} fill-colour run(s) rewritten in the content streams")
+                         f"{n_recoloured} fill-colour run(s) rewritten in the content streams",
+                         page=recoloured_page)
                 if _sc_ok(in_scope, "1.4.6"):
                     _rec("1.4.6", "text colour below the enhanced (7:1) contrast band",
                          "cleared by the same recolouring pass",
-                         "one recolour clears both the AA and AAA contrast checks")
+                         "one recolour clears both the AA and AAA contrast checks",
+                         page=recoloured_page)
         except Exception:
             skipped.append("contrast: could not rewrite content streams · 1.4.3")
         # 2.4.1 bypass blocks — deterministically build a bookmark outline from the document's
@@ -491,20 +520,23 @@ def remediate_pdf(path: Path, *, lang: str = "en", ai_enabled: bool = True,
         try:
             from office_structure import _pdf_page_has_widget
             n_tabs = 0
+            tab_pages: list = []
             if (_sc_ok(in_scope, "2.4.3")
                     and "/AcroForm" in pdf.Root and "/Fields" in pdf.Root["/AcroForm"]):
-                for page in pdf.pages:
+                for page_number, page in enumerate(pdf.pages, start=1):
                     if not _pdf_page_has_widget(page, pikepdf):
                         continue
                     tabs = page.obj.get("/Tabs")
                     if tabs is None or str(tabs) != "/S":
                         page.obj["/Tabs"] = pikepdf.Name("/S")
                         n_tabs += 1
+                        tab_pages.append(page_number)
             if n_tabs:
                 applied.append(f"Set /Tabs to structure order on {n_tabs} page(s) with form "
                                "fields · 2.4.3")
                 _rec("2.4.3", "(/Tabs missing or not /S — tab order may not follow reading order)",
-                     "/Tabs = /S", f"{n_tabs} page(s) now tab in structure (reading) order")
+                     "/Tabs = /S", f"{n_tabs} page(s) now tab in structure (reading) order",
+                     page=_single_page(tab_pages))
         except Exception:
             skipped.append("focus order: could not set /Tabs · 2.4.3")
         # Exact existing tags can be repaired without rebuilding page content. The
@@ -758,9 +790,13 @@ def apply_pdf_field_name(data: bytes, values: dict) -> tuple[bytes, list[dict], 
         try:
             prev = str(fld.get("/TU", "") or "").strip()
             fld["/TU"] = pikepdf.String(value)
-            applied.append({"locator": locator, "rule_id": "SC_4_1_2", "value": value,
-                            "before": prev or "(form field had no accessible name)",
-                            "after": value})
+            row = {"locator": locator, "rule_id": "SC_4_1_2", "value": value,
+                   "before": prev or "(form field had no accessible name)",
+                   "after": value}
+            page = _known_page(_field_page(fld, pdf))
+            if page:
+                row["page"] = page              # the field's own /P, not the locator text
+            applied.append(row)
         except Exception:
             unresolved.append(locator)
     if not applied:
@@ -834,8 +870,12 @@ def apply_pdf_figure_alt(data: bytes, values: dict) -> tuple[bytes, list[dict], 
         try:
             prev = _fig_alt(fig)
             fig["/Alt"] = pikepdf.String(value)
-            applied.append({"locator": locator, "rule_id": "SC_1_1_1", "value": value,
-                            "before": prev or "(figure had no alt text)", "after": value})
+            row = {"locator": locator, "rule_id": "SC_1_1_1", "value": value,
+                   "before": prev or "(figure had no alt text)", "after": value}
+            page = _known_page(_resolve_page_number(fig, pdf))
+            if page:
+                row["page"] = page              # the figure's own /Pg, not the locator text
+            applied.append(row)
         except Exception:
             unresolved.append(locator)
     if not applied:

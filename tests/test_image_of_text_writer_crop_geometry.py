@@ -282,7 +282,7 @@ def test_the_production_shape_now_writes_and_verifies_through_the_apply_job(
     monkeypatch.setitem(sys.modules, 'blob', blob)
     handlers._apply_approved_values({'scan_id': lane.SID, 'file': lane.FILE}, {})
 
-    details = [d['detail'] for d in store.list_decisions(scan_id=lane.SID)]
+    details = [d['detail'] or '' for d in store.list_decisions(scan_id=lane.SID)]
     assert not any('cropped in Word' in d for d in details), details
     assert not any('wrote no image-of-text' in d for d in details), details
     assert [d['detail'] for d in store.list_decisions(scan_id=lane.SID)

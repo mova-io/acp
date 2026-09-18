@@ -1,7 +1,17 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import './progress-queue-drawer.css'
 
-export default function ProgressQueueDrawer({ title, scopeLabel, files = [], loading = false, error, onClose, onOpenFile }) {
+function reviewItemsOf(row) {
+  const listed = Array.isArray(row?.reviewItems) ? row.reviewItems : []
+  const own = row?.review_item_id != null ? [{ itemId: String(row.review_item_id), criterion: row.rule_id || null, name: row.rule_name || null }] : []
+  const seen = new Set()
+  return [...own, ...listed].filter(item => item?.itemId != null && !seen.has(String(item.itemId)) && seen.add(String(item.itemId)))
+}
+
+// `onOpenItem(itemId)`: a server entry that names its review item (`review_item_id`, or the
+// `reviewItems` the stage card attaches from the snapshot's unresolved findings) gets an "Open item"
+// button that goes straight to that item in the review workspace.
+export default function ProgressQueueDrawer({ title, scopeLabel, files = [], loading = false, error, onClose, onOpenFile, onOpenItem }) {
   const id = useId()
   const panel = useRef(null)
   const close = useRef(onClose)
@@ -36,6 +46,9 @@ export default function ProgressQueueDrawer({ title, scopeLabel, files = [], loa
           {row.reason && <p>{row.reason}</p>}
           {Number.isInteger(row.findingCount) && row.findingCount >= 0 && <small>{row.findingCount} finding{row.findingCount === 1 ? '' : 's'}</small>}
           {row.href && <a href={row.href}>Open file</a>}
+          {onOpenItem && reviewItemsOf(row).map(item => <button key={item.itemId} type="button" className="ghost small" onClick={() => onOpenItem(item)}>
+            {item.criterion ? `Open ${item.criterion} item` : 'Open item'}{item.name ? <span className="sr-only"> — {item.name}</span> : null}
+          </button>)}
           {onOpenFile && row.status !== 'blocked' && <button type="button" className="ghost small" onClick={() => onOpenFile(row)}>View file details</button>}
         </article>)}
         {!visible.length && !loading && !error && <p className="progress-queue-empty">{query.trim() ? 'No files match your search.' : 'No files are currently in this queue.'}</p>}

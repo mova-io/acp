@@ -73,7 +73,11 @@ describe('the report is built from server facts', () => {
     const dp = deps()
     const d = await buildFileReportData({ file, scanId: 's1', mode: 'reviewer', rows, targetLevel: 'AA', deps: dp })
     expect(dp.getFileReportFacts).toHaveBeenCalledWith('s1', 'guide.pdf')
-    expect(d.facts).toBe(FACTS)
+    // A COPY of the server's facts, with each record's evidence link attached (evidenceLink.js);
+    // everything the server sent is still there, unchanged.
+    expect(d.facts).not.toBe(FACTS)
+    expect({ ...d.facts, findings: FACTS.findings, savedChanges: FACTS.savedChanges }).toEqual(FACTS)
+    expect(d.facts.findings[0].location.href).toBe('/?view=evidence&scan=s1&file=guide.pdf&finding=f-server-1')
     expect(d.factsDigest).toBe('digest-abc123')
     expect(d.identity.factsDigest).toBe('digest-abc123')
     expect(d.identity.currentArtifact).toEqual({ kind: 'corrected', sha256: COR })

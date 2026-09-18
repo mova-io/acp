@@ -35,6 +35,7 @@ sys.path.insert(0, str(ACP / "tests"))
 from formats.pdf import structure  # noqa: E402
 from formats.pdf.detectors import non_text_content  # noqa: E402
 from test_pdf_figure_alt_approval import _tagged_pdf  # noqa: E402
+from hitl_viewed import approve_bound
 
 FILE = "report.pdf"
 SID = "s-alt-gate"
@@ -147,6 +148,9 @@ class _Blob:
     def download_remediated(self, owner, sid, f): return self.data
     def upload_remediated(self, owner, sid, f, data, mime):
         self.data = data; self.uploads.append((f, mime)); return "http://b/2"
+    # The approved writer publishes digest-scoped and moves the pointer at commit.
+    def upload_immutable_retry(self, owner, sid, f, data, mime):
+        return self.upload_remediated(owner, sid, f, data, mime)
 
 
 def _seed(store, locators):
@@ -187,8 +191,7 @@ def test_the_credit_gate_now_rests_on_a_rescan_that_can_see_1_1_1(store, monkeyp
 
     blob = _Blob(src.read_bytes())
     item_id = _seed(store, ["pdf:fig:1:0", "pdf:fig:1:1"])
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, ["Bar chart of revenue by region", "Team photo"])
+    approve_bound(store, item_id, ["Bar chart of revenue by region", "Team photo"])
 
     monkeypatch.setattr(core, "store", store)
     monkeypatch.setitem(sys.modules, "blob", blob)
@@ -211,8 +214,7 @@ def test_a_partial_write_leaves_1_1_1_failing_and_credits_nothing(store, monkeyp
     _tagged_pdf(src, n_figs=2)
     blob = _Blob(src.read_bytes())
     item_id = _seed(store, ["pdf:fig:1:0"])           # only the first figure is approved
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, ["Bar chart of revenue by region"])
+    approve_bound(store, item_id, ["Bar chart of revenue by region"])
 
     monkeypatch.setattr(core, "store", store)
     monkeypatch.setitem(sys.modules, "blob", blob)

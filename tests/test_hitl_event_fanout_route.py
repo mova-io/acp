@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+from hitl_viewed import viewed_fields
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "api"))
 
@@ -80,7 +81,7 @@ def _events(st):
 def test_one_primary_row_per_decision(st):
     item_id = _seed(st, drafts=3)
     response = _client().put(f"/hitl/queue/{item_id}", json={
-        "status": "approved",
+        "status": "approved", **viewed_fields(item_id, st),
         "approved_values": ["draft 0", "draft 1", "draft 2"],
         "model_call_ids": ["call-0", "call-1", "call-2"],
         "review_ms": 45000,
@@ -100,7 +101,7 @@ def test_primary_is_the_first_row_written_not_the_first_index(st):
     the review uncounted."""
     item_id = _seed(st, drafts=3, ai_indices=(1, 2))
     response = _client().put(f"/hitl/queue/{item_id}", json={
-        "status": "approved",
+        "status": "approved", **viewed_fields(item_id, st),
         "approved_values": ["hand written", "draft 1", "draft 2"],
         "model_call_ids": [None, "call-1", "call-2"],
         "review_ms": 30000,
@@ -119,7 +120,7 @@ def test_a_decision_with_no_attributable_call_is_still_recorded(st):
     decision was invisible to approval rate, review time and the maturity gate alike."""
     item_id = _seed(st, drafts=2, ai_indices=())
     response = _client().put(f"/hitl/queue/{item_id}", json={
-        "status": "approved",
+        "status": "approved", **viewed_fields(item_id, st),
         "approved_values": ["hand written", "also hand written"],
         "model_call_ids": [None, None],
         "review_ms": 12000,

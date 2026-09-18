@@ -24,8 +24,10 @@ async function logoDataUrl() {
 async function makeDoc({ title = 'mova.io Accessibility Report', lang = 'en-US', footerVersion, footerGenerated } = {}) {
   const { jsPDF } = await import('jspdf')
   const doc = new jsPDF('p', 'pt', 'a4')
-  // The platform must not ship inaccessible PDFs: set a document title (2.4.2), the
-  // document language (3.1.1), and ask viewers to show the title in the window bar.
+  // Set a document title (2.4.2), the document language (3.1.1), and ask viewers to show the
+  // title in the window bar. That is all jsPDF can do: its output is still UNTAGGED, which is why
+  // every report except the quarterly governance summary renders on the server, and why that
+  // summary says so on its first page (GOVERNANCE_PDF_NOTE).
   doc.setProperties({ title, creator: 'mova.io Accessibility Platform', author: 'mova.io' })
   doc.setLanguage(lang)
   doc.viewerPreferences({ DisplayDocTitle: true })
@@ -309,6 +311,9 @@ async function makeDoc({ title = 'mova.io Accessibility Report', lang = 'en-US',
 const ACTION_LABEL = { auto: 'Auto-fix (deterministic)', assisted: 'AI-assisted + review', review: 'Human review', manual: 'Manual rebuild', archive: 'Archive', keep: 'Keep as-is' }
 
 // Quarterly governance report (Overview) — a detailed, board-ready document.
+export const GOVERNANCE_PDF_NOTE =
+  'About this PDF: it is drawn in your browser and is not tagged for assistive technology (no structure tree or bookmarks). For a tagged, accessible record of a scan, download the Scan report from ACP.'
+
 export async function exportGovernanceReport(d) {
   const p = await makeDoc({ title: 'Quarterly Accessibility Governance Report' })
   if (d.score != null) p.ring(d.score, d.score >= 90 ? GREEN : AMBER)
@@ -317,6 +322,10 @@ export async function exportGovernanceReport(d) {
     subtitle: `${d.org} · ${d.quarter} · WCAG 2.1 AA`,
     meta: [`Prepared for leadership · ${d.date}`, `Scope: ${d.scope || 'full document estate'}`],
   })
+  // This one report is still drawn in the browser (jsPDF), and a jsPDF document has no structure
+  // tree and no bookmarks. It says so on its own first page rather than passing as the tagged
+  // server output every other ACP PDF now is (reportRenderClient.js).
+  p.text(GOVERNANCE_PDF_NOTE, { size: 8.5, color: MUTED, gapAfter: 9 })
 
   p.heading('Executive summary')
   if (d.verdict) p.text(`Risk verdict — ${d.verdict[0]}`, { bold: true, color: d.verdict[1], size: 13, gapAfter: 7 })

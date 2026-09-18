@@ -2,15 +2,26 @@ import ProposalThumb, { isSafeThumb } from './ProposalThumb.jsx'
 import { proposalsFor, pdfStructuralSummary } from './pdfStructuralProposal.js'
 import './qualityReviewEvidence.css'
 
-// Evidence is the recorded source, never an image generated from the proposed text.
-export default function QualityReviewEvidence({ finding, editedValue }) {
-  const proposals = proposalsFor(finding)
+// Is this a SAVED change (written to a corrected copy), and what exactly was saved? Exported so the
+// inbox's own comparison block reads the same saved value rather than the raw queue's `after`,
+// which may be the first proposal even after another value was applied. Only autoFixRows diffs or
+// the applied record's approved_value are saved excerpts; anything else is null ("not retained").
+export function savedChangeOf(finding) {
   const record = finding?._raw || finding || {}
   const applied = finding?.applied === true || finding?.applied === 1 || record.applied === true || record.applied === 1
   const saved = finding?.autoApplied === true || applied
-  // Raw queue 'after' may be the first proposal, even after another value was
-  // applied. Only autoFixRows diffs or the applied record's approved_value are saved excerpts.
   const savedValue = finding?.autoApplied === true && !finding?._raw ? finding.after : applied ? record.approved_value : null
+  return { saved, savedValue: typeof savedValue === 'string' && savedValue ? savedValue : null }
+}
+
+// Evidence is the recorded source, never an image generated from the proposed text.
+// A saved change is labelled Original / Corrected — never "Current" for the value the corrected
+// copy no longer holds, never "Proposed" for a value already written. `showSavedPair={false}` lets a
+// host that renders that same pair itself (the inbox, with copy controls) avoid printing it twice.
+export default function QualityReviewEvidence({ finding, editedValue, showSavedPair = true }) {
+  const proposals = proposalsFor(finding)
+  const record = finding?._raw || finding || {}
+  const { saved, savedValue } = savedChangeOf(finding)
   if (!proposals.length && !saved) return null
   const criterion = String(finding.rule_id || finding.ruleId || '')
   const guidance = criterion === '1.3.2'
@@ -27,9 +38,9 @@ export default function QualityReviewEvidence({ finding, editedValue }) {
       <strong>{saved ? verified ? 'Saved change · recorded checks passed' : 'Saved change · verification not confirmed' : 'Proposed change · not a saved result'}</strong>
       <p>{saved ? verified ? 'The recorded checks passed for this change. This does not certify the whole document or verify every aspect of its meaning.' : 'A change was recorded, but this record does not confirm it resolved the finding.' : 'The preview shows a suggestion. Approval, writing the corrected copy, and verification are separate steps.'}</p>
     </div>
-    {saved && <article aria-label="Recorded before and after">
-      <div><strong>Before · recorded source</strong><p>{typeof finding.before === 'string' && finding.before ? finding.before : 'Source excerpt unavailable. Open the original document to compare.'}</p></div>
-      <div><strong>After · recorded saved change</strong><p>{typeof savedValue === 'string' && savedValue ? savedValue : 'Saved change excerpt unavailable. Open the corrected document to inspect it.'}</p></div>
+    {saved && showSavedPair && <article aria-label="Recorded before and after">
+      <div><strong>Original</strong><p>{typeof finding.before === 'string' && finding.before ? finding.before : 'Source excerpt unavailable. Open the original document to compare.'}</p></div>
+      <div><strong>Corrected</strong><p>{savedValue || 'Saved change excerpt unavailable. Open the corrected document to inspect it.'}</p></div>
     </article>}
 
     {proposals.map((proposal, index) => {
@@ -50,10 +61,11 @@ export default function QualityReviewEvidence({ finding, editedValue }) {
           {typeof proposal.before === 'string' && proposal.before && <p>{proposal.before}</p>}
           {typeof proposal.subject_text === 'string' && proposal.subject_text && <p>{proposal.subject_text}</p>}
         </div>
-        <div><strong>Proposed fix {proposals.length > 1 ? index + 1 : ''}</strong>
+        {/* On a saved change this is the suggestion on record, not a pending proposal. */}
+        <div><strong>{saved ? 'Suggestion on record' : 'Proposed fix'} {proposals.length > 1 ? index + 1 : ''}</strong>
           <p className="muted">{aiSourceReviewed ? 'Source meaning: AI reviewed against the source with supported claims. This is an approval judgment, not proof of semantic correctness or full accessibility.' : sourceValidated ? 'Source meaning: independently checked against exact image pixels. Saved document verification is tracked separately.' : 'Source meaning: not independently verified. Model agreement or saved text alone does not establish accuracy.'}</p>
           <p>{pdfStructuralSummary(proposal) || (typeof value === 'string' && value ? value : 'No proposed value recorded.')}</p>
-          {needsReview && <p className="quality-review-notice"><strong>Needs review:</strong> {typeof proposal.why_review === 'string' && proposal.why_review ? proposal.why_review : 'Check the chart’s series, years, signs, values and units before approving. These relationships have not been verified.'}</p>}
+          {needsReview && !saved && <p className="quality-review-notice"><strong>Needs review:</strong> {typeof proposal.why_review === 'string' && proposal.why_review ? proposal.why_review : 'Check the chart’s series, years, signs, values and units before approving. These relationships have not been verified.'}</p>}
           {disagreement && <p className="quality-review-notice"><strong>Needs review:</strong> A second model did not confirm this description.{typeof proposal.agreement.second_opinion === 'string' && proposal.agreement.second_opinion ? ` Second opinion: ${proposal.agreement.second_opinion}` : ''}</p>}
         </div>
       </article>

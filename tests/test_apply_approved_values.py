@@ -16,6 +16,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from hitl_viewed import approve_bound, viewed_fields
 
 ACP = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ACP / "api"))
@@ -70,6 +71,11 @@ class _Blob:
     def upload_remediated(self, owner, sid, f, data, mime):
         self.data = data; self.uploads.append((f, mime)); return "http://b/2"
 
+    # The approved writer publishes to a digest-scoped immutable object and moves the pointer
+    # at commit (handlers._apply_approved_values); this fake serves whatever was stored last.
+    def upload_immutable_retry(self, owner, sid, f, data, mime):
+        return self.upload_remediated(owner, sid, f, data, mime)
+
 
 def _run_handler(monkeypatch, store, blob, *, residual, file=FILE):
     """Drive the handler with Blob and the residual re-scan stubbed."""
@@ -90,8 +96,7 @@ def _run_handler(monkeypatch, store, blob, *, residual, file=FILE):
 
 def test_approval_alone_leaves_the_file_uncertified(store):
     item_id = _seed(store)
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, [])          # accept both drafts unedited
+    approve_bound(store, item_id, [])          # accept both drafts unedited
 
     assert store.count_unapplied_approved_values(SID, FILE) == 1
     assert store.mark_file_compliant_if_reviewed(SID, FILE) is False
@@ -101,8 +106,7 @@ def test_approval_alone_leaves_the_file_uncertified(store):
 
 def test_each_image_receives_its_own_approved_description(store, monkeypatch):
     item_id = _seed(store)
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, ["A clinician at a desk.", None])   # edit 1st, accept 2nd
+    approve_bound(store, item_id, ["A clinician at a desk.", None])   # edit 1st, accept 2nd
 
     blob = _Blob(_deck("Picture 1", "Chart 2"))
     _run_handler(monkeypatch, store, blob, residual=set())
@@ -128,8 +132,7 @@ def test_each_image_receives_its_own_approved_description(store, monkeypatch):
 
 def test_written_values_are_credited_and_the_file_certifies_off_the_rescan(store, monkeypatch):
     item_id = _seed(store)
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, [])
+    approve_bound(store, item_id, [])
 
     _run_handler(monkeypatch, store, _Blob(_deck("Picture 1", "Chart 2")), residual=set())
 
@@ -147,8 +150,7 @@ def test_a_write_that_does_not_clear_the_criterion_credits_nothing(store, monkey
     """The text went in but 1.1.1 still fails — an image nobody reviewed, say. Crediting the
     approval here would certify a document that still fails, which is the original bug."""
     item_id = _seed(store)
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, [])
+    approve_bound(store, item_id, [])
 
     blob = _Blob(_deck("Picture 1", "Chart 2"))
     _run_handler(monkeypatch, store, blob, residual={"1.1.1"})       # still failing
@@ -162,8 +164,7 @@ def test_a_write_that_does_not_clear_the_criterion_credits_nothing(store, monkey
 def test_an_unresolvable_locator_is_never_written_to_another_image(store, monkeypatch):
     """The reviewer approved text for an image this document no longer has."""
     item_id = _seed(store, names=("Picture 1", "Ghost 9"))
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, [])
+    approve_bound(store, item_id, [])
 
     blob = _Blob(_deck("Picture 1"))                                 # Ghost 9 is gone
     _run_handler(monkeypatch, store, blob, residual=set())
@@ -177,8 +178,7 @@ def test_an_unresolvable_locator_is_never_written_to_another_image(store, monkey
 
 def test_no_remediated_copy_means_nothing_is_written(store, monkeypatch):
     item_id = _seed(store)
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, [])
+    approve_bound(store, item_id, [])
 
     blob = _Blob(None)                                               # never remediated
     from worker import FatalJobError
@@ -203,8 +203,7 @@ def test_a_format_with_no_applier_says_so_rather_than_succeeding(store, monkeypa
 
 def test_applying_twice_is_idempotent(store, monkeypatch):
     item_id = _seed(store)
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, [])
+    approve_bound(store, item_id, [])
 
     blob = _Blob(_deck("Picture 1", "Chart 2"))
     _run_handler(monkeypatch, store, blob, residual=set())
@@ -262,8 +261,7 @@ def _seed_link(store):
 
 def test_link_text_lands_on_the_hyperlink_and_certifies(store, monkeypatch):
     item_id = _seed_link(store)
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, [])                       # accept the draft unedited
+    approve_bound(store, item_id, [])                       # accept the draft unedited
 
     blob = _Blob(_report())
     _run_handler(monkeypatch, store, blob, residual=set(), file=DOC_FILE)
@@ -281,8 +279,7 @@ def test_link_text_lands_on_the_hyperlink_and_certifies(store, monkeypatch):
 
 def test_link_text_not_cleared_credits_nothing(store, monkeypatch):
     item_id = _seed_link(store)
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, [])
+    approve_bound(store, item_id, [])
 
     blob = _Blob(_report())
     _run_handler(monkeypatch, store, blob, residual={"2.4.4"}, file=DOC_FILE)       # still failing
@@ -310,10 +307,8 @@ def test_alt_and_link_approvals_on_the_same_file_both_apply(store, monkeypatch):
         {"locator": "word/document.xml#Figure 1", "before": "(no alt text)",
          "proposed_value": "A pricing chart.", "rationale": "r", "source": "llava"},
     ], rule_name="Non-text Content")
-    store.update_hitl_item(link_item, "approved", None, None)
-    store.approve_proposal_values(link_item, [])
-    store.update_hitl_item(alt_item, "approved", None, None)
-    store.approve_proposal_values(alt_item, [])
+    approve_bound(store, link_item, [])
+    approve_bound(store, alt_item, [])
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
@@ -363,7 +358,7 @@ def test_the_approve_route_enqueues_the_write_and_records_the_values(store, monk
     from routes.hitl import hitl_update, HitlUpdate
 
     item_id = _seed(store)
-    res = hitl_update(item_id, HitlUpdate(status="approved",
+    res = hitl_update(item_id, HitlUpdate(status="approved", **viewed_fields(item_id),
                                           approved_values=["A clinician at a desk.", None]), _req())
     assert res["status"] == "approved"
 
@@ -389,7 +384,7 @@ def test_a_judgement_approval_schedules_no_write(store, monkeypatch):
 
     store.init_scan_run(SID, "drive", 1, "t", "r", "h")
     item = store.queue_hitl_deferral(SID, FILE, "contrast needs sign-off", 1, rule_id="1.4.3")
-    hitl_update(item, HitlUpdate(status="approved"), _req())
+    hitl_update(item, HitlUpdate(status="approved", **viewed_fields(item)), _req())
     assert store.claim_job("w1") is None
 
 
@@ -402,7 +397,7 @@ def test_approving_without_sending_values_still_counts_the_drafts_as_content(sto
     through a different door.
     """
     item_id = _seed(store)
-    store.update_hitl_item(item_id, "approved", None, None)   # note: no approve_proposal_values
+    approve_bound(store, item_id, None)   # note: no approved_values sent
 
     assert store.count_unapplied_approved_values(SID, FILE) == 1
     assert store.mark_file_compliant_if_reviewed(SID, FILE) is False
@@ -425,8 +420,7 @@ def test_link_purpose_approvals_have_no_applier_and_keep_the_file_out_of_publish
         {"locator": "slide1#rId3", "before": "click here",
          "proposed_value": "Download the intake form", "rationale": "r", "source": "llm"}],
         rule_name="Link Purpose")
-    store.update_hitl_item(item, "approved", None, None)
-    store.approve_proposal_values(item, [])
+    approve_bound(store, item, [])
 
     assert store.approved_alt_values(SID, FILE) == {}                # not an alt-text value
     assert store.count_unapplied_approved_values(SID, FILE) >= 1     # still gates Publish
@@ -444,7 +438,7 @@ def test_a_link_text_only_approval_still_schedules_the_write(store, monkeypatch)
     from routes.hitl import hitl_update, HitlUpdate
 
     item = _seed_link(store)                                  # a docx whose ONLY row is 2.4.4
-    hitl_update(item, HitlUpdate(status="approved", approved_values=[None]), _req())
+    hitl_update(item, HitlUpdate(status="approved", **viewed_fields(item), approved_values=[None]), _req())
 
     assert store.approved_alt_values(SID, DOC_FILE) == {}     # nothing on the alt lane
     job = store.claim_job("w1")
@@ -463,8 +457,7 @@ def test_the_gate_covers_every_kind_the_applier_writes(store):
         item = store.enqueue_proposals(SID, f, sc, [
             {"locator": locator, "before": "(before)", "proposed_value": "approved text",
              "rationale": "r", "source": "s"}], rule_name=sc)
-        store.update_hitl_item(item, "approved", None, None)
-        store.approve_proposal_values(item, [])
+        approve_bound(store, item, [])
         assert store.has_approved_values_to_write(SID, f) is True, f"{sc} alone must open the gate"
 
 
@@ -486,8 +479,7 @@ def test_every_applier_returns_the_row_shape_the_write_loop_reads():
 
 def test_batched_unapplied_counts_match_the_per_file_gate(store):
     item_id = _seed(store)
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, [])
+    approve_bound(store, item_id, [])
 
     by_file = store.count_unapplied_approved_values_by_file(SID)
     assert by_file == {FILE: store.count_unapplied_approved_values(SID, FILE)} == {FILE: 1}
@@ -504,8 +496,7 @@ def test_approval_before_remediation_creates_first_corrected_copy_from_assessed_
     with store._db.cursor() as cur:
         store._db.execute(cur, "UPDATE scan_runs SET source='local' WHERE id=%s", (SID,))
         store._db.execute(cur, 'UPDATE file_records SET remediated_at=NULL,blob_url=NULL,drive_write_url=NULL WHERE scan_id=%s', (SID,))
-    store.update_hitl_item(item_id, 'approved', None, None)
-    store.approve_proposal_values(item_id, [])
+    approve_bound(store, item_id, [])
     cached = _deck('Picture 1','Chart 2')
     monkeypatch.setattr(store, 'get_source_checksum', lambda *a: cache_checksum)
     monkeypatch.setattr(scanner, 'read_cached_source', lambda *a, **kw: cached if kw.get('checksum') == cache_checksum else None)

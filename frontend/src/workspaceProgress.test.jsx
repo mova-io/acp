@@ -56,9 +56,13 @@ describe('WorkspaceProgress (component)', () => {
   it('shows the selected document’s progress, percent and a progressbar role', async () => {
     await render({ queue: QUEUE, decisions: {}, selected: { file: 'a.docx' } })
     expect(container.textContent).toContain('a.docx')
-    expect(container.textContent).toContain('0 of 3 actions complete')
+    // Wording changed deliberately (finding/review reconciliation): one denominator shared with the
+    // Review queue header, and the three parts add up to it.
+    expect(container.textContent).toContain('0 of 3 tasks have a final outcome · 0 awaiting outcome · 3 without a decision')
+    expect(container.textContent).toContain('0 of 3 tasks have a recorded decision')
     expect(container.textContent).toContain('0%')
-    expect(container.textContent).toContain('1 applying / awaiting verification')
+    // The definition is on screen, not only in the docs.
+    expect(container.querySelector('.rem-wsprog__definition').textContent).toMatch(/Final outcome = confirmed by a fresh scan/)
     const bar = container.querySelector('[role=progressbar]')
     expect(bar).toBeTruthy()
     expect(bar.getAttribute('aria-valuenow')).toBe('0')
@@ -67,20 +71,35 @@ describe('WorkspaceProgress (component)', () => {
   it('keeps approval decisions in Processing until verification finishes', async () => {
     await render({ queue: QUEUE, decisions: { 1: { state: 'accepted' }, 2: { state: 'accepted' }, 3: { state: 'rejected' } }, selected: { file: 'a.docx' } })
     expect(container.textContent).not.toContain('100%')
-    expect(container.textContent).toContain('awaiting verification')
+    // Two approvals are saved but not re-checked: decided, not finished. The rejection is final.
+    expect(container.textContent).toContain('1 of 3 tasks has a final outcome · 2 awaiting outcome · 0 without a decision')
+    expect(container.textContent).toContain('3 of 3 tasks have a recorded decision')
     expect(container.textContent).not.toContain('Complete ✓')
   })
 
   it('falls back to a run-level label before anything is selected', async () => {
     await render({ queue: QUEUE, decisions: {}, selected: null })
     expect(container.textContent).toContain('This remediation run')
-    expect(container.textContent).toContain('0 of 4 actions complete')
+    expect(container.textContent).toContain('0 of 4 tasks have a final outcome')
   })
 })
 
 it('shows pending action counts instead of an effort-based countdown when nothing is processing', async () => {
   const { root, container } = createTestRoot()
   await act(async () => root.render(createElement(WorkspaceProgress, {queue:[{id:1,file:'a.docx'},{id:2,file:'a.docx'}]})))
-  expect(container.textContent).toContain('2 actions awaiting an outcome')
+  expect(container.textContent).toContain('0 of 2 tasks have a final outcome · 0 awaiting outcome · 2 without a decision')
   expect(container.textContent).not.toMatch(/About .* remaining/)
+})
+
+it('marks Complete only when every task has a final outcome, never for saved-but-unverified changes', async () => {
+  const { root, container } = createTestRoot()
+  const verified = { id: 1, file: 'a.docx', status: 'verified' }
+  const saved = { id: 2, file: 'a.docx', status: 'approved', applied: true }
+  await act(async () => root.render(createElement(WorkspaceProgress, { queue: [verified, saved] })))
+  expect(container.textContent).toContain('1 of 2 tasks has a final outcome · 1 awaiting outcome · 0 without a decision')
+  expect(container.textContent).not.toContain('Complete ✓')
+  expect(container.querySelector('[role=progressbar]').getAttribute('aria-valuenow')).toBe('50')
+  await act(async () => root.render(createElement(WorkspaceProgress, { queue: [verified, { ...saved, validated: true }] })))
+  expect(container.textContent).toContain('Complete ✓')
+  expect(container.textContent).not.toMatch(/certif/i)
 })

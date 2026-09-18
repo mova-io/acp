@@ -23,7 +23,14 @@ def _diff_scs(diffs):
 
 def _well_formed(diffs):
     for d in diffs:
-        assert set(d) == {"rule_id", "before", "after", "note"}
+        # `locator`/`page` are optional and present only when the producer knew them (R1); an
+        # unknown location is an absent key, never an empty or placeholder value.
+        assert {"rule_id", "before", "after", "note"} <= set(d) <= {
+            "rule_id", "before", "after", "note", "locator", "page"}
+        if "locator" in d:
+            assert isinstance(d["locator"], str) and d["locator"].strip()
+        if "page" in d:
+            assert type(d["page"]) is int and d["page"] > 0
         assert d["rule_id"] and "." in d["rule_id"]        # dotted WCAG SC
         assert isinstance(d["before"], str) and isinstance(d["after"], str)
         assert d["before"] != d["after"]                   # a diff must actually differ

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { batchDecision, exclusionReason, proposalValues, selectionProblem, snapshotFinding } from './batchReviewSelection.js'
+import { TARGET_REPLACED_EXCLUSION, batchDecision, exclusionReason, proposalValues, selectionProblem, snapshotFinding } from './batchReviewSelection.js'
 import LiveCounter from './LiveCounter.jsx'
 import './batch-review-selection.css'
 
@@ -12,7 +12,10 @@ const EXCLUSION_HELP = {
   'Stale — refresh and review': 'the source changed after the draft was made',
   'Unsaved edit — review individually': 'you edited this value; save or discard it first',
   'Blocked or unavailable': 'no supported automatic route for this issue',
+  [TARGET_REPLACED_EXCLUSION]: 'another verified fix removed what this item described; it is a recorded result',
 }
+// Finished work, not work this approval skips: decided, or replaced by a verified change.
+const SETTLED_REASONS = new Set(['Already reviewed', 'Approval recorded', TARGET_REPLACED_EXCLUSION])
 
 const countFindings = f => Number.isSafeInteger(f._raw?.finding_count) && f._raw.finding_count >= 0 ? f._raw.finding_count : 1
 const PAGE_SIZE = 10
@@ -69,7 +72,7 @@ export default function BatchReviewSelection({ visible = [], decisions = {}, dra
   // counted 9 — when most of that 17 was already-decided work that was never a candidate. Split, so
   // the headline number is the one a reviewer might actually need to go and do something about.
   const settledCount = Object.entries(exclusions)
-    .filter(([reason]) => reason === 'Already reviewed' || reason === 'Approval recorded')
+    .filter(([reason]) => SETTLED_REASONS.has(reason))
     .reduce((n, [, count]) => n + count, 0)
   const notIncludedCount = Object.values(exclusions).reduce((a, b) => a + b, 0) - settledCount
   // Derived from that split rather than recomputed, so the empty-state breakdown below and the

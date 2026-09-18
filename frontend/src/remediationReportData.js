@@ -84,20 +84,46 @@ async function fromFacts(scanId, scan) {
     currentShaByFile[file] = facts.identity?.currentArtifact?.sha256 ?? null
   })
 
+  // S3: a document beyond FILE_FACTS_MAX, or one whose facts could not be read, is NOT itemised —
+  // but it is never stranded. Every one is returned (with the server index's own counts for it,
+  // null where the index does not record them) and listed in the Full evidence appendix; the notes
+  // name the first few and say where the rest are.
+  const indexByFile = new Map((scan.files || []).map((f) => [f?.file, f]))
+  const countsOf = (file) => {
+    const row = indexByFile.get(file) || {}
+    return {
+      savedChangesVerified: Number.isFinite(row.savedChangesVerified) ? row.savedChangesVerified : null,
+      savedChangesUnverified: Number.isFinite(row.savedChangesUnverified) ? row.savedChangesUnverified : null,
+      decisionsPending: Number.isFinite(row.humanReviews?.pending) ? row.humanReviews.pending : null,
+    }
+  }
+  const errors = new Map(results.filter((r) => !r.facts).map((r) => [r.file, r.error]))
+  const unitemisedDocuments = [
+    ...omitted.map((file) => ({ file, reason: `beyond the ${FILE_FACTS_MAX}-document itemisation limit of this report`, ...countsOf(file) })),
+    ...failed.map((file) => ({ file, reason: `its evidence could not be read${errors.get(file) ? ` (${errors.get(file)})` : ''}`, ...countsOf(file) })),
+  ]
+  const named = (list) => `${list.slice(0, 10).join(', ')}${list.length > 10 ? `, and ${list.length - 10} more` : ''}`
   const notes = []
-  if (omitted.length) notes.push(`${omitted.length} document(s) with saved changes are not itemised in this report (it covers the first ${FILE_FACTS_MAX}): ${omitted.slice(0, 10).join(', ')}${omitted.length > 10 ? ', …' : ''}.`)
-  if (failed.length) notes.push(`The saved changes of ${failed.length} document(s) could not be read: ${failed.slice(0, 10).join(', ')}${failed.length > 10 ? ', …' : ''}.`)
-  if (unreadableUnverified.length) notes.push(`For ${unreadableUnverified.length} document(s) the changes AWAITING REVIEW could not be read, so none of them are listed: ${unreadableUnverified.slice(0, 10).join(', ')}${unreadableUnverified.length > 10 ? ', …' : ''}. Those are the changes that need a person, so this report is not a complete account of the work outstanding.`)
+  if (omitted.length) notes.push(`${omitted.length} document(s) with saved changes are not itemised in this report (it itemises the first ${FILE_FACTS_MAX}): ${named(omitted)}. Every one is listed, with the server's counts for it, in the Full evidence appendix "Documents not itemised".`)
+  if (failed.length) notes.push(`The saved changes of ${failed.length} document(s) could not be read: ${named(failed)}. Every one is listed in the Full evidence appendix "Documents not itemised".`)
+  if (unreadableUnverified.length) notes.push(`For ${unreadableUnverified.length} document(s) the changes AWAITING REVIEW could not be read, so none of them are listed: ${named(unreadableUnverified)}. Those are the changes that need a person, so this report is not a complete account of the work outstanding.`)
   if (scan.incompleteReason) notes.push(scan.incompleteReason)
 
   const complete = allComplete && !omitted.length && !failed.length && scan.complete === true
+  // The server totals its own index over EVERY document, whatever this report itemised; those are
+  // the counts to state. Without them a partial gather's count is unknown — never the part read.
+  const totals = scan.facts?.totals || {}
+  const serverVerified = Number.isFinite(totals.savedChangesVerified) ? totals.savedChangesVerified : null
+  const serverUnverified = Number.isFinite(totals.savedChangesUnverified) ? totals.savedChangesUnverified : null
   return {
     diffsByFile,
     diffsComplete: complete,
     // A partial gather reports the count it actually holds as unknown rather than as the total.
     diffsTotal: complete ? total : null,
-    savedChangesVerified: verified,
-    savedChangesUnverified: unreadableUnverified.length ? null : unverified,
+    savedChangesVerified: serverVerified ?? (complete ? verified : null),
+    savedChangesUnverified: unreadableUnverified.length ? null : (serverUnverified ?? (complete ? unverified : null)),
+    itemisedChanges: { total, verified, unverified, documents: results.length - failed.length },
+    unitemisedDocuments: unitemisedDocuments.length ? unitemisedDocuments : null,
     unreadableUnverified: unreadableUnverified.length ? unreadableUnverified : null,
     // The decisions are only trustworthy as a whole when every document answered.
     reviewsByFile: failed.length ? null : reviewsByFile,

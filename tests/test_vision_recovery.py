@@ -216,7 +216,10 @@ def test_pending_and_recovered_activity_follow_durable_work(isolated_store, monk
     events = [event for event in isolated_store.list_scan_events(SID)
               if event['kind'].startswith('remediate.vision_retry_')]
     assert events[-1]['kind'] == 'remediate.vision_retry_recovered'
-    assert events[-1]['detail'] == {'drafts': 1}
+    # A saved draft, not a document edit. 8 findings, 2 drafted locators: 6 still lack a draft.
+    assert events[-1]['detail'] == {'drafts': 1, 'awaiting_review': 0, 'uncertain': 0, 'missing': 6,
+                                    'coverage_complete': False, 'document_write': False,
+                                    'item_id': payload['item_id']}
     assert isolated_store.get_hitl_item(payload['item_id'])['proposals'][0]['proposed_value']
 
 
@@ -253,14 +256,14 @@ def test_unusable_generation_event_is_sanitized(isolated_store):
 
 
 def test_unusable_generation_stops_without_dispatching_another_retry(isolated_store):
-    job, _ = seed(isolated_store)
+    job, payload = seed(isolated_store)
     before = len(isolated_store.list_scan_jobs_of_type(SID, 'vision_proposal_retry'))
     with run_context(isolated_store, job['payload'], job) as context:
         context.deferred.append({'reason': 'attempts_exhausted', 'kind': 'text'})
         recovery.schedule(isolated_store, context, job, ['vision_timeout'])
     assert len(isolated_store.list_scan_jobs_of_type(SID, 'vision_proposal_retry')) == before
     assert isolated_store.list_scan_events(SID)[-1]['detail'] == {
-        'reason_code': 'vision_generated_output_unusable'}
+        'reason_code': 'vision_generated_output_unusable', 'item_id': payload['item_id']}
 
 
 def test_local_endpoint_refusal_is_not_a_cloud_spending_block():
@@ -320,7 +323,8 @@ def test_empty_local_recovery_preserves_review_and_emits_specific_safe_cause(iso
     monkeypatch.setattr(remediate_office, 'alt_proposals_for_office', propose)
     recovery.process(isolated_store, payload)
     assert isolated_store.get_hitl_item(payload['item_id'])['proposals'] == json.loads(payload['proposals_before'])
-    assert isolated_store.list_scan_events(SID)[-1]['detail'] == {'reason_code': 'vision_response_empty'}
+    assert isolated_store.list_scan_events(SID)[-1]['detail'] == {'reason_code': 'vision_response_empty',
+                                                                  'item_id': payload['item_id']}
 
 
 def test_cloud_empty_output_does_not_buy_an_extra_recovery_attempt():

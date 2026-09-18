@@ -9,9 +9,9 @@ const list=vi.fn(), get=vi.fn(), save=vi.fn()
 vi.mock('./api.js',()=>({listHitlQueue:(...a)=>list(...a),getRunAiApproval:(...a)=>get(...a),setRunAiApproval:(...a)=>save(...a)}))
 globalThis.IS_REACT_ACT_ENVIRONMENT=true
 const policy={enabled:false,supported:true,run_id:'batch',source_revision:'source',revision:0}
-const proposal={id:'ai',file:'a.docx',status:'pending',hasProposal:true,after:'Alternative text',proposals:[{proposed_value:'Alternative text',source:'AI',model:'vision',model_call_id:'call'}],_raw:{finding_count:1,proposal_snapshot_ids:['snapshot'],source_revision:'source',decision_version:0}}
+const proposal={id:'ai',file:'a.docx',status:'pending',hasProposal:true,after:'Alternative text',proposals:[{proposed_value:'Alternative text',source:'AI',model:'vision',model_call_id:'call'}],_raw:{corrected_artifact:'none',proposal_digest:'digest-test',finding_count:1,proposal_snapshot_ids:['snapshot'],source_revision:'source',decision_version:0}}
 const manual={id:'manual',file:'b.docx',rule_id:'1.3.1',status:'pending',manual:true,hasProposal:false,title:'Requires human input'}
-const admitted={...proposal,_raw:{...proposal._raw,automatic_approval:{run_id:'batch',source_revision:'source',state:'checking'}}}
+const admitted={...proposal,_raw:{corrected_artifact:'none',proposal_digest:'digest-test',...proposal._raw,automatic_approval:{run_id:'batch',source_revision:'source',state:'checking'}}}
 let queued, latestRefresh
 function View({scan='scan',batch='batch',revision=0,active=true}){
  const approval=useRunAiApproval(scan,batch)

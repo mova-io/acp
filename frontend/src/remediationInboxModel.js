@@ -94,6 +94,33 @@ export function recordedReviewDecision(f, decisions = {}) {
 
 const RESOLVED_STATUSES = new Set(['approved', 'applied', 'accepted', 'rejected', 'resolved', 'verified'])
 
+// ── Target replaced by a verified fix (contract C1/C3) ───────────────────────────────────────────
+// The backend marks a row `superseded_reason: 'target_removed_by_verified_fix'` when the object the
+// finding described no longer exists in the CURRENT corrected copy because another, verified change
+// replaced it (production: the 1.4.5 OCR text replacement removed the only body image, so the pending
+// 1.1.1 alt-text proposal for that image has nothing left to describe). This is a terminal RESULT, not
+// a stale suggestion to refresh and not a request for a decision: the row's own status is kept for the
+// audit trail (pending stays pending), so every classifier below must read this marker first.
+export const TARGET_REMOVED_REASON = 'target_removed_by_verified_fix'
+export function isTargetReplaced(f) {
+  return (f?.superseded_reason ?? f?._raw?.superseded_reason) === TARGET_REMOVED_REASON
+}
+/** The server's evidence for a target-replaced row, or null. */
+export function targetReplacementOf(f) {
+  if (!isTargetReplaced(f)) return null
+  const evidence = f?.superseded_evidence ?? f?._raw?.superseded_evidence
+  return evidence && typeof evidence === 'object' ? evidence : {}
+}
+
+// A writer, retry or eligibility job ACP has admitted and is still running. Only the exact-scope
+// projection (automaticReviewQueue → `automaticDisposition`) or an admitted queue entry can claim it.
+export const ACTIVE_AUTOMATIC_STATES = ['queued', 'processing', 'checking', 'applying', 'verifying']
+export function activeAutomaticStateOf(f) {
+  const state = f?.automaticDisposition?.state
+  if (ACTIVE_AUTOMATIC_STATES.includes(state)) return state
+  return f?.automaticQueued === true ? 'queued' : null
+}
+
 /** The lane for a finding, from its status first (blocked/recheck win) then its remediation shape. */
 export function laneOf(f) {
   const st = String(f?.status || '').toLowerCase()
@@ -144,7 +171,7 @@ export function effortLabel(f) {
 /** Has this finding been acted on? Resolved rows lose their unread emphasis and drop out of the
  *  "next unresolved" walk. A finding is resolved by an explicit status or a recorded decision. */
 export function isResolved(f, decisions = {}) {
-  if (optionalInspectionOf(f) || recordedReviewDecision(f, decisions)) return true
+  if (isTargetReplaced(f) || optionalInspectionOf(f) || recordedReviewDecision(f, decisions)) return true
   if (RESOLVED_STATUSES.has(String(f?.status || '').toLowerCase())) return true
   const d = decisions[f?.id] ?? decisions[f?.file]
   return !!(d && (d.state === 'accepted' || d.state === 'approved' || d.state === 'rejected' || d.state === 'not_applicable'))
@@ -166,6 +193,10 @@ function recordedApprovalState(f, decisions = {}) {
   const own = ownApprovalDecision(f, decisions)
   const st = String(f?.status || '').toLowerCase()
   if (!(['approved', 'applied', 'accepted'].includes(st) || ['approved', 'accepted'].includes(own?.state))) return 'none'
+  // The approval stays on record for the audit trail, but the object it approved a change to was
+  // removed by a verified fix. It is not stale (nothing to re-decide) and not an unconfirmed write
+  // (the writer refuses it) — `superseded` here means "target gone", not "approval out of date".
+  if (isTargetReplaced(f)) return 'current'
   if (f?.applied === true || f?.autoApplied === true || f?.validated || f?.verified === true) return 'current'
   const raw = (f && f._raw) || {}
   // The finding itself stopped being the work that was approved (a re-scan replaced the row, or a
@@ -217,10 +248,25 @@ export function approvalSuperseded(f, decisions = {}) {
  * question, already handled by the awaiting-validation path.
  */
 export function approvedWriteUnconfirmed(f, decisions = {}) {
+  // Target removed by a verified fix: there is nothing to write and nothing to recover.
+  if (isTargetReplaced(f)) return false
+  // A writer or retry job is running: the write is in progress, which is ACP's Processing work,
+  // not a recovery the reviewer should start a second time.
+  if (activeAutomaticStateOf(f)) return false
   if (!approvalRecordedOn(f, decisions) || f?.validated || f?.verified === true) return false
   if (f?.applied === true || f?._raw?.applied === 1 || f?.autoApplied === true) return false
   if (['decorative', 'essential_exception', 'out_of_scope'].includes(f?.resolution)) return false
   return Boolean(f?.hasProposal || f?.proposals?.length || f?._raw?.proposals?.length)
+}
+
+/**
+ * The automatic-approval marker's reason as it applies to a change that is already saved or approved:
+ * a pre-approval "a person must judge this" reason (responsibility 'human') is stale by then and is
+ * dropped; an ACP-side status reason (e.g. no active verification job) is kept. Null when none.
+ */
+export function postApprovalMarkerReason(f) {
+  const marker = f?.automaticDisposition
+  return marker?.reason && marker.responsibility !== 'human' ? marker.reason : null
 }
 
 /** The plain-language issue — the dominant text in a row. Strips the "DOCX · " format prefix that
@@ -313,6 +359,8 @@ export const WORKFLOW_LABELS = {
 
 /** The pipeline stage a finding sits in, for the workflow top tabs. */
 export function workflowStatusOf(f, decisions = {}) {
+  // Target removed by a verified fix: a terminal result whatever the row's audit status says.
+  if (isTargetReplaced(f)) return 'completed'
   if (optionalInspectionOf(f) || recordedReviewDecision(f, decisions)) return 'completed'
   const st = String(f?.status || '').toLowerCase()
   const d = decisions[f?.id] ?? decisions[f?.file]
@@ -447,6 +495,111 @@ export function progress(list, decisions = {}) {
   return { resolved, total: list.length }
 }
 
+// ── Terminal results and the one review-progress denominator (contract C3) ────────────────────────
+const VERIFIED_STATUSES = new Set(['verified', 'resolved_verified'])
+
+/**
+ * What kind of recorded RESULT a row is, or null while it is still work.
+ *   'target-replaced'  — the object was removed by another verified fix (server evidence)
+ *   'inspection'       — saved automatic changes, optional inspection
+ *   'decision'         — deferred / not applicable / otherwise closed by a recorded decision
+ *   'rejected'         — the suggestion was rejected
+ *   'verified'         — written and confirmed by a fresh assessment
+ *   'saved-unverified' — sits in Results but has NO verification evidence. Listed as a result, never
+ *                        counted as finished (reviewProgressOf puts it in awaitingOutcome).
+ * Non-null exactly when workflowStatusOf answers 'completed'.
+ */
+export function resultKindOf(f, decisions = {}) {
+  if (!f) return null
+  if (isTargetReplaced(f)) return 'target-replaced'
+  if (optionalInspectionOf(f)) return 'inspection'
+  if (workflowStatusOf(f, decisions) !== 'completed') return null
+  if (recordedReviewDecision(f, decisions)) return 'decision'
+  const st = String(f?.status || '').toLowerCase()
+  const d = decisions[f?.id] ?? decisions[f?.file]
+  if (st === 'rejected' || d?.state === 'rejected') return 'rejected'
+  if (VERIFIED_STATUSES.has(st) || f?.verified === true || f?.validated) return 'verified'
+  if (f?.applied === true || f?.autoApplied === true || f?._raw?.applied === 1) return 'saved-unverified'
+  return 'decision'
+}
+
+const FINISHED_KINDS = new Set(['verified', 'rejected', 'decision', 'inspection', 'target-replaced'])
+
+const isAutoFixRow = (f) => typeof f?.id === 'string' && f.id.startsWith('af:')
+const critOf = (f) => normSc(f?.rule_id ?? f?.ruleId ?? f?.wcag)
+const strs = (...values) => values.flat().filter((v) => v != null && v !== '').map(String)
+
+// The identities a HITL row is PROVEN to stand for: its own id, the finding ids it names, and the
+// target locators its proposals / finding instances / supersession evidence point at.
+function hitlIdentity(f) {
+  const raw = f?._raw || {}
+  const proposals = [...(Array.isArray(f?.proposals) ? f.proposals : []), ...(Array.isArray(raw.proposals) ? raw.proposals : [])]
+  const evidence = f?.superseded_evidence ?? raw.superseded_evidence
+  return {
+    ids: new Set(strs(f?.id, raw.id)),
+    findings: new Set(strs(f?.findingId, f?.finding_id, raw.finding_id, Array.isArray(raw.finding_ids) ? raw.finding_ids : [],
+      Array.isArray(evidence?.finding_ids) ? evidence.finding_ids : [])),
+    locators: new Set(strs(f?.locator, raw.locator, raw.instance_key, Array.isArray(raw.instance_keys) ? raw.instance_keys : [],
+      proposals.map((p) => p?.locator), Array.isArray(evidence?.targets) ? evidence.targets : [])),
+  }
+}
+
+/**
+ * The review TASKS in a queue population: each object is counted once.
+ *
+ * An `af:` auto-fix row (applied-change evidence) is dropped only when it is a PROVEN duplicate of a
+ * HITL row for the same file and criterion — the same stable item id, finding id or target locator.
+ * Two af rows are collapsed only when they name the same file + criterion + target (locator, item or
+ * finding). A distinct saved change is never dropped just because another row shares its file and
+ * criterion, a HITL row is never dropped for an af row, and a repeated id keeps its first copy.
+ */
+export function dedupeReviewTasks(rows = []) {
+  const list = Array.isArray(rows) ? rows : []
+  const hitlByKey = new Map()
+  for (const f of list) {
+    if (!f || isAutoFixRow(f)) continue
+    const key = `${f.file || ''}|${critOf(f)}`
+    if (!hitlByKey.has(key)) hitlByKey.set(key, [])
+    hitlByKey.get(key).push(hitlIdentity(f))
+  }
+  const seenIds = new Set()
+  const seenAutoTargets = new Set()
+  return list.filter((f) => {
+    if (!f) return false
+    if (f.id != null) {
+      const id = String(f.id)
+      if (seenIds.has(id)) return false
+      seenIds.add(id)
+    }
+    if (!isAutoFixRow(f)) return true
+    const key = `${f.file || ''}|${critOf(f)}`
+    const item = strs(f.sourceItemId), finding = strs(f.findingId), locator = strs(f.targetLocator)
+    if ((hitlByKey.get(key) || []).some((h) => item.some((v) => h.ids.has(v))
+        || finding.some((v) => h.findings.has(v)) || locator.some((v) => h.locators.has(v)))) return false
+    const targets = [...item.map((v) => `item:${v}`), ...finding.map((v) => `finding:${v}`), ...locator.map((v) => `locator:${v}`)]
+      .map((t) => `${key}|${t}`)
+    if (targets.some((t) => seenAutoTargets.has(t))) return false
+    targets.forEach((t) => seenAutoTargets.add(t))
+    return true
+  })
+}
+
+/**
+ * Review progress over ONE denominator. total = deduped tasks; decided = a decision is recorded or
+ * the row is a recorded result; finished = a verified/closed result (a saved-but-unverified change is
+ * NOT finished); awaitingOutcome = decided but not finished; open = total − decided.
+ */
+export function reviewProgressOf(rows = [], decisions = {}) {
+  const tasks = dedupeReviewTasks(rows)
+  let decided = 0, finished = 0
+  for (const f of tasks) {
+    const kind = resultKindOf(f, decisions)
+    if (kind != null || isResolved(f, decisions)) decided += 1
+    if (FINISHED_KINDS.has(kind)) finished += 1
+  }
+  return { total: tasks.length, decided, finished, awaitingOutcome: decided - finished, open: tasks.length - decided }
+}
+
 /** A "About N min remaining" label from a summed effort in seconds. Empty when nothing remains. */
 export function remainingLabel(sec) {
   if (!(sec > 0)) return ''
@@ -489,7 +642,18 @@ export function autoFixRows(fixes = [], nameOf = (sc) => sc, { aiApplicationReco
   return fixes.map((a, i) => {
     const sc = normSc(a.sc ?? a.rule_id ?? a.wcag)
     const fmt = (String(a.file || '').split('.').pop() || 'DOC').toUpperCase()
+    // Target identity, when the evidence names one — what dedupeReviewTasks proves a duplicate by.
+    // A reviewer-approved write records "approved by a reviewer · <locator>" in its note.
+    // The locator is everything after that exact prefix — it may contain spaces ("image 1", a Word
+    // docPr name) — trimmed only at the ends; an empty suffix names no target.
+    const noted = /^approved by a reviewer · ([\s\S]*)$/.exec(String(a.note || ''))?.[1]?.trim() || null
+    const targetLocator = a.locator ?? a.target ?? a.instance_key ?? noted ?? null
+    const sourceItemId = a.item_id ?? a.review_item_id ?? a.hitl_id ?? null
+    const findingId = a.finding_id ?? null
     return {
+      ...(targetLocator != null ? { targetLocator: String(targetLocator) } : {}),
+      ...(sourceItemId != null ? { sourceItemId: String(sourceItemId) } : {}),
+      ...(findingId != null ? { findingId: String(findingId) } : {}),
       id: `af:${a.file || ''}:${sc}:${i}`,
       file: a.file || '',
       page: a.page ?? null,

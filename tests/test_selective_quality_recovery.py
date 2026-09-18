@@ -10,15 +10,23 @@ def test_selective_merge_preserves_source_evidence_and_usable_draft():
     prior = [dict(locator='source', proposed_value='Author supplied caption', source='author',
                   source_sha256='frozen', chart_review={'status':'validated'}),
              dict(locator='missing', proposed_value=''),
-             dict(locator='uncertain', proposed_value='Swapped chart years', automatic_write_blocked=True)]
+             # Known contradiction with the pixels: repairable, so a regeneration may replace it.
+             dict(locator='uncertain', proposed_value='A blue square on a white background',
+                  automatic_write_blocked=True, caption_validation={'status': 'rejected',
+                      'reason_codes': ['pixel_shape_or_color_contradiction']}),
+             # Only a human meaning check outstanding: never replaced by another generation.
+             dict(locator='human', proposed_value='A bridge over water', automatic_write_blocked=True,
+                  review_status='needs_review', reason_code='quality_source_meaning_unverified')]
     original = deepcopy(prior)
     result = recovery.merge_recovered(prior, [
         dict(locator='source', proposed_value='Hallucinated replacement'),
         dict(locator='missing', proposed_value='New draft'),
-        dict(locator='uncertain', proposed_value='Corrected draft', requires_semantic_review=True)])
+        dict(locator='uncertain', proposed_value='Corrected draft', requires_semantic_review=True),
+        dict(locator='human', proposed_value='Regenerated over a human-awaiting draft')])
     assert result[0] == original[0]
     assert result[1]['proposed_value'] == 'New draft'
     assert result[2]['requires_semantic_review'] is True
+    assert result[3] == original[3]
     assert prior == original
 
 

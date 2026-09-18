@@ -111,7 +111,9 @@ export default function RemediationWorkspaceTabs({ runId, reviewCount = 0, snaps
   useEffect(() => {
     if (lastWorkspaceRequest.current === workspaceRequest) return
     lastWorkspaceRequest.current = workspaceRequest
-    if (['plan', ...MODES].includes(workspaceRequest?.mode) && !(planAccepted && workspaceRequest.mode === 'plan')) select(workspaceRequest.mode, { focusPanel: true })
+    // `focusPanel: false` is for a request that places focus itself (opening one review item
+    // focuses that row); focusing the panel a frame later would take it straight back.
+    if (['plan', ...MODES].includes(workspaceRequest?.mode) && !(planAccepted && workspaceRequest.mode === 'plan')) select(workspaceRequest.mode, { focusPanel: workspaceRequest.focusPanel !== false })
   }, [workspaceRequest, planAccepted])
 
   const onKeyDown = (event, index) => {

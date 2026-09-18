@@ -9,6 +9,8 @@ import { analysedCount, avgScore } from './docStatus.js'
 import { IDENTITY, SIM, remediableCount, recommendationSummary } from './sim.js'
 import { openReport, getScanInventory, getScanReportFacts } from './api.js'
 import ReportModeMenu from './ReportModeMenu.jsx'
+import { packetZipFormat, packetsSteerNote } from './reportPacketExport.js'
+import { locationOf, fmtOfFile } from './reportEvidence.js'
 import { loadPublished } from './ontology.js'
 import BalancedSummary from './BalancedSummary.jsx'
 import { reconcileBuckets, assessmentEligible } from './estateFunnel.js'
@@ -81,7 +83,9 @@ export default function Overview({ run, files, trend, trendDates, onGo, scanList
     ])
     setFactsProgress({ loaded: 0, total: null, complete: false })
     try {
-      const got = await loadScanReportFacts(run.id, { getScanReportFacts, onProgress: setFactsProgress })
+      // Reviewer/Full print a card per finding, each linking its EXACT record (contract 8), so they
+      // ask for the rows' finding records; the one-page Summary prints no cards and does not.
+      const got = await loadScanReportFacts(run.id, { getScanReportFacts, onProgress: setFactsProgress, includeFindings: mode !== 'summary' })
       const cmp = scanComparisonFromFacts(got.facts, run?.target || 'AA')
       // generateScanReport resolves the RENDERER's outcome ({ok, fallback, message, model}); it is
       // returned unchanged so the menu can say "HTML was downloaded instead" rather than reporting
@@ -136,12 +140,20 @@ export default function Overview({ run, files, trend, trendDates, onGo, scanList
     } finally { setExporting(false) }
   }
 
-  // Raw findings grid for analysts — every issue flattened to a row.
+  // Raw findings grid for analysts — every issue flattened to a row, from the documents on THIS
+  // screen. Rule id, page and location are included because each finding on screen carries them
+  // (issue_records.rule_id/page/location); a per-finding server id and status are NOT on screen, so
+  // they are not invented here — the per-file packets and Full evidence carry those.
   const exportCsv = () => {
-    const esc = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`
-    const head = ['Document', 'Department', 'Owner', 'Type', 'Score', 'WCAG', 'Level', 'Severity', 'Detail', 'Auto-fixable', 'Recommended action', 'Effort (min)']
+    // A leading = + - @ would run as a formula in a spreadsheet; quote it out.
+    const esc = (v) => { let s = String(v == null ? '' : v); if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`; return `"${s.replace(/"/g, '""')}"` }
+    const head = ['Document', 'Department', 'Owner', 'Type', 'Score', 'WCAG', 'Rule id', 'Level', 'Severity', 'Page', 'Location', 'Location (as recorded)', 'Detail', 'Auto-fixable', 'Recommended action', 'Effort (min)']
     const rows = []
-    files.forEach((f) => (f.issues || []).forEach((i) => rows.push([f.file, f.department, f.owner, (f.type || '').toUpperCase(), f.score ?? '', (i.wcag || '').replace(/^SC_/, '').replace(/_/g, '.'), i.level, i.severity, i.detail, i.auto ? 'yes' : 'no', f.rec?.action || '', f.rec?.etaMin || ''])))
+    files.forEach((f) => (f.issues || []).forEach((i) => {
+      const loc = locationOf(i, { fmt: fmtOfFile(f.file) })
+      rows.push([f.file, f.department, f.owner, (f.type || '').toUpperCase(), f.score ?? '', (i.wcag || '').replace(/^SC_/, '').replace(/_/g, '.'), i.rule_id ?? i.ruleId ?? '', i.level, i.severity,
+        Number.isInteger(i.page) && i.page > 0 ? i.page : '', loc?.label || 'Location not recorded', typeof i.location === 'string' ? i.location : '', i.detail, i.auto ? 'yes' : 'no', f.rec?.action || '', f.rec?.etaMin || ''])
+    }))
     const csv = [head, ...rows].map((r) => r.map(esc).join(',')).join('\r\n')
     const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' })
     const u = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = u; a.download = 'mova-findings-export.csv'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 1000)
@@ -373,13 +385,32 @@ export default function Overview({ run, files, trend, trendDates, onGo, scanList
         <details className="reports-menu">
           <summary className="exportbtn">Reports</summary>
           <div className="reports-menu-items" aria-label="Report exports">
-            <button type="button" onClick={doExport} disabled={exporting}>{exporting ? 'Generating PDF…' : 'Quarterly governance report'}</button>
+            {/* Four exports for four different jobs; each says which, so nobody has to open all
+                four to find out. */}
+            <div className="reports-menu-entry">
+              <button type="button" onClick={doExport} disabled={exporting} aria-describedby="rep-gov-hint">{exporting ? 'Generating PDF…' : 'Quarterly governance report'}</button>
+              <p id="rep-gov-hint" className="muted" style={{ fontSize: 11, margin: '2px 0 6px' }}>
+                Leadership summary of the estate: posture, risk and roadmap. Drawn in your browser, so this PDF is not tagged for assistive technology.
+              </p>
+            </div>
             <ReportModeMenu inline label="Scan report" disabled={!run?.id}
+                            modeNotes={{ full: packetsSteerNote(run?.files ?? files.length) }}
                             progress={factsProgress && `Reading report evidence\u2026 ${factsProgress.loaded}${factsProgress.total != null ? ` of ${factsProgress.total}` : ''} document(s)`}
-                            formats={[{ key: 'pdf', label: 'PDF', run: runScanReport }]} />
-            <button type="button" onClick={exportCsv} title="Every finding as a spreadsheet row">Findings (CSV)</button>
+                            formats={[{ key: 'pdf', label: 'PDF', run: runScanReport },
+                                      ...(run?.id ? [packetZipFormat({ scanId: run.id, getFiles: () => files })] : [])]} />
+            <div className="reports-menu-entry">
+              <button type="button" onClick={exportCsv} aria-describedby="rep-csv-hint">Findings (CSV)</button>
+              <p id="rep-csv-hint" className="muted" style={{ fontSize: 11, margin: '2px 0 6px' }}>
+                For analysis in a spreadsheet: one row per finding on the documents shown here, with rule, page and location.
+              </p>
+            </div>
             {!SIM && run?.id && (
-              <button type="button" onClick={() => openReport(run.id)} title="Backend-generated WCAG compliance report PDF">Compliance report (PDF)</button>
+              <div className="reports-menu-entry">
+                <button type="button" onClick={() => openReport(run.id)} aria-describedby="rep-cr-hint">Compliance report (PDF)</button>
+                <p id="rep-cr-hint" className="muted" style={{ fontSize: 11, margin: '2px 0 6px' }}>
+                  The server&apos;s conformance report for this scan, with its scope of assertion. Its remediation evidence covers the first 25 remediated documents; for every document&apos;s evidence use Full evidence or Per-file packets.
+                </p>
+              </div>
             )}
           </div>
         </details>

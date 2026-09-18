@@ -32,6 +32,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from hitl_viewed import viewed_fields
 
 ACP = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ACP / "api"))
@@ -192,6 +193,9 @@ class _Blob:
         self.data = data
         self.uploads.append((f, mime))
         return "http://b/2"
+    # The approved writer publishes digest-scoped and moves the pointer at commit.
+    def upload_immutable_retry(self, owner, sid, f, data, mime):
+        return self.upload_remediated(owner, sid, f, data, mime)
 
 
 @pytest.fixture()
@@ -231,7 +235,7 @@ def _decide(store, item_id: str, monkeypatch, *, resolution, values):
     import core
     from routes.hitl import HitlUpdate, hitl_update
     monkeypatch.setattr(core, "store", store)
-    return hitl_update(item_id, HitlUpdate(status="approved", resolution=resolution,
+    return hitl_update(item_id, HitlUpdate(status="approved", **viewed_fields(item_id), resolution=resolution,
                                            approved_values=values), None)
 
 

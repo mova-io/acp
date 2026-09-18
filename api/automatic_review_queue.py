@@ -75,7 +75,10 @@ def annotate(store, rows, owner):
     writer_jobs = {}
     for item in rows:
         item = {key: value for key, value in item.items() if not key.startswith('auto_approval_') and key != 'automatic_approval'}
-        if item.get('status') not in {'pending', 'approved'}:
+        if item.get('status') not in {'pending', 'approved'} or item.get('superseded'):
+            # A superseded row (criterion reassessed, or its target removed by a different
+            # verified fix) is terminal: no automatic-approval marker, and in particular no
+            # generic 'human' responsibility that would put it back in front of a person.
             result.append(item)
             continue
         sid = item.get('scan_id')

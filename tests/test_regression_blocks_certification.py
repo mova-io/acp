@@ -19,6 +19,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from hitl_viewed import approve_bound
 
 ACP = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ACP / "api"))
@@ -49,6 +50,9 @@ class _Blob:
     def download_remediated(self, owner, sid, f): return self.data
     def upload_remediated(self, owner, sid, f, data, mime):
         self.data = data; self.uploads.append((f, mime)); return "http://b/2"
+    # The approved writer publishes digest-scoped and moves the pointer at commit.
+    def upload_immutable_retry(self, owner, sid, f, data, mime):
+        return self.upload_remediated(owner, sid, f, data, mime)
 
 
 def _seed(store, *, names=("Picture 1",)):
@@ -65,8 +69,7 @@ def _seed(store, *, names=("Picture 1",)):
          "proposed_value": f"AI draft for {n}", "rationale": "r", "source": "llava"}
         for n in names
     ], rule_name="Non-text Content")
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, [])
+    approve_bound(store, item_id, [])
     call_id = store.record_ai_call(surface="vision", provider="ollama", model="llava:13b",
                                    zone="local", latency_ms=120, ok=True, scan_id=SID, file=FILE)
     store.record_hitl_event(SID, FILE, "1.1.1", item_id, "approve", model_call_id=call_id)

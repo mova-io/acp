@@ -858,13 +858,39 @@ def match_registered_route(path: str, method: str):
     return None
 
 
+import re as _re
+
+# The Langfuse trace routes in routes/scans.py, all documented "Public" — the redirect targets
+# (/scans/{sid}/trace/{kind}, /trace/session, /trace/file/{filename:path}) are plain <a>
+# navigations with no auth header, and their /exists, /data, /history siblings are read by the
+# same panels. ANCHORED, by shape: `trace` must be the segment right after the scan id. This was
+# `path.startswith("/scans/") and "/trace/" in path`, a substring test, so a document inside a
+# folder named `trace` opened EVERY /scans/{sid}/files/{filename:path}/... route (and
+# /scans/{sid}/decisions/{filename:path}, a PUT) to anonymous callers. Singular "trace" only —
+# the authed /scans/{sid}/traces JSON endpoint does not match.
+_PUBLIC_TRACE_ROUTE = _re.compile(
+    r"^/scans/[^/]+/trace/(?:session(?:/data)?|[^/]+(?:/exists)?|file/.+)$")
+_TRACE_ROUTE_TEMPLATE_PREFIX = "/scans/{sid}/trace/"
+
+
+def _is_public_trace_path(path: str) -> bool:
+    """The shape alone is not enough: /scans/jobs/trace/stream has it, and the router dispatches
+    it to GET /scans/jobs/{job_id}/stream (registered earlier), not to a trace route. So a path is
+    a public trace path only if EVERY registered route whose pattern matches it — any method, since
+    the gate does not know which one the router will pick — is itself a trace route."""
+    if not _PUBLIC_TRACE_ROUTE.match(path):
+        return False
+    from starlette.routing import Match
+    scope = {"type": "http", "path": path, "method": "GET", "path_params": {}}
+    return all(route.path.startswith(_TRACE_ROUTE_TEMPLATE_PREFIX)
+               for route in _protected_routes()
+               if route.matches(scope)[0] != Match.NONE)
+
+
 def is_public(path: str) -> bool:
     if path in ALWAYS_PUBLIC:
         return True
-    # The trace-redirect endpoint (/scans/{sid}/trace/{kind}) is a plain <a> navigation
-    # target — no auth header — so it must be public; it only 302s to a Langfuse deep
-    # link. Matches singular "/trace/", NOT the authed "/traces" JSON endpoint.
-    if path.startswith("/scans/") and "/trace/" in path:
+    if _is_public_trace_path(path):
         return True
     # R15 verify-this-report endpoint: anyone can check a scan's digest without signing in.
     if path.startswith("/public/"):

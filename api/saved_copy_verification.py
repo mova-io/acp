@@ -35,7 +35,28 @@ def project_documents(store, scan_id, owner, documents):
             for row in documents]
 
 
+def _reconcile_targets(store, scan_id, owner, file):
+    """Trigger (b): complete evidence was just recorded for the current copy. Retire review rows
+    whose targets a different verified fix removed. Evidence only — no write, no approval — and
+    best-effort: a verification result must never be lost to this bookkeeping."""
+    if not hasattr(store, '_db'):
+        return None
+    try:
+        from review_target_reconciliation import reconcile_from_saved_assessment
+        return reconcile_from_saved_assessment(store, scan_id, file, owner)
+    except Exception:
+        from swallowed import swallowed
+        swallowed('saved_copy_verification: reconciling removed review targets failed', scan_id)
+        return None
+
+
 def verify_saved_copy(store, scan_id, owner, file, digest, remediated_at):
+    evidence = _verify_saved_copy(store, scan_id, owner, file, digest, remediated_at)
+    _reconcile_targets(store, scan_id, owner, file)
+    return evidence
+
+
+def _verify_saved_copy(store, scan_id, owner, file, digest, remediated_at):
     # assess_candidate verifies ownership, actual bytes, current record both before and
     # after the detector runs, and outstanding approved writes. Only evidence is recorded.
     if not digest or not remediated_at:

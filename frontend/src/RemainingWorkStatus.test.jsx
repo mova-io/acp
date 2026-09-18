@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import RemainingWorkStatus from './RemainingWorkStatus.jsx'
 import { remainingWorkStatus } from './remainingWorkStatus.js'
-import { addRemediationEvent } from './remediationEventFeed.js'
+import { addRemediationEvent, visionSettles } from './remediationEventFeed.js'
 const event = (id, kind, reasonCode) => ({id:String(id),key:String(id),kind,documentKey:'private-ref',reasonCode})
 describe('remaining work responsibility', () => {
   it('describes legacy warnings using frozen local policy without asserting an endpoint diagnosis', () => {
@@ -43,7 +43,75 @@ describe('remaining work responsibility', () => {
     expect(result.notices.find(n=>n.key==='review')?.count).toBe(1)
   })
   it('replay order cannot resurrect recovered waits', () => {
-    expect(remainingWorkStatus({events:[event(4,'remediate.vision_retry_pending'),event(9,'remediate.vision_retry_recovered'),event(7,'remediate.vision_retry_blocked','vision_spending_reconciliation_required')]}).notices).toEqual([])
+    const run = e => ({...e, runId:'run-1'})
+    const complete = {...run(event(9,'remediate.vision_retry_recovered')), coverageComplete:true}
+    expect(remainingWorkStatus({events:[run(event(4,'remediate.vision_retry_pending')),complete,run(event(7,'remediate.vision_retry_blocked','vision_spending_reconciliation_required'))]}).notices).toEqual([])
+    // A recovery that does not PROVE complete coverage (historical, or missing 0 alone) settles no block.
+    expect(remainingWorkStatus({events:[run(event(4,'remediate.vision_retry_pending')),run(event(9,'remediate.vision_retry_recovered')),run(event(7,'remediate.vision_retry_blocked','vision_spending_reconciliation_required'))]}).notices).toHaveLength(1)
+    // Without a run binding nothing proves the recovered record belongs to the same retry chain.
+    expect(remainingWorkStatus({events:[event(9,'remediate.vision_retry_recovered'),event(7,'remediate.vision_retry_blocked','vision_spending_reconciliation_required')]}).notices).toHaveLength(1)
+  })
+  it('clears a current image notice only with a LATER event bound to the same run and item', () => {
+    const row = (id, kind, detail = {}, extra = {}) => addRemediationEvent([], {kind, document_ref:'private-ref', correlation_id:'run-1', detail, ...extra}, id)[0]
+    const pending = row(7, 'remediate.vision_retry_pending', {retry:2, item_id:'item-1'})
+    expect(pending.runId).toBe('run-1'); expect(pending.itemId).toBe('item-1')
+    expect(remainingWorkStatus({events:[pending]}).notices[0].label).toBe('AI retry queued')
+    for (const later of [
+      row(8, 'remediate.vision_retry_obsolete', {reason_code:'vision_retry_input_changed', no_ai_request:true, item_id:'item-1'}),
+      row(8, 'remediate.review_target_replaced', {rule_id:'1.1.1', removed_by_rule_id:'1.4.5', finding_count:1, item_id:'item-1'}),
+      row(8, 'remediate.review_target_replaced', {rule_id:'SC_1_1_1', removed_by_rule_id:'1.4.5', finding_count:1, item_id:'item-1'}),
+      row(8, 'remediate.vision_retry_recovered', {drafts:1, awaiting_review:1, missing:0, item_id:'item-1'}),
+    ]) {
+      expect(remainingWorkStatus({events:[pending, later]}).notices).toEqual([])
+      expect(remainingWorkStatus({events:[pending, {...later, id:'6', key:'6'}]}).notices[0].label).toBe('AI retry queued')
+      expect(remainingWorkStatus({events:[pending, {...later, runId:'run-2'}]}).notices[0].label).toBe('AI retry queued')
+      expect(remainingWorkStatus({events:[pending, {...later, runId:null}]}).notices[0].label).toBe('AI retry queued')
+      expect(remainingWorkStatus({events:[pending, {...later, itemId:'item-2'}]}).notices[0].label).toBe('AI retry queued')
+    }
+    expect(remainingWorkStatus({events:[pending, row(8, 'remediate.review_target_replaced', {rule_id:'1.4.3', removed_by_rule_id:'1.4.5', item_id:'item-1'})]}).notices[0].label).toBe('AI retry queued')
+    expect(remainingWorkStatus({events:[pending, row(8, 'remediate.vision_retry_obsolete', {reason_code:'vision_retry_run_inactive', item_id:'item-1'}, {document_ref:'other-ref'})]}).notices[0].label).toBe('AI retry queued')
+    expect(row(8, 'remediate.review_target_replaced', {rule_id:'SC_1_1_1', removed_by_rule_id:'SC_1_4_5'}).line).toBe('WCAG 1.1.1 review for Document no longer applies · its target was removed by a verified WCAG 1.4.5 fix')
+    expect(row(8, 'remediate.review_target_replaced', {rule_id:'<script>', removed_by_rule_id:'x'}).line).toBe('Review item for Document no longer applies · its target was removed by a verified fix')
+    expect(row(8, 'remediate.vision_retry_pending', {item_id:'bad item <x>'}).itemId).toBeNull()
+  })
+  it('a genuine block (which records no item) is settled by its own later same-run recovery, never by another run', () => {
+    const row = (id, kind, detail = {}, extra = {}) => addRemediationEvent([], {kind, document_ref:'private-ref', correlation_id:'run-1', detail, ...extra}, id)[0]
+    const blocked = row(5, 'remediate.vision_retry_blocked', {reason_code:'vision_spending_reconciliation_required'})
+    expect(blocked.itemId).toBeNull()
+    const pending = row(6, 'remediate.vision_retry_pending', {retry:1, item_id:'item-1'})
+    const recovered = row(7, 'remediate.vision_retry_recovered', {drafts:1, awaiting_review:0, uncertain:0, missing:0, item_id:'item-1'})
+    expect(remainingWorkStatus({events:[blocked, pending, recovered]}).notices).toEqual([])
+    // Directly after the block, only a recovery that records coverage_complete === true settles it.
+    expect(remainingWorkStatus({events:[blocked, recovered]}).notices[0].label).toBe('AI usage confirmation needs attention')
+    const proven = row(7, 'remediate.vision_retry_recovered', {drafts:1, awaiting_review:0, uncertain:0, missing:0, coverage_complete:true, item_id:'item-1'})
+    expect(proven.coverageComplete).toBe(true)
+    expect(remainingWorkStatus({events:[blocked, proven]}).notices).toEqual([])
+    const unknown = row(7, 'remediate.vision_retry_recovered', {drafts:1, awaiting_review:0, uncertain:1, missing:null, coverage_complete:false, item_id:'item-1'})
+    expect(remainingWorkStatus({events:[blocked, unknown]}).notices.map(n => n.label)).toEqual(['Image description coverage not confirmed', 'AI usage confirmation needs attention'])
+    expect(remainingWorkStatus({events:[blocked, {...recovered, runId:'run-2'}]}).notices[0].label).toBe('AI usage confirmation needs attention')
+    // A verified replacement cannot bind to a block that names no item: the notice stays.
+    expect(remainingWorkStatus({events:[blocked, row(8, 'remediate.review_target_replaced', {rule_id:'1.1.1', removed_by_rule_id:'1.4.5', item_id:'item-1'})]}).notices[0].label).toBe('AI usage confirmation needs attention')
+  })
+  it('delivery settles no image notice (publication may deliver with issues remaining)', () => {
+    expect(visionSettles({id:'1', documentKey:'doc', runId:'run', itemId:'a', kind:'remediate.vision_retry_blocked'},
+      {id:'2', documentKey:'doc', runId:'run', kind:'remediate.delivered'})).toBe(false)
+    const blocked = {...event(1, 'remediate.vision_retry_blocked', 'vision_budget_exhausted'), runId:'run'}
+    expect(remainingWorkStatus({events:[blocked, {...event(2, 'remediate.delivered'), runId:'run'}]}).notices[0].label).toBe('AI spending allowance exhausted')
+  })
+  it('an obsolete retry, in either wire form, is never a current notice', () => {
+    const projected = addRemediationEvent([], {kind:'remediate.vision_retry_blocked', document_ref:'private-ref', correlation_id:'run-1', detail:{reason_code:'vision_retry_input_changed', recorded_reason_code:'vision_recovery_unresolved', projection:'historical_obsolete_retry'}}, 3)[0]
+    expect(projected.obsolete).toBe(true)
+    expect(projected.reasonCode).toBe('vision_retry_input_changed')
+    expect(remainingWorkStatus({events:[projected]}).notices).toEqual([])
+    expect(remainingWorkStatus({events:[{...event(2,'remediate.vision_retry_pending'), runId:'run-1'}, projected]}).notices).toEqual([])
+  })
+  it('a recovered retry with images still missing keeps an actionable notice', () => {
+    const recovered = addRemediationEvent([], {kind:'remediate.vision_retry_recovered', document_ref:'ref', detail:{drafts:1, awaiting_review:1, missing:1}}, 4)[0]
+    const [notice] = remainingWorkStatus({events:[recovered]}).notices
+    expect(notice.label).toBe('Image description still needed')
+    expect(notice.responsibility).toContain('1 image in this document still needs a description')
+    expect(notice.responsibility).toContain('provide the description in Review')
+    expect(notice.presentation).toBe('action')
   })
   it('a finished document attempt does not supersede separately queued vision recovery', () => {
     expect(remainingWorkStatus({events:[event(1,'remediate.vision_retry_pending'),event(2,'remediate.document_completed')]}).notices[0].label).toBe('AI retry queued')

@@ -129,3 +129,13 @@ it('does not claim an auto inspection proposal is its saved excerpt', async () =
   _raw:{inspection_only:true}, proposals:[{proposed_value:'Proposal only'}]} })
  expect(container.querySelector('[aria-label="Recorded before and after"]').textContent).toContain('Saved change excerpt unavailable')
 })
+it('labels a saved change Original / Corrected, never Current or Proposed, and can defer the pair to its host', async () => {
+ const finding = { applied:true, validated:true, rule_id:'1.4.5', before:'[image of text]', proposals:[{proposed_value:'Checklist text', review_status:'needs_review'}],
+  _raw:{applied:true, validated:true, approved_value:'Checklist text'} }
+ const { container } = await render(QualityReviewEvidence, { finding })
+ const pair = container.querySelector('[aria-label="Recorded before and after"]')
+ expect([...pair.querySelectorAll('strong')].map(s => s.textContent)).toEqual(['Original', 'Corrected'])
+ expect(container.textContent).not.toMatch(/Current|Proposed|before approving/)
+ const hosted = await render(QualityReviewEvidence, { finding, showSavedPair: false })
+ expect(hosted.container.querySelector('[aria-label="Recorded before and after"]')).toBeNull()
+})

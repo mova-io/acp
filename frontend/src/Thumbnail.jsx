@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { getFileThumbnail, getFilePage, getFileGeometry } from './api.js'
+import { PreviewUnavailable } from './PagePreview.jsx'
 
 // A cropped close-up of the bounding box, so the reviewer can inspect the flagged object WITHOUT
 // leaving the card (ADR 0018 Slice 3 — zoom-to-object / crop-beside-full). Pure CSS on the page
@@ -17,9 +18,21 @@ function cropStyle(url, box) {
   }
 }
 
-// A rendered page of a document (ADR 0015). Best-effort and self-hiding: if the backend has no
-// render for this file (unsupported type, source unreachable, render failed, SIM mode) it renders
-// nothing at all. A missing preview is never a broken image and never a layout hole.
+// A rendered page of a document (ADR 0015). Best-effort: if the backend has no render for this
+// file (unsupported type, source unreachable, render failed, SIM mode) it shows an explicit
+// "Preview unavailable" placeholder. It used to render nothing, which left "Image 2 of 5" sitting
+// above a blank space on the review card — a gap that reads as a layout bug, not as a fact.
+//
+// Two modes, and they must never be confused:
+//   - ORIENTATION (no `page` prop and no `locator`): the document's first page, labelled as a
+//     document preview. It is NOT the location of any finding and never says it is.
+//   - FINDING PAGE (`page` passed, possibly null, or a `locator`): the page the finding sits on.
+//     `page` null with no measured box means no page was recorded → the placeholder says so.
+//     There is no page-1 fallback: `page={card.page || 1}` captioned an unplaced finding "Page 1".
+//   The page-N render comes from the generic preview route, which CLAMPS an out-of-range page, so
+//   the alt text names page N only when the server confirms it drew N (X-ACP-Rendered-Page), or
+//   N is 1; otherwise it says the page shown is not confirmed. A server that says it drew another
+//   page gets the placeholder, not a picture labelled with the wrong number.
 //
 // `page` is the page the FINDING sits on (hitl_queue.page), not always the cover. Both the fetch
 // and the alt text used to be hardcoded to page 1, so a reviewer judging a finding on page 7 was
@@ -33,12 +46,16 @@ function cropStyle(url, box) {
 // the geometry reports (not the `page` prop) to guarantee the box and the picture always agree.
 // No box (non-pptx, grouped/inherited transform, SIM, any failure) → the plain large preview at
 // the `page` prop, exactly as before. Honesty (ADR 0016): the box is a measured rect or absent.
-export default function Thumbnail({ scanId, file, page = 1, locator = null, className = '', maxHeight = 240, kindLabel = null }) {
+export default function Thumbnail({ scanId, file, page, locator = null, className = '', maxHeight = 240, kindLabel = null }) {
   const [url, setUrl] = useState(null)
+  const [failed, setFailed] = useState(null)       // the reason no image is shown, or null
+  const [confirmed, setConfirmed] = useState(false) // did the server confirm the page it drew?
   const [box, setBox] = useState(null)      // {page,x,y,w,h} normalized, or null
   const [geomResolved, setGeomResolved] = useState(false)   // has the geometry fetch settled?
   const [zoom, setZoom] = useState(false)   // Slice 3 — reveal the cropped close-up of the box
-  const fallbackPage = Number.isInteger(page) && page > 0 ? page : 1
+  const orientation = page === undefined && !locator
+  const recordedPage = Number.isInteger(page) && page > 0 ? page : null
+  const fallbackPage = orientation ? 1 : recordedPage
 
   // Resolve the box first (if a locator is given) — it may override which page we render.
   useEffect(() => {
@@ -55,28 +72,42 @@ export default function Thumbnail({ scanId, file, page = 1, locator = null, clas
   const renderPage = box && box.page ? box.page : fallbackPage
 
   useEffect(() => {
-    setUrl(null)
+    setUrl(null); setFailed(null); setConfirmed(false)
     if (!scanId || !file) return
     // When a locator is present, wait for the box to resolve before rendering — otherwise we'd
     // render the fallback page, then swap to the box's page (a visible flash of the wrong page).
     if (!geomResolved) return
+    if (renderPage == null) { setFailed('no page was recorded for this finding'); return }
     let objectUrl = null
     let live = true
-    const png = renderPage === 1 ? getFileThumbnail(scanId, file) : getFilePage(scanId, file, renderPage)
-    png.then((blob) => {
-      if (!live || !blob) return
+    // Page 1 always exists, so the cheap /thumbnail render IS page 1 and needs no confirmation.
+    const png = renderPage === 1
+      ? getFileThumbnail(scanId, file).then((blob) => ({ blob, drawn: 1 }))
+      : getFilePage(scanId, file, renderPage, { detail: true }).then((got) => (got instanceof Blob
+        ? { blob: got, drawn: null }
+        : { blob: got?.blob || null, drawn: got?.renderedPage ?? null }))
+    png.then(({ blob, drawn }) => {
+      if (!live) return
+      if (!blob) { setFailed(renderPage === 1 ? 'this document could not be rendered' : `page ${renderPage} could not be rendered`); return }
+      if (drawn != null && drawn !== renderPage) { setFailed(`page ${renderPage} is not in the document the preview service holds (it drew page ${drawn})`); return }
       objectUrl = URL.createObjectURL(blob)
+      setConfirmed(drawn === renderPage)
       setUrl(objectUrl)
-    })
+    }).catch(() => { if (live) setFailed('this document could not be rendered') })
     return () => { live = false; if (objectUrl) URL.revokeObjectURL(objectUrl) }
   }, [scanId, file, renderPage, geomResolved])
 
+  if (failed) return <PreviewUnavailable reason={failed} className={`thumb ${className}`.trim()} compact={orientation} />
   if (!url) return null
   const quadrant = box ? quad(box) : null
+  const name = file || 'the document'
+  const alt = orientation ? `First page of ${name} (document preview — not the location of a finding)`
+    : confirmed ? `Page ${renderPage} of ${name}`
+      : `Preview of ${name} requested for page ${renderPage}; the page shown is not confirmed`
   return (
     <figure className={`thumb ${box ? 'thumb-boxed' : ''} ${className}`.trim()}>
       <span className="thumb-imgwrap">
-        <img src={url} alt={`Page ${renderPage} of ${file || 'the document'}`} loading="lazy"
+        <img src={url} alt={alt} loading="lazy"
              style={{ maxHeight }} />
         {box && (
           <span className="evidence-box" aria-hidden="true"
@@ -102,6 +133,12 @@ export default function Thumbnail({ scanId, file, page = 1, locator = null, clas
         </figure>
       )}
       {!box && quadrant && <figcaption className="thumb-loc">Flagged object · {quadrant}</figcaption>}
+      {!orientation && !confirmed && (
+        <figcaption className="thumb-loc muted"
+                    title="The preview service does not say which page it drew, and it substitutes the nearest page when asked for one the document does not have.">
+          Page {renderPage} · not confirmed
+        </figcaption>
+      )}
     </figure>
   )
 }

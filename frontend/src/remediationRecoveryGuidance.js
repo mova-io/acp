@@ -1,11 +1,14 @@
 import { exclusionReason } from './batchReviewSelection.js'
 import { requiresPdfSourceEditing } from './pdfStructuralProposal.js'
-import { approvalSuperseded, approvedWriteUnconfirmed } from './remediationInboxModel.js'
+import { activeAutomaticStateOf, approvalSuperseded, approvedWriteUnconfirmed, isTargetReplaced, postApprovalMarkerReason } from './remediationInboxModel.js'
 
 // Use persisted eligibility and actual proposal lineage. Consent alone is not
 // evidence that an automatic job exists, and a document retry rewrites fixes.
 export function remediationRecoveryGuidance(row, decisions = {}) {
   if (!row || row.validated || row.automaticQueued) return null
+  // Replaced by a verified fix: a result, with nothing to refresh, retry or decide.
+  // A running writer/retry job: ACP's Processing work — offering a second retry would duplicate it.
+  if (isTargetReplaced(row) || activeAutomaticStateOf(row)) return null
   // An approval is on record and no longer binds. Stated FIRST, and with no retry offer: the
   // branch below offers a version-checked retry, which a superseded approval cannot authorize.
   // The backend's retry
@@ -27,7 +30,7 @@ export function remediationRecoveryGuidance(row, decisions = {}) {
   // the WRITE, and states the writer's own recorded reason rather than inventing one.
   if (approvedWriteUnconfirmed(row, decisions)) return {
     title: 'Approved — the change has not been written yet',
-    reason: row.automaticDisposition?.reason
+    reason: postApprovalMarkerReason(row)
       || 'ACP has your approval on record, but no confirmed write of the approved value exists for this finding.',
     next: 'Your approval stays recorded. Retry checks that the document and suggestion still match '
       + 'the approved versions. Matching records need no second approval; changed or missing version '
@@ -45,7 +48,8 @@ export function remediationRecoveryGuidance(row, decisions = {}) {
   const marker = row.automaticDisposition
   if (row.applied && !row.validated || ['verification_failed', 'verification_pending'].includes(row.status)) return {
     title: 'Check the saved correction',
-    reason: marker?.reason || 'The recorded correction has not passed independent verification.',
+    // A pre-approval "person must judge" marker no longer describes a saved correction.
+    reason: postApprovalMarkerReason(row) || 'The recorded correction has not passed independent verification.',
     next: 'Check the saved result and failed criterion. A document retry reapplies fixes; it is not a verification-only retry.',
     plan: true,
   }

@@ -59,13 +59,65 @@ def _xesc(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
-def _rec(diffs, rule_id: str, before: str, after: str, note: str = "") -> None:
+def _rec(diffs, rule_id: str, before: str, after: str, note: str = "", *,
+         locator: str | None = None) -> None:
     """Append one before→after record for the certification report's "Before → After"
     section. No-op when the caller passed no collector (default None). rule_id is the
     dotted WCAG SC, matching how the residual re-scan keys criteria, so the worker can
-    filter these to the fixes that verifiably cleared."""
+    filter these to the fixes that verifiably cleared.
+
+    `locator` is the location of the object this fixer actually edited, in a vocabulary ACP
+    already uses for it (`word:p:N`, `part#name`, a slide/table part). Callers pass it only when
+    they hold it; otherwise the key is ABSENT, which means "not recorded" — never a guess from
+    the criterion. Office producers never pass a page: Word pages are a layout artefact, and a
+    paragraph index is not one."""
     if diffs is not None:
-        diffs.append({"rule_id": rule_id, "before": before, "after": after, "note": note})
+        entry = {"rule_id": rule_id, "before": before, "after": after, "note": note}
+        if isinstance(locator, str) and locator.strip():
+            entry["locator"] = locator
+        diffs.append(entry)
+
+
+# Parts narrow enough that naming the part locates the edit: one slide, one defined table, one
+# sheet's drawing layer. `word/document.xml` is deliberately absent — it is the whole body, so
+# naming it would dress "somewhere in the document" up as a location.
+_PART_LOCATOR = re.compile(r"ppt/slides/slide\d+\.xml|xl/tables/table\d+\.xml|xl/drawings/drawing\d+\.xml")
+
+
+def _part_locator(part_name: str | None) -> str | None:
+    return part_name if part_name and _PART_LOCATOR.fullmatch(part_name) else None
+
+
+def _element_locator(xml: str, at: int, part_name: str | None) -> str | None:
+    """`part#fragment` for the alt-bearing element at offset `at`, or None.
+
+    Uses the fragment kinds the approved-alt writer resolves (apply_alt.resolve_target: the
+    element's `name`, then its image's r:embed id) and keeps one ONLY if resolving it back
+    against this same XML lands on this same element. A duplicated shape name or a shared image
+    relationship resolves to a different element first, so it is refused rather than recorded
+    as a location that points somewhere else."""
+    if not part_name:
+        return None
+    try:
+        from apply_alt import resolve_target, tag_for_part
+    except Exception:
+        return None
+    part_tag = tag_for_part(part_name)
+    if not part_tag:
+        return None
+    els = list(re.finditer(rf"<({part_tag})\b([^>]*?)(/?)>", xml))
+    idx = next((i for i, el in enumerate(els) if el.start() == at), None)
+    if idx is None:
+        return None
+    candidates = [_ATTR(els[idx].group(2), "name").strip()]
+    stop = els[idx + 1].start() if idx + 1 < len(els) else len(xml)
+    blip = re.search(r'\br:embed="([^"]+)"', xml[els[idx].end():stop])
+    if blip:
+        candidates.append(blip.group(1).strip())
+    for fragment in candidates:
+        if fragment and resolve_target(xml, part_tag, fragment) == at:
+            return f"{part_name}#{fragment}"
+    return None
 
 
 def _sc_ok(in_scope, sc: str) -> bool:
@@ -320,7 +372,8 @@ def _inject_descr(xml: str, tag: str, *, pic_only_within: str | None = None,
                   applied_fixes: list | None = None,
                   proposals: list | None = None,
                   evidence: list | None = None,
-                  guidance: str = "", skip_locators=()) -> tuple[str, list[tuple[str, str]], int]:
+                  guidance: str = "", skip_locators=(),
+                  fixed_locators: list | None = None) -> tuple[str, list[tuple[str, str]], int]:
     """Add descr= to every <tag …> lacking one, from a faithful source or (when
     vision_enabled) a genuine vision description of the image bytes.
 
@@ -336,6 +389,10 @@ def _inject_descr(xml: str, tag: str, *, pic_only_within: str | None = None,
     being asked to describe. Extracting it is deterministic (the bytes are in the package,
     reached through the part's .rels), so it does not depend on vision_enabled: the reviewer
     who most needs to see the image is exactly the one the vision model could not help.
+
+    `fixed_locators`, when given, receives one entry per `fixed` entry, in the same order: the
+    exact `part#fragment` of the element written (see _element_locator), or None when no
+    fragment resolves back to that element alone.
     """
     fixed: list[tuple[str, str]] = []
     deferred = 0
@@ -492,6 +549,10 @@ def _inject_descr(xml: str, tag: str, *, pic_only_within: str | None = None,
             actual_tag = re.match(r"<([^\s/>]+)", keep).group(1)
             keep = f'<{actual_tag}{new_attrs} descr="{_xesc(alt)}"{selfclose}>'
             fixed.append((alt, origin))
+            if fixed_locators is not None:
+                # Offsets of `m` are into the ORIGINAL xml, which is what a locator is resolved
+                # against: this edit only adds an attribute, it moves no element.
+                fixed_locators.append(_element_locator(xml, m.start(), part_name))
         out.append(keep)
     out.append(xml[last:])
     return "".join(out), fixed, deferred
@@ -666,18 +727,20 @@ def _fix_image_alt(entries: dict, *, vision_enabled: bool = False,
                 xml = entries[name].decode("utf-8")
             except UnicodeDecodeError:
                 continue
+            fixed_locators: list = []
             new_xml, fixed, part_deferred = _inject_descr(
                 xml, tag, pic_only_within=wrapper, captions=captions,
                 entries=entries, part_name=name, vision_enabled=vision_enabled,
                 context_file=context_file, scan_id=scan_id, vision_budget=vision_budget,
-                applied_fixes=applied_fixes, proposals=proposals, evidence=evidence)
+                applied_fixes=applied_fixes, proposals=proposals, evidence=evidence,
+                fixed_locators=fixed_locators)
             deferred += part_deferred
             if fixed:
                 entries[name] = new_xml.encode("utf-8")
-                for alt, origin in fixed:
+                for (alt, origin), locator in zip(fixed, fixed_locators):
                     applied.append(f"Alt text \"{alt[:60]}\" set from {origin} · 1.1.1")
                     _rec(diffs, "1.1.1", "(no alt text — image was skipped by screen readers)",
-                         alt, f"set from {origin}")
+                         alt, f"set from {origin}", locator=locator)
     return applied, deferred
 
 
@@ -730,7 +793,7 @@ def _pptx_add_title(xml: str, text: str) -> str:
     return re.sub(r"</p:grpSpPr>|<p:grpSpPr\s*/>", lambda m: m.group(0) + sp, xml, count=1)
 
 
-def _pptx_mark_table_headers(xml: str, diffs=None) -> tuple[str, int]:
+def _pptx_mark_table_headers(xml: str, diffs=None, *, part_name: str | None = None) -> tuple[str, int]:
     """WCAG 1.3.1: mark the first row of every multi-row DrawingML table as a header
     row by setting firstRow="1" on its <a:tblPr> — the direct analogue of the docx
     <w:tblHeader> and xlsx headerRowCount fixes, and exactly what the analyser's
@@ -750,7 +813,8 @@ def _pptx_mark_table_headers(xml: str, diffs=None) -> tuple[str, int]:
             n[0] += 1
             _rec(diffs, "1.3.1", "table had no header row marked (<a:tblPr firstRow> absent)",
                  'first row marked as a header row (<a:tblPr firstRow="1"/>)',
-                 "so a screen reader announces the column heading for every data cell")
+                 "so a screen reader announces the column heading for every data cell",
+                 locator=_part_locator(part_name))
             return block[:cut] + '<a:tblPr firstRow="1"/>' + block[cut:]
         attrs, close = pr.group(1), pr.group(2)
         fr = _FIRSTROW.search(attrs)
@@ -760,7 +824,8 @@ def _pptx_mark_table_headers(xml: str, diffs=None) -> tuple[str, int]:
         n[0] += 1
         _rec(diffs, "1.3.1", "table had no header row marked (<a:tblPr firstRow> absent)",
              'first row marked as a header row (firstRow="1")',
-             "so a screen reader announces the column heading for every data cell")
+             "so a screen reader announces the column heading for every data cell",
+             locator=_part_locator(part_name))
         return block[:pr.start()] + "<a:tblPr" + new_attrs + close + ">" + block[pr.end():]
 
     return _A_TBL.sub(fix, xml), n[0]
@@ -776,6 +841,9 @@ def _remediate_pptx_slides(entries: dict, diffs=None, in_scope=None) -> list[str
     slides = sorted((n for n in entries if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)),
                     key=lambda s: int(re.search(r"(\d+)", s).group()))
     n_title = n_recolor = n_reorder = n_tblhdr = 0
+    # The slide part each nested fixer below is editing. Slide PART, not slide number: the
+    # presentation's reading order lives in presentation.xml, so slide3.xml is not "slide 3".
+    current = [None]
 
     def recolor_run_in_sp(sp_match) -> str:
         nonlocal n_recolor
@@ -804,7 +872,7 @@ def _remediate_pptx_slides(entries: dict, diffs=None, in_scope=None) -> list[str
             _rec(diffs, "1.4.3", f"#{col.group(1).upper()} on #{bg.upper()} "
                  f"({_osx._contrast_ratio(bg, col.group(1)):.1f}:1 — fails AA)",
                  f"#{new} on #{bg.upper()} ({_osx._contrast_ratio(bg, new):.1f}:1 — passes AA)",
-                 f'text run "{text[:40]}"')
+                 f'text run "{text[:40]}"', locator=_part_locator(current[0]))
             return run.replace(f'srgbClr val="{col.group(1)}"', f'srgbClr val="{new}"', 1)
 
         return _A_R.sub(fix_run, sp)
@@ -838,7 +906,8 @@ def _remediate_pptx_slides(entries: dict, diffs=None, in_scope=None) -> list[str
             n_reorder += 1
             _rec(diffs, "1.3.2", "shapes read in the slide's stored (authoring) order",
                  f"{len(ordered)} shapes re-sequenced top-to-bottom, then left-to-right",
-                 "so a screen reader follows the visual reading order")
+                 "so a screen reader follows the visual reading order",
+                 locator=_part_locator(current[0]))
             for s in shapes:
                 tree.remove(s)
             for s in ordered:
@@ -847,6 +916,7 @@ def _remediate_pptx_slides(entries: dict, diffs=None, in_scope=None) -> list[str
         return data
 
     for sn in slides:
+        current[0] = sn
         xml = entries[sn].decode("utf-8")
         if not _pptx_has_title(xml) and _sc_ok(in_scope, "2.4.2"):
             texts = [t.strip() for t in _A_T.findall(xml) if t.strip()]
@@ -858,9 +928,10 @@ def _remediate_pptx_slides(entries: dict, diffs=None, in_scope=None) -> list[str
             xml = _pptx_add_title(xml, title_text)
             n_title += 1
             _rec(diffs, "2.4.2", "(no title — assistive tech announced the slide as “Untitled”)",
-                 title_text, f"programmatic title added to {sn.rsplit('/', 1)[-1]}")
+                 title_text, f"programmatic title added to {sn.rsplit('/', 1)[-1]}",
+                 locator=_part_locator(sn))
         if _sc_ok(in_scope, "1.3.1"):
-            xml, n_th = _pptx_mark_table_headers(xml, diffs)
+            xml, n_th = _pptx_mark_table_headers(xml, diffs, part_name=sn)
             n_tblhdr += n_th
         if _sc_ok(in_scope, "1.4.3"):
             xml = _P_SP.sub(recolor_run_in_sp, xml)
@@ -1056,7 +1127,8 @@ def _remediate_docx_structure(entries: dict, diffs=None, skipped=None, in_scope=
             st.set(val_attr, f"Heading{lvl}")
             _rec(diffs, "1.3.1", f'paragraph “{text[:40]}” was body text styled to look like a heading',
                  f"promoted to Heading {lvl} style",
-                 located("so it joins the heading outline assistive tech navigates by", paragraph_token(p)))
+                 located("so it joins the heading outline assistive tech navigates by", paragraph_token(p)),
+                 locator=paragraph_token(p))
         applied.append(f"Promoted {len(pseudo)} visually-styled pseudo-heading(s) to real headings · 1.3.1")
 
     # Ambiguous candidates are DEFERRED, not dropped. The finding still stands — the scanner
@@ -1097,7 +1169,8 @@ def _remediate_docx_structure(entries: dict, diffs=None, skipped=None, in_scope=
             _rec(diffs, "1.3.1", "first row was ordinary data cells (<w:tr>)",
                  "first row marked as a repeating header row (<w:tblHeader/>)",
                  located("so a screen reader announces the column heading for every data cell",
-                         f"word:table:{table_numbers[tbl]}:row:1"))
+                         f"word:table:{table_numbers[tbl]}:row:1"),
+                 locator=f"word:table:{table_numbers[tbl]}:row:1")
     if tbl_fixed:
         applied.append(f"Marked the first row as a header on {tbl_fixed} table(s) · 1.3.1")
 
@@ -1128,19 +1201,21 @@ def _remediate_docx_structure(entries: dict, diffs=None, skipped=None, in_scope=
         h1s = [h for h in headings if h[2] == 1]
         if not h1s and _sc_ok(in_scope, "1.3.1"):
             st, outline, level = headings[0]
+            _top = paragraph_token((st if st is not None else outline).getparent().getparent())
             set_level(st, outline, 1)
             applied.append("Promoted the top heading to Heading 1 · 1.3.1")
             _rec(diffs, "1.3.1", f"top heading level was H{level} — document had no Heading 1",
                  "top heading promoted to Heading 1",
-                 located("so the outline has a single, unambiguous document title level",
-                         paragraph_token((st if st is not None else outline).getparent().getparent())))
+                 located("so the outline has a single, unambiguous document title level", _top),
+                 locator=_top)
         elif len(h1s) > 1 and _sc_ok(in_scope, "1.3.1"):
             for st, outline, _ in h1s[1:]:
                 set_level(st, outline, 2)
             applied.append(f"Demoted {len(h1s) - 1} extra Heading 1(s) to Heading 2 · 1.3.1")
             _rec(diffs, "1.3.1", f"{len(h1s)} separate Heading 1s competed as the document title",
                  f"kept 1 Heading 1; demoted {len(h1s) - 1} to Heading 2",
-                 located("so the heading outline nests correctly under one title", "word:document:outline"))
+                 located("so the heading outline nests correctly under one title", "word:document:outline"),
+                 locator="word:document:outline")
         skip_fixed, prev_lvl = 0, 0
         for st, outline, _ in (headings if _sc_ok(in_scope, "2.4.6") else ()):
             lvl = heading_level(st, outline)
@@ -1187,7 +1262,8 @@ def _remediate_docx_structure(entries: dict, diffs=None, skipped=None, in_scope=
             run_text = "".join(t.text or "" for t in run.iter(f"{{{W}}}t")).strip()
             _rec(diffs, "1.4.3", f"#{fg.upper()} on #{bg.upper()} ({ratio_before:.1f}:1 — fails AA)",
                  f"#{new} on #{bg.upper()} ({ratio_after:.1f}:1 — passes AA)",
-                 located(f'text run "{run_text[:40]}"' if run_text else "low-contrast text run", run_token(run)))
+                 located(f'text run "{run_text[:40]}"' if run_text else "low-contrast text run", run_token(run)),
+                 locator=run_token(run))
     if contrast_fixed:
         applied.append(f"Recoloured {contrast_fixed} low-contrast run(s) to ≥4.5:1 · 1.4.3")
 
@@ -1218,6 +1294,11 @@ def _remediate_docx_structure(entries: dict, diffs=None, skipped=None, in_scope=
     labelled, bare = _fl.plan_labels(root) if _labels_in_scope else ([], 0)
     for sdt, label in labelled:
         _fl.set_alias(sdt, label)
+        # An inline content control sits inside one paragraph, and that paragraph is where the
+        # label was written. A block-level control wraps paragraphs instead of sitting in one:
+        # it has no containing paragraph, so its location stays unrecorded.
+        _holder = next(sdt.iterancestors(f"{{{W}}}p"), None)
+        _where = paragraph_token(_holder) if _holder in paragraph_numbers else None
         for _sc, _after in (
             ("3.3.2", f'labelled “{label}” from the adjacent text'),
             ("4.1.2", f'accessible name “{label}” borrowed from the adjacent text'),
@@ -1226,7 +1307,8 @@ def _remediate_docx_structure(entries: dict, diffs=None, skipped=None, in_scope=
                  "form field had no label a screen reader could announce "
                  "(content control with no title/alias)",
                  _after,
-                 "so assistive tech names the field when the user tabs into it")
+                 "so assistive tech names the field when the user tabs into it",
+                 locator=_where)
     if labelled:
         applied.append(f"Labelled {len(labelled)} form field(s) from adjacent text · 3.3.2, 4.1.2")
     if bare and skipped is not None:
@@ -1258,7 +1340,8 @@ def _remediate_xlsx_structure(entries: dict, diffs=None, in_scope=None) -> list[
                 tbl_fixed += 1
                 _rec(diffs, "1.3.1", 'table defined with headerRowCount="0" (no header row)',
                      'headerRowCount="1"',
-                     "so the first row is announced as column headers")
+                     "so the first row is announced as column headers",
+                     locator=_part_locator(name))
     if tbl_fixed:
         applied.append(f"Gave {tbl_fixed} table(s) a header row · 1.3.1")
 
@@ -1730,7 +1813,8 @@ def remediate_office(path: Path, *, lang: str = "en-US", ai_enabled: bool = True
             for a in alts:
                 applied.append(f"Alt text \"{a[:60]}\" set from the chart's own data · 1.1.1")
                 _rec(diffs, "1.1.1", "(native chart had no alt text)", a,
-                     "read from the chart's embedded data — exact values, no model")
+                     "read from the chart's embedded data — exact values, no model",
+                     locator=_part_locator(name))
     except Exception:
         skipped.append("native-chart alt text could not be applied")
 

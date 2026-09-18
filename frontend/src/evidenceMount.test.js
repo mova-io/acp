@@ -79,7 +79,9 @@ describe('the evidence card is actually mounted, and owns the write', () => {
   })
 
   it('telemetry reaches the API — hitl_events.review_ms was previously always null', () => {
-    expect(read('HitlBell.jsx')).toMatch(/updateHitlItem\(itemId, status, note, approvedValue, \{ \.\.\.telemetry, expectedVersion \}\)/)
+    // `bound` is the viewed version (expected_version + source revision + snapshot ids) — see
+    // viewedApprovalBell.test.jsx for the request body it produces.
+    expect(read('HitlBell.jsx')).toMatch(/updateHitlItem\(itemId, status, note, approvedValue, \{ \.\.\.telemetry, \.\.\.bound \}\)/)
   })
 
   it('an editor appears for value fixes even when the AI drafted nothing', () => {

@@ -215,7 +215,7 @@ describe('RemediationInbox — workflow-status queue', () => {
       { id: 32, file: 'c.pdf', title: 'PDF · Scanned page, no text', rule_id: '1.1.1' },
     ]
     const calls = []
-    await render({ queue: q.map(f => ({ ...f, _raw: { decision_version: 0, proposal_snapshot_ids: [String(f.id)], source_revision: 'source' } })), decisions: {}, onDecide: (f, d) => calls.push([f.id, d.value]) })
+    await render({ queue: q.map(f => ({ ...f, _raw: { corrected_artifact: 'none', proposal_digest: 'digest-test', decision_version: 0, proposal_snapshot_ids: [String(f.id)], source_revision: 'source' } })), decisions: {}, onDecide: (f, d) => calls.push([f.id, d.value]) })
     await click(btnByText('Bulk approve ready proposals'))
     const panel = container.querySelector('[aria-label="Select findings for approval"]')
     expect(panel.textContent).toContain('2 findings ready')
@@ -250,7 +250,7 @@ describe('RemediationInbox — workflow-status queue', () => {
       { id: 21, file: 'b.docx', title: 'DOCX \u00b7 Image needs alt text', rule_id: '1.1.1', hasProposal: true, after: 'A photo' },
     ]
     // The second write is refused; the first succeeds.
-    await render({ queue: q.map(f => ({ ...f, _raw: { decision_version: 0, proposal_snapshot_ids: [String(f.id)], source_revision: 'source' } })), decisions: {},
+    await render({ queue: q.map(f => ({ ...f, _raw: { corrected_artifact: 'none', proposal_digest: 'digest-test', decision_version: 0, proposal_snapshot_ids: [String(f.id)], source_revision: 'source' } })), decisions: {},
       onDecide: (f) => (f.id === 21 ? Promise.reject(Object.assign(new Error('conflict'), { status: 409 })) : Promise.resolve()) })
     await click(btnByText('Select matching proposals (2)'))
     await click(btnByText('Select all ready'))
@@ -307,7 +307,8 @@ describe('RemediationInbox — workflow-status queue', () => {
     // run-approval ledger and on the approve button; see hitlPanelCounts.test.jsx.
     expect(container.textContent).toContain('Approve AI suggestions 2')
     expect(container.textContent).toContain('Fix manually 1')
-    expect(container.textContent).toContain('0 of 3 reviewed')        // progress is a separate lens
+    // Progress is a separate lens, over the same three tasks: decisions and final outcomes.
+    expect(container.querySelector('.rinbox-progress').textContent).toContain('0 of 3 tasks have a recorded decision')
   })
 
   it('partitions findings across the workflow tabs by pipeline stage', async () => {
@@ -356,7 +357,12 @@ describe('RemediationInbox — workflow-status queue', () => {
     await render({ queue: QUEUE, decisions: { 2: { state: 'accepted' }, 3: { state: 'rejected' } } })
     expect(container.textContent).toContain('Awaiting verification 1')
     expect(container.textContent).toContain('Results 1')           // id3 (rejected → terminal)
-    expect(container.textContent).toContain('2 of 3 reviewed')       // id2 + id3 reviewed (id1 auto-fix still needs review)
+    // id2 + id3 are decided (id1 auto-fix still needs review); only the rejection (id3) is a final
+    // outcome — the approval (id2) is awaiting its outcome, never counted as done.
+    const progress = container.querySelector('.rinbox-progress').textContent
+    expect(progress).toContain('2 of 3 tasks have a recorded decision')
+    expect(progress).toContain('1 of 3 tasks has a final outcome')
+    expect(progress).toContain('1 awaiting outcome')
   })
 
   it('marks a finding "Not applicable" (out of scope), resolving it without a fix', async () => {
@@ -392,16 +398,16 @@ describe('RemediationInbox — workflow-status queue', () => {
     // The ambiguous bare "Reject" button is gone.
     const bareReject = [...container.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Reject')
     expect(bareReject).toBe(false)
-    // Verification (Written → Re-scan → Certified) is not shown before the decision is saved.
+    // Verification (Written → Re-scan) is not shown before the decision is saved.
     expect(container.textContent).not.toContain('Re-scan')
   })
 
-  it('shows the verification path (Written → Re-scan → Certified) once a finding is saved', async () => {
+  it('shows the verification path (Approved → Re-scan) once a finding is saved, without certifying it', async () => {
     await render({ queue: QUEUE, decisions: { 2: { state: 'accepted' } } })
     await click(btnByText('Awaiting verification'))
     await click(btnByText('Image needs alt text'))
     expect(container.textContent).toContain('Re-scan')
-    expect(container.textContent).toContain('Certified')
+    expect(container.textContent).not.toMatch(/certif/i)
   })
 
   it('always renders exactly the inbox and review panes', async () => {
@@ -629,7 +635,7 @@ it('shows unavailable and a retry after a failed approval check without claiming
 
 it('explains individual judgment with auto-apply on and preserves its manual action', async () => {
  const policy={enabled:true,supported:true,run_id:'run',source_revision:'source'}
- const row={...QUEUE[1],id:2,status:'pending',_raw:{automatic_approval:{state:'review_required',owner:'You',reason:'Diagram content requires your judgment.',run_id:'run',source_revision:'source'}}}
+ const row={...QUEUE[1],id:2,status:'pending',_raw:{corrected_artifact:'none',proposal_digest:'digest-test',automatic_approval:{state:'review_required',owner:'You',reason:'Diagram content requires your judgment.',run_id:'run',source_revision:'source'}}}
  await render({queue:[row],automaticApprovalPolicy:policy,autoApprove:true,legacyApprovalControls:false})
  expect(container.textContent).toContain('Diagram content requires your judgment.')
  expect(container.textContent).toContain('ACP automatically applies eligible AI suggestions')
@@ -665,7 +671,7 @@ it('genuine manual crop authoring remains explicitly a human task',async()=>{
  expect(container.textContent).toContain('fix it by hand in the source app')
 })
 it('admitted automatic fixes do not request human confirmation when no recheck callback is rendered',async()=>{
- const row={id:97,file:'queued.docx',scanId:'scan',rule_id:'1.1.1',status:'pending',hasProposal:true,after:'Caption',proposals:[{proposed_value:'Caption',source:'AI',model:'vision',model_call_id:'call'}],_raw:{finding_count:1,proposal_snapshot_ids:['snap'],source_revision:'source',decision_version:0,automatic_approval:{state:'checking',run_id:'run',source_revision:'source',proposal_snapshot_ids:['snap']}}}
+ const row={id:97,file:'queued.docx',scanId:'scan',rule_id:'1.1.1',status:'pending',hasProposal:true,after:'Caption',proposals:[{proposed_value:'Caption',source:'AI',model:'vision',model_call_id:'call'}],_raw:{corrected_artifact:'none',proposal_digest:'digest-test',finding_count:1,proposal_snapshot_ids:['snap'],source_revision:'source',decision_version:0,automatic_approval:{state:'checking',run_id:'run',source_revision:'source',proposal_snapshot_ids:['snap']}}}
  await render({queue:[row],automaticApprovalPolicy:{enabled:true,run_id:'run',source_revision:'source'},legacyApprovalControls:false,autoApprove:true,initialTab:'awaiting-validation',onRecheck:undefined})
  expect(container.textContent).toContain('No individual approval or human confirmation is needed now')
  expect(container.textContent).not.toContain('Human confirmation required')
@@ -723,7 +729,7 @@ it('does not offer apply for an unsupported PDF outline with a stale applied fla
 
 it('removes saved AI language fixes with stale review reasons from Needs your input', async () => {
  const marker={state:'review_required',responsibility:'human',reason:'Proposal requires individual judgment or has no exact AI provenance',scan_id:'scan',run_id:'run',source_revision:'source',proposal_snapshot_ids:['snap']}
- const saved={id:701,file:'rights-notice.docx',scanId:'scan',rule_id:'3.1.2',status:'approved',applied:true,validated:false,hasProposal:true,after:'es',_raw:{scan_id:'scan',proposal_snapshot_ids:['snap'],automatic_approval:marker}}
+ const saved={id:701,file:'rights-notice.docx',scanId:'scan',rule_id:'3.1.2',status:'approved',applied:true,validated:false,hasProposal:true,after:'es',_raw:{corrected_artifact:'none',proposal_digest:'digest-test',scan_id:'scan',proposal_snapshot_ids:['snap'],automatic_approval:marker}}
  const manual={id:702,file:'manual-crop.pdf',rule_id:'1.4.5',status:'pending',manual:true,title:'Describe crop'}
  await render({queue:[saved,manual],automaticApprovalPolicy:{enabled:true,run_id:'run',source_revision:'source'},legacyApprovalControls:false,autoApprove:true,initialTab:'review'})
  expect(container.querySelector('.rinbox-queuepane').textContent).not.toContain('rights-notice.docx')

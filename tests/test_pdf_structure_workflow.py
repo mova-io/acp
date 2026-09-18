@@ -7,6 +7,7 @@ import pikepdf
 
 from test_apply_approved_values import store, _Blob, _run_handler
 from test_pdf_structure_repairs import fixture, target, CONTENT
+from hitl_viewed import approve_bound
 
 
 def seed(st, data, *, rule='2.4.6', plan=None, locator=None):
@@ -19,8 +20,7 @@ def seed(st, data, *, rule='2.4.6', plan=None, locator=None):
     item = st.enqueue_proposals('s1', 'tagged.pdf', rule, [{'locator': locator,
         'proposed_value': json.dumps(plan or {'op': 'heading', 'role': 'H1'}),
         'before': '(paragraph)', 'kind': 'pdf-tag-heading', 'source': 'existing tag heuristic'}])
-    st.update_hitl_item(item, 'approved', None, None)
-    st.approve_proposal_values(item, [])
+    approve_bound(st, item, [])
     return item, locator
 
 

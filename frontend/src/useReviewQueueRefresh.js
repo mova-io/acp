@@ -34,7 +34,8 @@ export default function useReviewQueueRefresh({ scanId, batchId, approval, progr
         rejectDeadline(new Error('Review queue refresh timed out.'))
       },TIMEOUT_MS)
       try {
-        const rows = await Promise.race([listHitlQueue(scanId,null,{signal}),timeout])
+        // Target-replaced rows are terminal results the workspace must be able to show.
+        const rows = await Promise.race([listHitlQueue(scanId,null,{signal,includeTargetReplaced:true}),timeout])
         if (owns()) callbacks.current.onRows?.(rows)
       } catch (error) {
         if (owns()) {

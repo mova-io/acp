@@ -106,7 +106,7 @@ def store(monkeypatch, tmp_path):
     return store_module.Store()
 
 
-def seed(store, *, status='approved', value='Discharge instructions'):
+def seed(store, *, status='approved', value='Discharge instructions', corrected_sha256='a'*64):
     """The production shape: one 1.4.5 proposal, approved, `applied` never set."""
     store.init_scan_run(SID, 'drive', 1, '2026-09-17T00:00:00Z', 'rubric', 'hash')
     store.save_file_result(SID, {
@@ -115,7 +115,8 @@ def seed(store, *, status='approved', value='Discharge instructions'):
         'issues': [{'ruleId': 'OCR_IMAGE_OF_TEXT', 'wcag': '1.4.5 Images of Text',
                     'severity': 'SERIOUS', 'detail': 'embedded image 1 contains readable text'}],
     }, '2026-09-17T00:00:00Z')
-    store.record_remediation(SID, FILE, drive_write_url='http://d/1', blob_url='http://b/1', corrected_sha256='a'*64)
+    store.record_remediation(SID, FILE, drive_write_url='http://d/1', blob_url='http://b/1',
+                             corrected_sha256=corrected_sha256)
     item_id = store.enqueue_proposals(SID, FILE, '1.4.5', [
         {'locator': 'image 1', 'before': 'text baked into an image', 'proposed_value': value,
          'rationale': 'r', 'source': 'OCR'}], rule_name='Images of Text')
@@ -273,9 +274,13 @@ def test_the_refused_crop_row_recovers_end_to_end_once_the_writer_can_write(stor
     from test_image_of_text_writer_crop_geometry import placed
     from test_remediation_verified_office_image_replacement import members
 
-    item_id = seed(store, value='Discharge instructions\nTake one tablet daily')
-    approvals_before = store.get_hitl_item(item_id)['decision_version']
+    # The corrected copy the reviewer approved against IS these bytes: the approval binds its
+    # sha, and the retry later writes into exactly them.
+    import hashlib
     cropped = placed({})
+    item_id = seed(store, value='Discharge instructions\nTake one tablet daily',
+                   corrected_sha256=hashlib.sha256(cropped).hexdigest())
+    approvals_before = store.get_hitl_item(item_id)['decision_version']
     blob = lane._Blob(cropped)
     monkeypatch.setattr(core, 'store', store)
     monkeypatch.setitem(_sys.modules, 'blob', blob)
@@ -291,10 +296,11 @@ def test_the_refused_crop_row_recovers_end_to_end_once_the_writer_can_write(stor
     assert 'retry saving it' in stalled_reason(row)
 
     # The obstacle is removed the only honest way: the document no longer carries the crop.
+    # The refused run saved nothing, so the corrected copy — and the approval's binding to it —
+    # is unchanged.
     with store._db.cursor() as cur:
         store._db.execute(cur, "UPDATE jobs SET status='done' WHERE scan_id=%s", (SID,))
-    import hashlib
-    store.record_remediation(SID, FILE, corrected_sha256=hashlib.sha256(blob.data).hexdigest())
+    assert store.get_file_record(SID, FILE)['corrected_sha256'] == hashlib.sha256(blob.data).hexdigest()
     assert store.retry_approved_write(item_id)['accepted'] is True
     queued = next(j for j in writer_jobs(store) if j['status'] == 'queued')
     handlers._apply_approved_values(json.loads(queued['payload']), {})

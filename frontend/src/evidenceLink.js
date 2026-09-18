@@ -1,0 +1,257 @@
+// Direct links from a report to ONE recorded finding or saved change (Contract 2).
+//
+// The app has no document route of its own, so a finding link is an app URL that the evidence
+// viewer (FindingEvidenceViewer.jsx, mounted by App.jsx) resolves against the owner-scoped facts
+// endpoint:
+//
+//   /?view=evidence&scan=<sid>&file=<file>&finding=<findingId>   (or &change=<changeId>)
+//     [&sha=<64 hex>]              the artifact version the report was built against
+//     [&version=source|corrected]  which copy of the document the link means
+//
+// and, for a place that names a whole document rather than one record (fileEvidenceHref):
+//
+//   /?view=evidence&scan=<sid>&file=<file>[&sha=…][&version=…]
+//
+// Three rules this module exists to hold:
+//   - Every value goes through URLSearchParams. File names here are real paths ("Board/2026 Q1
+//     #2 & notes.docx"), and a hand-built query string is how a `#` or `&` in a file name turns a
+//     link to one document into a link to another.
+//   - A link is never fabricated. No scan, no file, or no record id → null, and the report prints
+//     the location as text. A link that names nothing specific is worse than no link: it looks
+//     exact and lands on a guess.
+//   - No token or credential is ever put in the URL. Auth happens in the app, after the click.
+//
+// Report models carry the RELATIVE href. Anything written to a file a reader downloads (HTML, ZIP)
+// must go through absoluteAppHref first: a relative "/?view=…" inside a downloaded file resolves
+// against the reader's own disk, not against ACP.
+
+export const EVIDENCE_VIEW = 'evidence'
+export const EVIDENCE_VERSIONS = Object.freeze(['source', 'corrected'])
+export const EVIDENCE_PARAMS = Object.freeze(['view', 'scan', 'file', 'finding', 'change', 'sha', 'version'])
+
+const HEX64 = /^[0-9a-f]{64}$/
+// Long enough for any real SharePoint path; short enough that a pasted blob is not a "file name".
+const MAX_VALUE = 2048
+
+// A usable identifier: a non-empty string (or a finite number), bounded, with no control
+// characters. Anything else is "not recorded" — never coerced into something that looks like one.
+function ident(v) {
+  if (typeof v === 'number' && Number.isFinite(v)) v = String(v)
+  if (typeof v !== 'string' || !v || v.length > MAX_VALUE) return null
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(v)) return null
+  return v
+}
+const sha = (v) => (typeof v === 'string' && HEX64.test(v.toLowerCase()) ? v.toLowerCase() : null)
+const version = (v) => (EVIDENCE_VERSIONS.includes(v) ? v : null)
+
+/**
+ * The relative app href for one finding or one saved change, or null when a required value is
+ * missing. Exactly one of findingId / changeId: a link naming both is ambiguous about which
+ * record it means, so none is made.
+ */
+export function evidenceHref({ scanId, file, findingId = null, changeId = null, sha256 = null, version: v = null } = {}) {
+  const scan = ident(scanId)
+  const name = ident(file)
+  const finding = ident(findingId)
+  const change = ident(changeId)
+  if (!scan || !name) return null
+  if ((finding ? 1 : 0) + (change ? 1 : 0) !== 1) return null
+  const q = new URLSearchParams()
+  q.set('view', EVIDENCE_VIEW)
+  q.set('scan', scan)
+  q.set('file', name)
+  if (finding) q.set('finding', finding)
+  else q.set('change', change)
+  const s = sha(sha256)
+  if (s) q.set('sha', s)
+  const ver = version(v)
+  if (ver) q.set('version', ver)
+  return `/?${q.toString()}`
+}
+
+/**
+ * The relative app href for ONE DOCUMENT of a scan: its identity, assessment state, counts, and
+ * every recorded finding and saved change, each linking on to its exact record. Null when the
+ * scan or file is missing. It is for a place that names a document rather than a record (a
+ * packet index row), and it never stands in for a record link — evidenceHref with no record id
+ * stays null.
+ */
+export function fileEvidenceHref({ scanId, file, sha256 = null, version: v = null } = {}) {
+  const scan = ident(scanId)
+  const name = ident(file)
+  if (!scan || !name) return null
+  const q = new URLSearchParams()
+  q.set('view', EVIDENCE_VIEW)
+  q.set('scan', scan)
+  q.set('file', name)
+  const s = sha(sha256)
+  if (s) q.set('sha', s)
+  const ver = version(v)
+  if (ver) q.set('version', ver)
+  return `/?${q.toString()}`
+}
+
+/** True for a parsed target that names a whole document rather than one record. */
+export const isFileTarget = (t) => !!(t && t.scanId && t.file && !t.findingId && !t.changeId)
+
+/**
+ * `location.search` (or the relative href itself) → the link's target, or null when it is not a
+ * well-formed evidence link. A repeated parameter is refused rather than resolved: two `file=`
+ * values means the link does not say which document it is about, and picking one is exactly the
+ * "select some other file" failure.
+ *
+ * A malformed `sha` or `version` is dropped (null), not fatal — the viewer then says it cannot
+ * tell which version the link meant, which is true, instead of refusing to show the record.
+ */
+export function parseEvidenceHref(search) {
+  if (typeof search !== 'string') return null
+  let s = search
+  if (s.startsWith('/?')) s = s.slice(1)
+  else if (!s.startsWith('?')) {
+    if (/[/:]/.test(s.split('?')[0])) return null   // a path or a scheme: not a bare query string
+  }
+  let q
+  try { q = new URLSearchParams(s.startsWith('?') ? s.slice(1) : s) } catch { return null }
+  for (const k of EVIDENCE_PARAMS) if (q.getAll(k).length > 1) return null
+  if (q.get('view') !== EVIDENCE_VIEW) return null
+  const scanId = ident(q.get('scan'))
+  const file = ident(q.get('file'))
+  const findingId = ident(q.get('finding'))
+  const changeId = ident(q.get('change'))
+  if (!scanId || !file) return null
+  // Neither id → a DOCUMENT-level link (fileEvidenceHref). A present-but-invalid id is not "no
+  // id": `finding=` with a control character must not degrade into the whole-document view.
+  if (findingId && changeId) return null
+  if (!findingId && q.has('finding')) return null
+  if (!changeId && q.has('change')) return null
+  return {
+    scanId, file, findingId: findingId || null, changeId: changeId || null,
+    sha256: sha(q.get('sha')), version: version(q.get('version')),
+  }
+}
+
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
+
+// The app's own origin, when it is one a link may be built on: https anywhere, http only on a
+// loopback host (local development). Anything else — file:, data:, an http host on the network,
+// a malformed string — is null.
+export function trustedAppOrigin(origin) {
+  if (typeof origin !== 'string' || !origin) return null
+  let u
+  try { u = new URL(origin) } catch { return null }
+  if (u.username || u.password) return null
+  if (u.protocol === 'https:') return u.origin
+  if (u.protocol === 'http:' && LOCAL_HOSTS.has(u.hostname)) return u.origin
+  return null
+}
+
+/**
+ * An absolute URL for a relative app href, for content that leaves the app (a downloaded HTML
+ * report, a packet ZIP). Null when the origin is not trusted or the href is not a same-origin app
+ * path of the form "/?…" — so `javascript:`, `data:`, `//other.host/…` and absolute URLs to
+ * anywhere are all refused rather than passed through.
+ */
+export function absoluteAppHref(relHref, { origin = (typeof window !== 'undefined' ? window.location?.origin : null) } = {}) {
+  if (typeof relHref !== 'string' || !relHref.startsWith('/?')) return null
+  if (/[\s<>"'`\\]/.test(relHref)) return null
+  const base = trustedAppOrigin(origin)
+  if (!base) return null
+  let out
+  try { out = new URL(relHref, `${base}/`) } catch { return null }
+  if (out.origin !== base || out.pathname !== '/') return null
+  return out.href
+}
+
+// ── Surviving sign-in ────────────────────────────────────────────────────────────────────────
+// A link opened while signed out lands on the sign-in screen, and the target has to survive it.
+// Today's sign-in is a popup (msalClient.loginPopup, Google GIS), so the address bar keeps its
+// query and App.jsx holds the target in state across the SignIn render. A REDIRECT sign-in
+// (MSAL's `redirectUri` is the bare origin) would come back to "/" with the query gone, so the
+// target is also kept in sessionStorage — briefly, and only restored when the returning URL
+// carries no query of its own. A URL that says something else always wins over the saved target:
+// a stale entry must never re-open a record the user navigated away from.
+export const EVIDENCE_TARGET_KEY = 'acp.evidenceTarget'
+export const EVIDENCE_TARGET_TTL_MS = 10 * 60 * 1000
+
+// The relative href a parsed target came from (record or document level), or null.
+export function targetHref(t) {
+  if (!t) return null
+  if (isFileTarget(t)) return fileEvidenceHref({ scanId: t.scanId, file: t.file, sha256: t.sha256, version: t.version })
+  return evidenceHref({ scanId: t.scanId, file: t.file, findingId: t.findingId, changeId: t.changeId, sha256: t.sha256, version: t.version })
+}
+const hrefOf = targetHref
+
+export function forgetEvidenceTarget(storage) {
+  try { storage?.removeItem(EVIDENCE_TARGET_KEY) } catch { /* storage unavailable */ }
+}
+
+/**
+ * { target, restoredHref }: the evidence target for this page load. `restoredHref` is set only
+ * when the target came from storage (the URL had no query), so the caller can put it back in the
+ * address bar.
+ */
+export function captureEvidenceTarget({ search = '', storage = null, now = Date.now() } = {}) {
+  const fromUrl = parseEvidenceHref(search || '')
+  if (fromUrl) {
+    try { storage?.setItem(EVIDENCE_TARGET_KEY, JSON.stringify({ href: hrefOf(fromUrl), at: now })) } catch { /* storage unavailable */ }
+    return { target: fromUrl, restoredHref: null }
+  }
+  if (search && search !== '?') { forgetEvidenceTarget(storage); return { target: null, restoredHref: null } }
+  let saved = null
+  try { saved = JSON.parse(storage?.getItem(EVIDENCE_TARGET_KEY) || 'null') } catch { saved = null }
+  const fresh = saved && typeof saved.href === 'string' && Number.isFinite(saved.at)
+    && now >= saved.at && now - saved.at < EVIDENCE_TARGET_TTL_MS
+  const target = fresh ? parseEvidenceHref(saved.href) : null
+  if (!target) { forgetEvidenceTarget(storage); return { target: null, restoredHref: null } }
+  return { target, restoredHref: hrefOf(target) }
+}
+
+// The current URL without the evidence parameters — where "Back to ACP" goes.
+export function withoutEvidenceParams(href) {
+  try {
+    const u = new URL(href)
+    EVIDENCE_PARAMS.forEach((k) => u.searchParams.delete(k))
+    return `${u.pathname}${u.searchParams.toString() ? `?${u.searchParams}` : ''}${u.hash}`
+  } catch { return '/' }
+}
+
+const isObj = (v) => v != null && typeof v === 'object' && !Array.isArray(v)
+
+/**
+ * A COPY of per-file report facts in which every finding and every saved change carries its
+ * relative evidence href at `location.href`. A record without a location still gets one —
+ * `{label: null, kind: null, href}` — so it stays clickable and the viewer states "Location not
+ * recorded". A record without an id, or facts without a scan/file identity, get no href.
+ *
+ * Which version a link names: a FINDING was recorded against the assessed source, so its link
+ * carries the source sha-256 (when the source checksum is one); a saved CHANGE is about the copy
+ * it was written into, so it carries that change's artifact digest, else the recorded corrected
+ * digest. A link with no recorded digest carries none — the viewer then says the version could
+ * not be checked, rather than implying it was.
+ */
+export function attachEvidenceLinks(facts) {
+  if (!isObj(facts)) return facts
+  const id = isObj(facts.identity) ? facts.identity : {}
+  const scanId = ident(id.scanId)
+  const file = ident(id.file)
+  const withHref = (rec, href) => {
+    if (!href) return rec
+    const loc = isObj(rec.location) ? { ...rec.location, href } : { label: null, kind: null, href }
+    return { ...rec, location: loc }
+  }
+  const out = { ...facts }
+  if (Array.isArray(facts.findings)) {
+    out.findings = facts.findings.map((f) => (isObj(f)
+      ? withHref(f, evidenceHref({ scanId, file, findingId: f.id, sha256: id.sourceSha256, version: sha(id.sourceSha256) ? 'source' : null }))
+      : f))
+  }
+  if (Array.isArray(facts.savedChanges)) {
+    out.savedChanges = facts.savedChanges.map((c) => {
+      if (!isObj(c)) return c
+      const digest = sha(c.artifactSha256) || sha(id.correctedSha256)
+      return withHref(c, evidenceHref({ scanId, file, changeId: c.id, sha256: digest, version: digest ? 'corrected' : null }))
+    })
+  }
+  return out
+}

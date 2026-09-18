@@ -17,7 +17,7 @@ import {
   scOfValue, fmtOfFile, isSafeHref, normaliseRowIssues, buildChangeCards, buildFindingCards,
   buildComparison, buildComparisonFromFacts, findingCardsFromFacts, factsFindings,
   boundList, locationLabel, technicalText, humanText, verificationText, clippedNote,
-  isHumanOutstanding, RESPONSE_NOTICE,
+  isHumanOutstanding, RESPONSE_NOTICE, sameScanHistoryText,
 } from './reportEvidence.js'
 
 // Shared ink palette. Every colour used as TEXT here is dark enough to clear WCAG
@@ -129,6 +129,8 @@ const orNR = (v) => (v == null || v === '' ? NR : String(v))
 const MODES = ['summary', 'reviewer', 'full']
 export const MODE_LABEL = { summary: 'Summary', reviewer: 'Reviewer packet', full: 'Full evidence' }
 const REVIEWER_CARD_CAP = 100
+// The remediation Reviewer packet's OVERALL card bound (S3). Full evidence has none.
+export const REMEDIATION_REVIEWER_TOTAL_CAP = 300
 const countIssues = (rows) => rows.reduce((n, r) => {
   const list = Array.isArray(r.fileIssues) ? r.fileIssues.length : 0
   return n + (list || (Number.isFinite(r.count) ? r.count : 0))
@@ -544,6 +546,16 @@ export function buildFileReportModel(d = {}) {
     if (!d.previous && typeof d.previousReason === 'string' && d.previousReason.trim()) comparison.reason = d.previousReason.trim()
   }
   blocks.push(comparison)
+  // C6 (R-B2): the assessment a re-assessment REPLACED inside this same scan. A compared or
+  // refused snapshot is stated from the Reviewer packet up; "none recorded" / "cannot be read" is
+  // the common case and is stated in Full evidence — worded so it never reads as "assessed once".
+  const sameScan = facts && facts.sameScanHistory && typeof facts.sameScanHistory === 'object' ? facts.sameScanHistory : null
+  if (sameScan) {
+    const quiet = sameScan.status === 'not_recorded' || sameScan.status === 'not_available'
+    if (quiet ? atLeast('full') : atLeast('reviewer')) {
+      T(sameScanHistoryText(sameScan), { size: 9, color: sameScan.status === 'compared' ? undefined : MUTED })
+    }
+  }
 
   // ── Reviewer packet ─────────────────────────────────────────────────────────────────────
   if (atLeast('reviewer')) {
@@ -567,6 +579,40 @@ export function buildFileReportModel(d = {}) {
       T(`Edits were recorded for ${crit(fixedPN + fixedVN)}, but no per-change before/after record is available, so there is nothing itemised to confirm.`, { color: AMBER })
     } else {
       T('No saved changes are recorded for this file.', { color: MUTED })
+    }
+
+    // C11: review-queue approvals whose pin moved (source revision, value or proposals changed
+    // after the approval). Stated as a state of the record — nothing here re-queues them.
+    const approvals = facts && facts.approvals && typeof facts.approvals === 'object' ? facts.approvals : null
+    if (approvals && approvals.source === 'unavailable') {
+      H('Approvals that need a recheck', 2)
+      T('The review-queue approvals for this document could not be read, so this report cannot say whether any needs a recheck.', { color: AMBER })
+    } else if (approvals && Array.isArray(approvals.recheckRequired) && approvals.recheckRequired.length) {
+      H('Approvals that need a recheck', 2)
+      T(`${plural(approvals.recheckRequired.length, 'approval', 'approvals')} in the review queue ${approvals.recheckRequired.length === 1 ? 'was' : 'were'} recorded against a source version or proposed value that has since changed. ${approvals.note || ''}`.trim(), { color: AMBER })
+      blocks.push({
+        k: 'bullets',
+        items: approvals.recheckRequired.map((a) => `${a.sc || a.ruleId || 'Criterion not recorded'}${a.ruleName ? ` · ${a.ruleName}` : ''} — approved ${a.reviewedAt || 'at a time not recorded'}${a.approvedSourceRevision ? ` against revision ${String(a.approvedSourceRevision).slice(0, 12)}` : ''} (queue item ${a.id})`),
+        o: {},
+      })
+    }
+    // C7: decisions recorded on EARLIER scans of this document are evidence about the bytes
+    // reviewed then; they are never carried forward, and when they cannot be listed that is said.
+    if (atLeast('full') && facts && 'priorDecisions' in facts) {
+      if (Array.isArray(facts.priorDecisions) && facts.priorDecisions.length) {
+        H('Decisions recorded on earlier scans', 2)
+        T(facts.priorDecisionsReason || 'Recorded against earlier scans of this document; not carried forward.', { size: 9, color: MUTED })
+        blocks.push({ k: 'bullets', items: facts.priorDecisions.map((p) => `${p.verdictLabel || p.verdict || 'Decision'} on ${p.changeId || 'a change'} in scan ${p.scanId || NR}${p.at ? ` at ${p.at}` : ''}${p.reviewer ? ` by ${p.reviewer}` : ''} — not carried forward`), o: {} })
+        // R-B3 bounds: a page of the history is never presented as the whole of it.
+        const bounds = facts.priorDecisionsBounds
+        if (bounds && bounds.truncated) {
+          T(`Showing ${facts.priorDecisions.length} of ${bounds.total ?? 'more'} earlier decisions (newest first); the rest are not listed here.`, { bold: true })
+        }
+      } else if (facts.priorDecisionsReason) {
+        // None (not readable / not available) and [] (none recorded) are different answers; the
+        // reason says which, and neither is silently dropped.
+        T(facts.priorDecisionsReason, { size: 9, color: MUTED })
+      }
     }
 
     H('Remaining work')
@@ -945,7 +991,11 @@ export function buildRemediationModel({ files = [], diffsByFile = {}, appliedFix
                                         level = 'AA', org = '', generatedAt = null,
                                         scanId = null, reviewByFile = {}, cappedAt = null,
                                         scNames = {}, diffsComplete = true, diffsTotal = null,
-                                        platformVersion = null } = {}) {
+                                        platformVersion = null, evidenceNotes = null,
+                                        unitemisedDocuments = null, savedChangesVerified = null,
+                                        savedChangesUnverified = null, itemisedChanges = null,
+                                        filesIndexComplete = null, facts = null,
+                                        factsDigest = null } = {}) {
   const stamp = {}
   for (const f of appliedFixes || []) {
     const k = `${f.file} ${_sc(f.rule_id)}`
@@ -1022,6 +1072,18 @@ export function buildRemediationModel({ files = [], diffsByFile = {}, appliedFix
     diffsComplete: diffsComplete !== false,
     diffsTotal: Number.isFinite(diffsTotal) ? diffsTotal : null,
     platformVersion,
+    // S3: what remediationReportData gathered about the parts it could NOT itemise. Carried
+    // through so the report states them rather than the gather's notes dying in the caller.
+    evidenceNotes: Array.isArray(evidenceNotes) ? evidenceNotes.filter((x) => typeof x === 'string' && x) : [],
+    unitemisedDocuments: Array.isArray(unitemisedDocuments) ? unitemisedDocuments : [],
+    // Server totals over EVERY document (null = not recorded, never 0).
+    serverTotals: {
+      savedChangesVerified: Number.isFinite(savedChangesVerified) ? savedChangesVerified : null,
+      savedChangesUnverified: Number.isFinite(savedChangesUnverified) ? savedChangesUnverified : null,
+    },
+    itemisedChanges: itemisedChanges && typeof itemisedChanges === 'object' ? itemisedChanges : null,
+    filesIndexComplete,
+    factsDigest: factsDigest ?? facts?.factsDigest ?? null,
   }
 }
 
@@ -1051,10 +1113,19 @@ export function remediationReportModel(m = {}, { mode = 'full', reviewsByFile = 
   }))
   const all = cardsByDoc.flatMap((x) => x.cards)
   const decided = reviewsByFile ? all.filter((x) => ['accepted', 'edited', 'rejected', 'unable'].includes(x.human.status)).length : null
-  const verified = all.filter((x) => x.technical.status === 'verified').length
+  const verifiedLoaded = all.filter((x) => x.technical.status === 'verified').length
   const diffsPartial = m.diffsComplete === false
   const partial = m.partial != null || diffsPartial
-  const savedTotal = diffsPartial ? (m.diffsTotal ?? null) : all.length
+  // S3: documents the gather could not itemise. Their changes are NOT in `all`, so every count
+  // taken from `all` is a count of the itemised part only and is labelled as such; the server's
+  // own totals (over every document) are preferred where it recorded them.
+  const unitemised = Array.isArray(m.unitemisedDocuments) ? m.unitemisedDocuments : []
+  const unitemisedSet = new Set(unitemised.map((d) => d.file))
+  const st = m.serverTotals || {}
+  const serverSaved = Number.isFinite(st.savedChangesVerified) && Number.isFinite(st.savedChangesUnverified)
+    ? st.savedChangesVerified + st.savedChangesUnverified : null
+  const savedTotal = diffsPartial ? (m.diffsTotal ?? serverSaved ?? null) : all.length
+  const verified = diffsPartial ? (Number.isFinite(st.savedChangesVerified) ? st.savedChangesVerified : null) : verifiedLoaded
 
   H('Decision summary')
   blocks.push({
@@ -1069,10 +1140,11 @@ export function remediationReportModel(m = {}, { mode = 'full', reviewsByFile = 
     caption: 'Remediation decision evidence',
     items: [
       { key: 'documentsAssessed', label: 'Documents with saved edits', value: docs.length, detail: 'Documents with a saved corrected copy or change record' },
-      { key: 'editsSaved', label: 'Edits saved', value: savedTotal, detail: diffsPartial ? `Partial: ${all.length} records loaded` : 'Per-change records' },
-      { key: 'findingsVerifiedResolved', label: 'Changes verified by re-scan', value: verified, detail: 'Counted from the loaded change records' },
+      { key: 'editsSaved', label: 'Edits saved', value: savedTotal, detail: diffsPartial ? `Partial: ${all.length} records itemised in this report${savedTotal != null ? ' (the total is the server index\'s own count over every document)' : '; the total is not recorded'}` : 'Per-change records' },
+      { key: 'findingsVerifiedResolved', label: 'Changes verified by re-scan', value: verified, detail: diffsPartial ? `${verifiedLoaded} among the itemised records${verified != null ? '; the value is the server index\'s count over every document' : '; the total is not recorded'}` : 'Counted from the loaded change records' },
       { key: 'findingsRemaining', label: 'Findings remaining', value: null, detail: 'Not part of the remediation record — see the assessment report' },
-      { key: 'humanChecksPending', label: 'Changes awaiting confirmation', value: decided == null ? null : all.length - decided, detail: decided == null ? 'Reviewer decisions were not loaded' : `${decided} of ${all.length} decided` },
+      // An awaiting-confirmation count over a PARTIAL list is not the number awaiting: null.
+      { key: 'humanChecksPending', label: 'Changes awaiting confirmation', value: decided == null || diffsPartial ? null : all.length - decided, detail: decided == null ? 'Reviewer decisions were not loaded' : diffsPartial ? `${all.length - decided} of the ${all.length} itemised changes await a decision; changes in documents not itemised are not counted here` : `${decided} of ${all.length} decided` },
       { key: 'checksNotPerformed', label: 'Criteria with no recorded time', value: totals.unstamped ?? null, detail: 'Times are shown only where the write was recorded' },
     ],
   })
@@ -1081,25 +1153,45 @@ export function remediationReportModel(m = {}, { mode = 'full', reviewsByFile = 
     items: [
       { key: 'suggestions', label: 'Suggestions', value: null, status: 'unknown', detail: 'Not part of this report' },
       { key: 'savedEdits', label: 'Saved edits', value: savedTotal, status: savedTotal == null ? 'unknown' : savedTotal ? 'done' : 'not_started', detail: savedTotal == null ? 'Not recorded' : plural(savedTotal, 'change', 'changes') },
-      { key: 'technicalChecks', label: 'Technical re-checks', value: verified, status: !all.length ? 'not_started' : verified === all.length ? 'done' : 'pending', detail: `${verified} of ${all.length} loaded changes verified by re-scan` },
-      { key: 'humanConfirmation', label: 'Human confirmation', value: decided, status: decided == null ? 'unknown' : !all.length ? 'not_started' : decided === all.length ? 'done' : 'pending', detail: decided == null ? 'Reviewer decisions were not loaded' : `${decided} of ${all.length} decided` },
+      { key: 'technicalChecks', label: 'Technical re-checks', value: verified, status: !all.length ? 'not_started' : verified == null ? 'unknown' : verified === savedTotal ? 'done' : 'pending', detail: `${verifiedLoaded} of ${all.length} loaded changes verified by re-scan${diffsPartial ? ' (partial list)' : ''}` },
+      { key: 'humanConfirmation', label: 'Human confirmation', value: diffsPartial ? null : decided, status: decided == null || diffsPartial ? 'unknown' : !all.length ? 'not_started' : decided === all.length ? 'done' : 'pending', detail: decided == null ? 'Reviewer decisions were not loaded' : `${decided} of ${all.length} ${diffsPartial ? 'itemised changes ' : ''}decided` },
       { key: 'publication', label: 'Publication', value: null, status: 'unknown', detail: 'Publication status not recorded in this report' },
     ],
   })
   if (totals.unstamped) T(`${totals.unstamped} of ${totals.items} criteria carry no recorded time; they read "Time not recorded" rather than borrowing the document's timestamp.`, { size: 9, color: MUTED })
   if (m.partial != null) T(`PARTIAL: the server returned its maximum of ${m.partial} fix-time records, so later records are not listed.`, { bold: true, color: AMBER })
-  if (diffsPartial) T(`PARTIAL: ${all.length} of ${m.diffsTotal ?? 'an unknown number of'} change records were loaded.`, { bold: true, color: AMBER })
+  if (diffsPartial) T(`PARTIAL: ${all.length} of ${savedTotal ?? 'an unknown number of'} change records were loaded.`, { bold: true, color: AMBER })
+  ;(m.evidenceNotes || []).forEach((note) => T(note, { bold: true, color: AMBER }))
 
   if (atLeast('reviewer')) {
     H('Changes to confirm')
     blocks.push({ k: 'callout', text: RESPONSE_NOTICE, o: { color: PLUM } })
+    // S3: the Reviewer packet is bounded OVERALL, not only per document — 300 documents × 100
+    // cards was the same size as Full evidence. The bound is stated where it bites and in total.
+    let budget = md === 'full' ? Infinity : REMEDIATION_REVIEWER_TOTAL_CAP
+    let omittedOverall = 0
+    const docsCut = []
     for (const { doc, cards } of cardsByDoc) {
       H(doc.name, 2)
       T(`${doc.dir ? `Folder: ${doc.dir}` : 'Folder: (root)'} · Format: .${doc.fmt} · ${doc.remediatedAt ? `Remediated ${doc.remediatedAt}` : 'Remediation time not recorded'}${doc.awaiting ? ` · ${doc.awaiting} item(s) awaiting review in ACP` : ''}`, { size: 9, color: MUTED })
+      if (unitemisedSet.has(doc.file)) {
+        const u = unitemised.find((x) => x.file === doc.file)
+        T(`Not itemised in this report — ${u?.reason || 'its changes were not loaded'}. It is listed in the Full evidence appendix "Documents not itemised"; this is not a statement that it has no changes.`, { color: AMBER })
+        continue
+      }
       if (!cards.length) { T('This document was remediated, but no per-change record was stored for it.', { color: MUTED }); continue }
-      const b = boundList(cards, md === 'full' ? null : REVIEWER_CARD_CAP)
+      const cap = md === 'full' ? null : Math.max(0, Math.min(REVIEWER_CARD_CAP, budget))
+      const b = boundList(cards, cap)
+      budget -= b.shown.length
       b.shown.forEach((x) => blocks.push(x))
-      if (b.omitted) T(`${b.omitted} more change(s) for this document (of ${b.total}) are listed in the Full evidence report.`, { bold: true })
+      if (b.omitted) {
+        omittedOverall += b.omitted
+        if (b.shown.length < Math.min(REVIEWER_CARD_CAP, cards.length)) docsCut.push(doc.file)
+        T(`${b.omitted} more change(s) for this document (of ${b.total}) are listed in the Full evidence report.`, { bold: true })
+      }
+    }
+    if (md !== 'full' && omittedOverall) {
+      T(`This Reviewer packet shows at most ${REMEDIATION_REVIEWER_TOTAL_CAP} change cards in total and ${REVIEWER_CARD_CAP} per document: ${all.length - omittedOverall} of ${all.length} itemised changes are shown${docsCut.length ? `, and ${docsCut.length} document(s) reached the overall limit` : ''}. Every change is in the Full evidence report.`, { bold: true, color: AMBER })
     }
     H('How to verify these changes yourself')
     for (const fmt of m.formats || []) {
@@ -1131,6 +1223,23 @@ export function remediationReportModel(m = {}, { mode = 'full', reviewsByFile = 
         (doc.changes || [])[i]?.atIso || 'Time not recorded',
       ])),
     })
+    if (unitemised.length) {
+      // S3: EVERY document the report could not itemise, by name, with the server index's own
+      // counts for it — so none is stranded, and none reads as "no changes".
+      blocks.push({
+        k: 'appendixTable',
+        id: 'appendix-remediation-unitemised',
+        complete: true,
+        totalRecords: unitemised.length,
+        limitNote: null,
+        headers: ['Document', 'Why it is not itemised', 'Verified changes (server index)', 'Not verified (server index)', 'Decisions pending (server index)'],
+        caption: 'Documents not itemised',
+        rows: unitemised.map((u) => [u.file, u.reason || 'Not recorded',
+          u.savedChangesVerified == null ? NR : String(u.savedChangesVerified),
+          u.savedChangesUnverified == null ? NR : String(u.savedChangesUnverified),
+          u.decisionsPending == null ? NR : String(u.decisionsPending)]),
+      })
+    }
     H('Saved changes — full before and after', 2)
     blocks.push({ k: 'beforeAfter', items: all.map((x) => ({
       id: x.id, label: `${x.title} · ${locationLabel(x.location)}`, note: x.reason || '', before: x.before, after: x.after,
@@ -1150,6 +1259,7 @@ export function remediationReportModel(m = {}, { mode = 'full', reviewsByFile = 
     identity: {
       scanId: m.scanId ?? null, file: null, sourceSha256: null, correctedSha256: null, artifactVersion: null,
       generatedAt: new Date().toISOString(), platformVersion: m.platformVersion ?? null, targetLevel: m.level || 'AA',
+      factsDigest: m.factsDigest ?? null,
     },
     targetLevel: m.level || 'AA',
     cover: {

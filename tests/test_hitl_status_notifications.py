@@ -206,6 +206,9 @@ def test_terminal_status_fires_hitl_resolved(st, monkeypatch, status):
 
     item = _item(st)
     body = {"status": status}
+    if status == "approved":
+        from hitl_viewed import viewed_fields
+        body.update(viewed_fields(item["id"], st))
     if status == "rejected":
         body["reject_reason"] = "other"
     client.put(f"/hitl/queue/{item['id']}", json=body)

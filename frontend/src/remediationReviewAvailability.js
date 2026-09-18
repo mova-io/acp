@@ -1,3 +1,5 @@
+import { isTargetReplaced } from './remediationInboxModel.js'
+
 // Assessment findings can be draftable without any proposal having been generated.
 // Keep those in Plan until remediation produces a result or an exception to handle.
 export function reviewableRemediationItems(rows = [], { files = [], exceptions = null } = {}) {
@@ -12,6 +14,8 @@ export function reviewableRemediationItems(rows = [], { files = [], exceptions =
   return rows.filter(row => {
     const status = String(row.status || '').toLowerCase()
     if (status && status !== 'pending') return true
+    // Replaced by a verified fix: a recorded result that belongs in Results, whatever its proposal.
+    if (isTargetReplaced(row)) return true
     if (row.hasProposal || (row.after != null && row.after !== '') || row.autoApplied || row.applied || row.rejectedFix) return true
     return finishedFiles.has(row.file)
   })

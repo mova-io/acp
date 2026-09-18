@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from hitl_viewed import viewed_fields
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "api"))
@@ -40,6 +41,7 @@ def test_pool_failure_after_card_update_rolls_back_every_decision_write(
     import psycopg2.pool
 
     st, item_id, hitl_update, HitlUpdate, request = decision
+    viewed = viewed_fields(item_id, st)
     original_execute = st._db.execute
 
     def fail_at_audit(cur, sql, params=()):
@@ -50,7 +52,7 @@ def test_pool_failure_after_card_update_rolls_back_every_decision_write(
     monkeypatch.setattr(st._db, "execute", fail_at_audit)
     with pytest.raises(psycopg2.pool.PoolError):
         hitl_update(item_id, HitlUpdate(
-            status="approved", approved_values=["Reviewer-authored description"]), request)
+            status="approved", approved_values=["Reviewer-authored description"], **viewed), request)
 
     row = st.get_hitl_item(item_id)
     assert row["status"] == "pending"
@@ -63,7 +65,8 @@ def test_exact_retry_is_idempotent_for_audit_job_and_telemetry(decision, monkeyp
     st, item_id, hitl_update, HitlUpdate, request = decision
     telemetry = []
     monkeypatch.setattr(st, "record_hitl_event", lambda *a, **k: telemetry.append((a, k)))
-    body = HitlUpdate(status="approved", approved_values=["Reviewer-authored description"])
+    body = HitlUpdate(status="approved", approved_values=["Reviewer-authored description"],
+                      **viewed_fields(item_id, st))
 
     first = hitl_update(item_id, body, request)
     replay = hitl_update(item_id, body, request)
@@ -77,7 +80,7 @@ def test_exact_retry_is_idempotent_for_audit_job_and_telemetry(decision, monkeyp
 def test_request_id_replay_is_idempotent_and_stale_retry_cannot_overwrite(decision):
     st, item_id, hitl_update, HitlUpdate, request = decision
     first = HitlUpdate(status="approved", approved_values=["First description"],
-                       request_id="request-1", expected_version=0)
+                       request_id="request-1", **viewed_fields(item_id, st))
     hitl_update(item_id, first, request)
 
     # The exact transport retry succeeds even though its expected version is now old.
@@ -97,14 +100,15 @@ def test_request_id_replay_is_idempotent_and_stale_retry_cannot_overwrite(decisi
 
 def test_reusing_request_id_with_different_payload_is_conflict(decision):
     st, item_id, hitl_update, HitlUpdate, request = decision
+    viewed = viewed_fields(item_id, st)
     hitl_update(item_id, HitlUpdate(
         status="approved", approved_values=["First description"],
-        request_id="request-1", expected_version=0), request)
+        request_id="request-1", **viewed), request)
 
     with pytest.raises(Exception) as exc:
         hitl_update(item_id, HitlUpdate(
             status="approved", approved_values=["Changed description"],
-            request_id="request-1", expected_version=0), request)
+            request_id="request-1", **viewed), request)
     assert getattr(exc.value, "status_code", None) == 409
     assert st.get_hitl_item(item_id)["proposals"][0]["approved_value"] == "First description"
 
@@ -117,7 +121,8 @@ def test_telemetry_runs_only_after_the_decision_commit(decision, monkeypatch):
         assert [d["action"] for d in st.list_decisions("s1")] == ["hitl.approved"]
 
     monkeypatch.setattr(st, "record_hitl_event", observe_commit)
-    hitl_update(item_id, HitlUpdate(status="approved", approved_values=[None]), request)
+    hitl_update(item_id, HitlUpdate(status="approved", approved_values=[None],
+                                    **viewed_fields(item_id, st)), request)
 
 
 def test_postgres_replay_check_locks_the_review_row():

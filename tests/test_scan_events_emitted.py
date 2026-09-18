@@ -34,7 +34,7 @@ _DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document
 # ── 3. the vocabulary, checked statically across every emit site ──────────────
 
 # Files that emit lifecycle events, and the call names they emit through.
-_EMIT_SITES = ["handlers.py", "worker.py", "routes/scans.py"]
+_EMIT_SITES = ["handlers.py", "worker.py", "routes/scans.py", "review_target_reconciliation.py"]
 # `_rem_event` is handlers' remediation wrapper. It MUST be here: it takes (scan_id, kind, ...)
 # like the other two, so args[1] finds its kind unchanged — but a wrapper this walk does not know
 # about is a set of emit sites the vocabulary guard silently skips. Adding the remediation kinds

@@ -188,6 +188,17 @@ def test_a_source_md5_is_never_reported_as_a_sha256(isolated_store):
                                            "sha256": "d41d8cd98f00b204e9800998ecf8427e"}
 
 
+def test_a_tagged_sha256_source_is_a_sha256_in_bare_hex(isolated_store):
+    """`sha256:<hex>` is a sha256. The report header already said so (server_identity), while the
+    facts called it "other" and the same PDF told the reader no original preview was possible."""
+    digest = "ab" * 32
+    _scan(isolated_store, files=[_doc(checksum="sha256:" + digest.upper())])
+    identity = rf.build_file_facts(isolated_store, SID, FILE, owner=OWNER)["identity"]
+    assert identity["sourceChecksumKind"] == "sha256"
+    assert identity["sourceSha256"] == digest       # what the exact-bytes route compares against
+    assert rf.checksum_kind("sha256:" + "0" * 63) == "other"
+
+
 def test_a_corrected_copy_with_no_recorded_digest_is_unknown_not_source(isolated_store):
     """The review's finding: a remediated file whose saved copy has no hash has NO identity."""
     _scan(isolated_store, files=[_doc()])
@@ -561,11 +572,12 @@ def test_the_scan_builder_reads_the_scan_once_not_once_per_document(isolated_sto
         type(isolated_store).get_scan, type(isolated_store).get_file_records = original
     assert facts["filesTotal"] == 12
     assert calls["scan"] == 1, f"get_scan ran {calls['scan']} times for 12 documents"
-    # One scan-wide read, plus exactly one per document from inside
-    # unverified_changes.pending_records (which looks up its own corrected_sha256 and is not
-    # this module's to restructure). Pinned rather than rounded off, so a regression that
-    # reintroduces a scan-wide read per file is visible as a jump, not as a slow report.
-    assert calls["records"] == 1 + facts["filesTotal"], calls
+    # One scan-wide read (scan_context), plus ONE from the scan-wide pending reader (R-B4,
+    # unverified_changes.pending_records_for_scan, which reads the file records once for every
+    # document). Before R-B4 it was one per document (pending_records looks up its own
+    # corrected_sha256). Pinned rather than rounded off, so a regression that reintroduces a
+    # per-file read is visible as a jump (1 + 12), not as a slow report.
+    assert calls["records"] == 2, calls
 
 
 def test_a_scan_with_one_unledgered_document_cannot_state_a_resolved_total(isolated_store):

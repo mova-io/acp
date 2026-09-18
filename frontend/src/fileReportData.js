@@ -13,6 +13,7 @@
 // I/O goes through `deps` so the builder is testable without a server.
 import { attachFileIssues, fileIssuesOf, fmtOfFile, scOfValue } from './reportEvidence.js'
 import { loadChangeReviews, reviewsForReport } from './changeReview.js'
+import { attachEvidenceLinks } from './evidenceLink.js'
 
 export const PREVIEW_MAX = 8
 
@@ -57,27 +58,57 @@ export async function loadFileReportFacts(scanId, fileName, { getFileReportFacts
 export const FACTS_PAGE_LIMIT = 200
 export const FACTS_MAX_PAGES = 40          // 8,000 files; beyond that we say so rather than loop
 
-export async function loadScanReportFacts(scanId, { getScanReportFacts, limit = FACTS_PAGE_LIMIT, maxPages = FACTS_MAX_PAGES, onProgress = null } = {}) {
-  const gap = (reason) => ({ facts: null, files: [], filesTotal: null, complete: false, pages: 0, factsError: reason, incompleteReason: reason })
+// Contract 3: every page of one index must come from ONE snapshot of the evidence. Page 1 names its
+// `factsDigest`; every later page is requested with it, must carry the same one, and must start
+// where the last one ended. A 409 from the server, a different digest, or a shifted offset means
+// the evidence moved while paging — and stitching page 1 of one snapshot to page 2 of another is
+// a report describing a state that never existed (a file counted twice, or not at all). So the
+// index stops there, keeps only the pages that agree, and says why.
+export const FACTS_CHANGED_WHILE_PAGING =
+  'The evidence changed while the report was being assembled, so the per-document index was stopped rather than mix two versions of it. Generate the report again.'
+
+// `includeFindings` (contract 8, optional; default off, so existing callers — the packet exporter —
+// send exactly what they sent before): ask for each row's exact finding records. The result then
+// also says `findingsIncluded`: true only when EVERY loaded row carries a `findings` array, so a
+// server that ignored the request is never read as "these documents have no findings".
+export async function loadScanReportFacts(scanId, { getScanReportFacts, limit = FACTS_PAGE_LIMIT, maxPages = FACTS_MAX_PAGES, onProgress = null, includeFindings = false } = {}) {
+  const gap = (reason) => ({ facts: null, files: [], filesTotal: null, complete: false, pages: 0, factsError: reason, incompleteReason: reason, ...(includeFindings ? { findingsIncluded: false } : {}) })
   if (typeof getScanReportFacts !== 'function') return gap(FACTS_INTERNAL)
   if (!scanId) return gap('No assessment is selected, so the server report evidence was not read.')
+  const extra = includeFindings ? { includeFindings: true } : {}
   let first
-  try { first = await getScanReportFacts(scanId, { offset: 0, limit }) } catch (e) {
+  try { first = await getScanReportFacts(scanId, { offset: 0, limit, ...extra }) } catch (e) {
     return gap(`${isProgrammingError(e) ? FACTS_INTERNAL : FACTS_UNAVAILABLE} (${e?.message || e})`)
   }
   if (!first || typeof first !== 'object') return gap(FACTS_SIM)
 
   const files = Array.isArray(first.files) ? [...first.files] : []
   const filesTotal = Number.isFinite(first.filesTotal) ? first.filesTotal : null
+  const digest = typeof first.factsDigest === 'string' && first.factsDigest ? first.factsDigest : null
   let complete = first.complete === true || (filesTotal != null && files.length >= filesTotal)
   let pages = 1
   let incompleteReason = null
+  const soFar = () => `${files.length}${filesTotal != null ? ` of ${filesTotal}` : ''}`
   onProgress?.({ loaded: files.length, total: filesTotal, complete })
 
-  while (!complete && pages < maxPages) {
+  if (!complete && !digest) {
+    // Without a snapshot digest nothing can show that page 2 belongs with page 1.
+    incompleteReason = `The per-document index stopped after ${soFar()} documents because the server did not name the evidence snapshot, so later pages could not be shown to belong with the first.`
+  }
+  while (!complete && !incompleteReason && pages < maxPages) {
     let next
-    try { next = await getScanReportFacts(scanId, { offset: files.length, limit }) } catch (e) {
-      incompleteReason = `The per-document index stopped after ${files.length}${filesTotal != null ? ` of ${filesTotal}` : ''} documents because the next page could not be read (${e?.message || e}).`
+    try { next = await getScanReportFacts(scanId, { offset: files.length, limit, digest, ...extra }) } catch (e) {
+      incompleteReason = e?.status === 409
+        ? `${FACTS_CHANGED_WHILE_PAGING} (Stopped after ${soFar()} documents.)`
+        : `The per-document index stopped after ${soFar()} documents because the next page could not be read (${e?.message || e}).`
+      break
+    }
+    if (next && typeof next === 'object' && next.factsDigest !== digest) {
+      incompleteReason = `${FACTS_CHANGED_WHILE_PAGING} (Stopped after ${soFar()} documents: the next page belongs to a different snapshot.)`
+      break
+    }
+    if (next && typeof next === 'object' && next.offset !== files.length) {
+      incompleteReason = `The per-document index stopped after ${soFar()} documents because the server answered for offset ${Number.isFinite(next.offset) ? next.offset : 'not stated'} instead of ${files.length}, so the pages could not be joined without gaps or repeats.`
       break
     }
     const batch = Array.isArray(next?.files) ? next.files : []
@@ -97,8 +128,53 @@ export async function loadScanReportFacts(scanId, { getScanReportFacts, limit = 
     incompleteReason = `The per-document index stopped at ${files.length}${filesTotal != null ? ` of ${filesTotal}` : ''} documents after ${maxPages} pages. The remaining documents are not included in this report.`
   }
   onProgress?.({ loaded: files.length, total: filesTotal, complete })
-  return { facts: { ...first, files }, files, filesTotal, complete, pages, factsError: null, incompleteReason }
+  const out = { facts: { ...first, files }, files, filesTotal, complete, pages, factsError: null, incompleteReason }
+  if (includeFindings) out.findingsIncluded = files.every((r) => r && Array.isArray(r.findings))
+  return out
 }
+// ── One occurrence, in the live drawer ───────────────────────────────────────────────────────
+// The drawer lists the scan record's own issue rows, which carry no server id. A row is linked to
+// the server's finding (and so to its evidence link) only when EXACTLY ONE server finding has the
+// same rule, detail and recorded location — two identical-looking candidates means the row cannot
+// say which record it is, and a link to the wrong one is worse than none.
+const rawLocOf = (loc) => (loc && typeof loc === 'object' ? (loc.raw ?? loc.element ?? null) : null)
+export function serverFindingFor(issue, findings) {
+  if (!issue || !Array.isArray(findings) || !findings.length) return null
+  const rule = issue.rule_id ?? issue.ruleId ?? null
+  const raw = typeof issue.location === 'string' && issue.location.trim() ? issue.location.trim() : null
+  const page = posInt(issue.page)
+  const same = findings.filter((f) => f && (f.ruleId ?? null) === rule
+    && (f.detail ?? null) === (issue.detail ?? null)
+    && (rawLocOf(f.location) ?? null) === raw)
+  if (same.length <= 1) return same[0] || null
+  const onPage = same.filter((f) => posInt(f.location?.page) === page)
+  return onPage.length === 1 ? onPage[0] : null
+}
+
+/**
+ * { label, page, unit, objectId, href, findingId } for one issue row. `label` is the human text
+ * (Contract 1: "Sheet Budget · cell B3", "Paragraph 15", "Slide 4 · shape 7") or null → the caller
+ * prints "Location not recorded". `page` is set only where a rendered page exists (PDF page,
+ * PowerPoint slide) — never for a Word paragraph or an Excel cell, and never defaulted to 1.
+ */
+export function occurrenceOf(issue, { fmt = null, findings = null, locationOf: locOf } = {}) {
+  const server = serverFindingFor(issue, findings)
+  const loc = (server?.location && typeof server.location === 'object' && 'kind' in server.location && server.location.label
+    ? server.location
+    : null) || (locOf ? locOf(issue, { fmt }) : null)
+  const unit = fmt === 'pptx' ? 'slide' : 'page'
+  const page = fmt === 'pdf' ? posInt(loc?.page ?? issue?.page)
+    : fmt === 'pptx' ? posInt(loc?.slide ?? loc?.page ?? issue?.page)
+      : null
+  return {
+    label: loc?.label || null,
+    page, unit,
+    objectId: loc?.objectId ?? null,
+    href: typeof server?.location?.href === 'string' ? server.location.href : null,
+    findingId: server?.id ?? null,
+  }
+}
+
 // remediation_diff stores before/after clipped to this many characters (store.record_remediation_diffs).
 export const DIFF_VALUE_STORE_CAP = 2000
 
@@ -141,7 +217,10 @@ export const PREVIEW_NONE = 'Visual preview not available'
 const isDataImage = (url) => typeof url === 'string' && /^data:image\/(png|jpeg);base64,/.test(url)
 const short = (sha) => (sha ? String(sha).slice(0, 12) : null)
 
-const previewEntry = ({ src, provenance, sha256, page, shaConfirmed = null }) => ({
+// `pageConfirmed` matters only for the unverified (generic-route) preview: the exact route is
+// strict about pages, the generic one clamps, so its page is stated as confirmed only when the
+// server said which page it drew.
+const previewEntry = ({ src, provenance, sha256, page, shaConfirmed = null, pageConfirmed = true }) => ({
   src,
   provenance,                       // 'original' | 'corrected' | 'unverified'
   sha256: sha256 || null,
@@ -153,10 +232,12 @@ const previewEntry = ({ src, provenance, sha256, page, shaConfirmed = null }) =>
   verified: provenance !== 'unverified',
   caption: provenance === 'original' ? `Original document, page ${page} (sha ${short(sha256)})`
     : provenance === 'corrected' ? `Corrected copy, page ${page} (sha ${short(sha256)})`
-      : `${PREVIEW_UNVERIFIED_CAPTION} — page ${page}`,
+      : `${PREVIEW_UNVERIFIED_CAPTION} — page ${page}${pageConfirmed ? '' : ' (page not confirmed)'}`,
+  pageConfirmed: provenance === 'unverified' ? pageConfirmed : true,
   alt: provenance === 'original' ? `Page ${page} of the original document`
     : provenance === 'corrected' ? `Page ${page} of the corrected copy`
-      : `Page ${page} of this document; which version is shown is not verified`,
+      : pageConfirmed ? `Page ${page} of this document; which version is shown is not verified`
+        : `Preview requested for page ${page} of this document; neither the version nor the page shown is confirmed`,
   note: provenance === 'unverified' ? PREVIEW_UNVERIFIED_NOTE : null,
 })
 
@@ -197,6 +278,7 @@ export async function collectPreviews({ scanId, file, diffs, facts = null, getFi
   // digest is a claim about the bytes on screen; a mismatch means the image is of something else,
   // and a labelled picture of the wrong document is worse than no picture.
   const mismatched = []
+  const wrongPage = []
   const exact = async (sha, page) => {
     if (!sha || !getFileArtifactPage) return null
     try {
@@ -205,15 +287,27 @@ export async function collectPreviews({ scanId, file, diffs, facts = null, getFi
       const blob = got instanceof Blob ? got : got.blob
       const served = got instanceof Blob ? null : (got.sha256 ?? null)
       if (served && served !== sha) { mismatched.push({ page, asked: sha, served }); return null }
+      // The route is strict (a page the document lacks is a 404, never the nearest page), and it
+      // names the page it drew. One that names a different page is not a picture of this one.
+      const drawn = got instanceof Blob ? null : (got.renderedPage ?? null)
+      if (drawn != null && drawn !== page) { wrongPage.push({ page, drawn }); return null }
       const url = await blobToDataUrl(blob)
       return isDataImage(url) ? { url, shaConfirmed: served === sha } : null
     } catch { return null }
   }
+  // The generic route CLAMPS an out-of-range page to the nearest real one. So its picture is
+  // captioned as page N only when the server says it drew N; a different page is not shown, and
+  // an unstated one is captioned "not confirmed".
   const ambiguous = async (page) => {
     if (!getFilePage) return null
     try {
-      const url = await blobToDataUrl(await getFilePage(scanId, file.file, page))
-      return isDataImage(url) ? url : null
+      const got = await getFilePage(scanId, file.file, page, { detail: true })
+      const blob = got instanceof Blob ? got : got?.blob
+      const drawn = got instanceof Blob ? null : (got?.renderedPage ?? null)
+      if (drawn != null && drawn !== page) { wrongPage.push({ page, drawn }); return null }
+      const url = await blobToDataUrl(blob)
+      // Page 1 always exists, so a clamp cannot have substituted it.
+      return isDataImage(url) ? { url, pageConfirmed: drawn === page || page === 1 } : null
     } catch { return null }
   }
 
@@ -236,9 +330,9 @@ export async function collectPreviews({ scanId, file, diffs, facts = null, getFi
       if (corrected) status.corrected.push(page)
       return
     }
-    const anyUrl = await ambiguous(page)
-    if (anyUrl) {
-      previews[page] = previewEntry({ src: anyUrl, provenance: 'unverified', sha256: null, page })
+    const any = await ambiguous(page)
+    if (any) {
+      previews[page] = previewEntry({ src: any.url, provenance: 'unverified', sha256: null, page, pageConfirmed: any.pageConfirmed })
       previewPairs[page] = { original: null, corrected: null, unverified: previews[page] }
       status.included.push(page)
       status.unverified.push(page)
@@ -255,6 +349,10 @@ export async function collectPreviews({ scanId, file, diffs, facts = null, getFi
   if (mismatched.length) {
     notes.push(`The preview service returned a different document version than the one requested for page${mismatched.length === 1 ? '' : 's'} ${mismatched.map((m) => m.page).join(', ')}, so those images are not shown at all — a picture labelled with a checksum it does not have is worse than no picture.`)
   }
+  if (wrongPage.length) {
+    notes.push(`The preview service returned a different page than the one requested for page${wrongPage.length === 1 ? '' : 's'} ${[...new Set(wrongPage.map((w) => w.page))].join(', ')}, so those images are not shown.`)
+  }
+  status.wrongPage = wrongPage
   if (Object.values(previews).some((p) => p.provenance !== 'unverified' && p.shaConfirmed === false)) {
     notes.push('The preview service did not name the version it rendered, so these labels rest on the request alone and were not confirmed against the image returned.')
   }
@@ -451,7 +549,12 @@ export async function buildFileReportData({ file, scanId, mode, rows, targetLeve
 
   // Facts FIRST: the previews need the recorded digests to know which version they are showing,
   // and the render request needs factsDigest to be refused when the document has moved on.
-  const { facts, factsError } = await loadFileReportFacts(scanId, fileName, deps)
+  // Every finding and saved change then carries its own evidence link at `location.href`
+  // (evidenceLink.js) — the exact record, by the server's id, never a criterion-level guess. The
+  // hrefs are RELATIVE; anything written to a downloaded file absolutizes them first.
+  const loaded = await loadFileReportFacts(scanId, fileName, deps)
+  const facts = loaded.facts ? attachEvidenceLinks(loaded.facts) : null
+  const { factsError } = loaded
 
   let diffs = []
   let diffsComplete = false
@@ -533,7 +636,9 @@ export async function buildFileReportData({ file, scanId, mode, rows, targetLeve
     previous: prevRes.previous, previousReason: prevRes.previousReason,
     scope: prevRes.scope, currentFindings: prevRes.currentFindings,
     assignee: typeof assigneeRaw === 'string' && assigneeRaw.trim() ? assigneeRaw.trim() : null,
-    // The app has no URL route to a document or page, so no location link is offered.
+    // Links live on the FACTS records (attachEvidenceLinks above), keyed by the server's ids. The
+    // on-screen rows have client-derived ids that the evidence viewer cannot resolve, so they get
+    // no link function — a link to a record the server does not know would land on "not found".
     locationHref: null,
     date: now.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }),
     timestamp: now.toLocaleString('en-US', { year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' }),

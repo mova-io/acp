@@ -20,6 +20,7 @@ import RemediationReleasePlan from './RemediationReleasePlan.jsx'
 import { authorizeAcceptedRelease } from './releasePlanIntent.js'
 import { remediationReviewCounts, remediationDiffPage } from './remediationCountSummary.js'
 import { selectionFingerprint } from './batchReviewSelection.js'
+import { reapprovalRequest, requestReviewQueueRefresh, viewedDecisionOptions, viewedVersionConflict, viewedVersionMissingError } from './viewedApprovalBinding.js'
 import AssessSummary from './AssessSummary.jsx'
 import { useState, useEffect, useMemo, useRef } from 'react'
 import AssessmentScopeCard from './AssessmentScopeCard.jsx'
@@ -43,7 +44,12 @@ import ReviewDetails from './ReviewDetails.jsx'
 import DueDate from './DueDate.jsx'
 import UndoFix from './UndoFix.jsx'
 import FixOutcomes from './FixOutcomes.jsx'
-import { autoFixRows, matchesWorkflow, progress, isAiAssistedDraft } from './remediationInboxModel.js'
+import { autoFixRows, matchesWorkflow, isAiAssistedDraft, dedupeReviewTasks } from './remediationInboxModel.js'
+import { explainReviewPopulation, findingInputsFrom, QUEUE_TAB_KEY } from './reviewPopulationExplanation.js'
+import RemainingFindingsExplainer from './RemainingFindingsExplainer.jsx'
+import { OPEN_REVIEW_ITEM_EVENT, requestOpenReviewItem, takePendingReviewItem } from './openReviewItem.js'
+import ReconcileReviewTargets from './ReconcileReviewTargets.jsx'
+import { STAGE_LINEAGE_REFRESH_EVENT } from './useCanonicalStageLineage.js'
 import FileDrawer, { SOURCE_URL } from './FileDrawer.jsx'
 import SegmentDrawer from './SegmentDrawer.jsx'
 import { SENIORITY_ORDER, REMEDIATION_ACTIONS } from './sim.js'
@@ -147,6 +153,12 @@ export function hitlFailureCopy(item, kind, err, outcome = 'not_saved') {
   if (outcome === 'unknown') {
     return `ACP could not confirm whether your ${action} of “${file}” was saved because database capacity was exhausted. `
       + 'The card is showing its last known state — refresh the queue before trying again.'
+  }
+  // The version the reviewer looked at is no longer the one the server holds (or was never named).
+  // The server's own sentence says what to do; "try again" would invite re-sending the same stale
+  // version, so it is not said. The queue has been asked to re-read the row.
+  if (err?.viewedVersionConflict) {
+    return `Your ${action} of “${file}” was NOT saved: ${err.message} The review queue is reloading the current version.`
   }
   return `Your ${action} of “${file}” was NOT saved: ${err?.message || err}. It is back in the queue — try again.`
 }
@@ -430,7 +442,12 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
                                    // The run's live state and its ONE stream, owned by
                                    // useRemediationRun at App level so both survive this
                                    // component being unmounted on every tab change.
-                                   runStream = null, delivery = null, progressHostId = null }) {
+                                   runStream = null, delivery = null, progressHostId = null,
+                                   // The canonical remediate STAGE snapshot (App's lineage), whose
+                                   // domain_reconciliation names the server's unresolved findings.
+                                   // Optional: without it the explanation says findings are unknown
+                                   // rather than implying there are none.
+                                   remediationStage = null }) {
   const [queue, setQueue] = useState([])
   // The master/detail RemediationInbox owns its own view state (search, tabs, sort, selection),
   // so the old accordion/prefs plumbing (single-open openId, the search/severity/criterion/group
@@ -855,7 +872,10 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
     setActError(hitlFailureCopy(item, kind, err, outcome))
   }
 
-  const settleActFailure = async (item, kind, wanted, err) => {
+  const settleActFailure = async (item, kind, wanted, putError) => {
+    // A 409 viewed-version refusal is a definite "nothing recorded"; read the server's sentence out
+    // of it whichever shape it arrived in. Every other failure passes through unchanged.
+    const err = viewedVersionConflict(putError) || putError
     const settled = await reconcileHitlPutFailure(item?.id, wanted, err)
     if (settled.outcome === 'saved') {
       // The PUT response was lost to capacity pressure, but the durable row proves the decision
@@ -875,13 +895,36 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
   // it awaits this, and a rejection keeps the reviewer on the finding with the error stated inline
   // instead of advancing them past it behind a banner they have already scrolled away from.
   // `undoAct` still performs the local rollback; the re-throw is what makes the failure visible.
-  const act = (id, kind, editedValue, approvedValues, resolution = null, frozen = null) => {
+  //
+  // `viewed` is the row object the review pane was RENDERING when the reviewer clicked. The decision
+  // is bound to its source revision and proposal snapshot ids (viewedApprovalBinding.js) — never to a
+  // re-read of the queue — so the server can refuse an approval of a version nobody looked at. A frozen
+  // batch selection already carries that binding, captured when it was selected.
+  const act = (id, kind, editedValue, approvedValues, resolution = null, frozen = null, viewed = null) => {
     if (reviewReadOnlyRef.current) return Promise.reject(new Error('Historical scans are available for results browsing only.'))
     const current = queue.find((x) => x.id === id)
     if (frozen && (!current || selectionFingerprint(current) !== frozen.decision.selectionFingerprint)) {
       return Promise.reject(Object.assign(new Error('Proposal or source changed — review and select again.'), { status: 409 }))
     }
     const item = frozen?.finding || current
+    const decisionStatus = kind === 'approved' ? 'approved' : kind === 'rejected' ? 'rejected' : kind === 'deferred' ? 'skipped' : null
+    // A frozen batch sends no approval_scope (the server keeps its batch guard) and must name the
+    // corrected copy it was frozen against; without it the batch approval is not sent.
+    const bound = frozen
+      ? (frozen.decision.expectedCorrectedSha256 && frozen.decision.expectedProposalDigest
+        ? { expectedVersion: frozen.decision.expectedVersion ?? item?._raw?.decision_version ?? 0,
+            expectedProposalSnapshotIds: frozen.decision.expectedProposalSnapshotIds,
+            expectedSourceRevision: frozen.decision.expectedSourceRevision,
+            expectedCorrectedSha256: frozen.decision.expectedCorrectedSha256,
+            expectedProposalDigest: frozen.decision.expectedProposalDigest }
+        : null)
+      : viewedDecisionOptions(viewed || item, decisionStatus)
+    // No binding, no approval: refuse BEFORE anything optimistic happens, say why in the pane (this
+    // rejection is what it renders), and ask the queue to re-read the row. Never sent unbound.
+    if (!SIM && item?.id && decisionStatus === 'approved' && !bound) {
+      requestReviewQueueRefresh()
+      return Promise.reject(viewedVersionMissingError())
+    }
     setActError(null)
     setQueue((q) => q.filter((x) => x.id !== id))
     setSelItem(null)
@@ -893,9 +936,7 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
       recordDecided(item, 'skipped')
       setActed((a) => ({ ...a, deferred: a.deferred + 1 }))
       if (!SIM && item?.id) {
-        return updateHitlItem(item.id, 'skipped', null, null, {
-          expectedVersion: item._raw?.decision_version ?? 0,
-        }).catch(
+        return updateHitlItem(item.id, 'skipped', null, null, { ...bound }).catch(
           (e) => settleActFailure(item, 'deferred', { status: 'skipped' }, e))
       }
       return Promise.resolve()
@@ -924,10 +965,10 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
       const p = updateHitlItem(item.id, apiStatus, null,
                                apiStatus === 'approved' ? (editedValue || null) : null,
                                { approvedValues: apiStatus === 'approved' ? (approvedValues || null) : null,
-                                 expectedVersion: frozen?.decision.expectedVersion ?? item._raw?.decision_version ?? 0,
+                                 // The VIEWED version: expected_version, expected_source_revision and
+                                 // expected_proposal_snapshot_ids (a rejection carries them when known).
+                                 ...bound,
                                  requestId: frozen?.decision.requestId,
-                                 expectedProposalSnapshotIds: frozen?.decision.expectedProposalSnapshotIds,
-                                 expectedSourceRevision: frozen?.decision.expectedSourceRevision,
                                  // A WCAG-exception / out-of-scope resolution: status stays 'approved'
                                  // but it writes NO value — the reason is persisted on the row.
                                  resolution: apiStatus === 'approved' ? (resolution || null) : null })
@@ -959,7 +1000,24 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
     onRefresh?.()
     return result
   }
-  // Retry saving a recorded approval; do not create a second review decision.
+  // Re-approve a HELD approval (approval_recheck_required) — the inbox's recovery section offers it as
+  // "Review and approve again". The CURRENT row, bound to the version on screen, as ONE 'single' decision
+  // approving exactly what the writer would write (reapprovalRequest), with the row's own resolution kept.
+  // The server re-binds it and clears the flag; nothing here retries or repeats it.
+  const reapproveHeld = async (row) => {
+    if (reviewReadOnlyRef.current) throw new Error('Historical scans are available for results browsing only.')
+    const request = reapprovalRequest(row)
+    if (!request) { requestReviewQueueRefresh(); throw viewedVersionMissingError() }
+    try {
+      await updateHitlItem(request.id, 'approved', null, request.approvedValue, request.options)
+    } catch (e) {
+      requestReviewQueueRefresh()
+      throw viewedVersionConflict(e) || e
+    }
+    requestReviewQueueRefresh()
+    try { const r = onRefresh?.(); if (r && typeof r.catch === 'function') r.catch(() => {}) }
+    catch { /* the refresh is cosmetic — the re-approval is recorded */ }
+  }
   const retryApprovedFix = async (item) => {
     if (reviewReadOnlyRef.current) throw new Error('Historical scans are available for results browsing only.')
     const itemId = item?._raw?.id ?? item?.id
@@ -1064,7 +1122,11 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
   // sources at once, and counting it twice is the same defect as dropping it.
   const reviewQueue = reviewableRemediationItems(dedupeById([...queue, ...rejectedItems, ...decidedItems, ...autoFixItems]),
     { files, exceptions: reviewExceptions?.run_id === runId ? reviewExceptions : null })
-  const inboxQueue = automaticReviewQueue(reviewQueue, runAiApproval.policy, { ...decisions, ...ackd })
+  // Each review TASK once. dedupeById above only collapses repeated ids; an `af:` applied-change row
+  // that is a proven second representation of a HITL row (same item, finding or target) is dropped
+  // here, so every count and the progress line below read one denominator.
+  const reviewTasks = dedupeReviewTasks(reviewQueue)
+  const inboxQueue = automaticReviewQueue(reviewTasks, runAiApproval.policy, { ...decisions, ...ackd })
   const refreshReviewQueue = useReviewQueueRefresh({
     scanId: runId, batchId: acceptedBatchId, approval: runAiApproval.policy, disabled: SIM,
     progressKey: `${runStream?.snapshot?.revision ?? ''}:${runStream?.snapshot?.review?.items ?? ''}:${runStream?.snapshot?.fixes?.applied ?? ''}:${runStream?.snapshot?.documents?.completed ?? ''}:${runStream?.status?.queued ?? ''}:${runStream?.status?.running ?? ''}:${runStream?.events?.[0]?.id ?? ''}`,
@@ -1098,11 +1160,46 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
   // sentence counting 9 of a different 12. Two numbers, two denominators, no way to reconcile them
   // by reading. `totalHitl` still drives the Advanced block's engine-level "HITL queue" metric,
   // which is a different question asked in a different place.
-  const reviewProgress = progress(inboxQueue, inboxDecisions)
-  const reviewPct = reviewProgress.total > 0 ? Math.round((reviewProgress.resolved / reviewProgress.total) * 100) : 0
+  // ONE explanation of what is left — the lead line, the progress line, the remaining-findings
+  // panel and the inbox's own counters all read it, so none can say "All clear" while a status
+  // check or a server-reported unresolved finding remains. Findings come from the remediate stage
+  // snapshot only when it is for this scan; otherwise they are unknown (null), never zero.
+  const stageDomain = remediationStage && (remediationStage.scan_id == null || remediationStage.scan_id === runId)
+    ? remediationStage.domain_reconciliation : null
+  // The snapshot too, so its own integrity/reconciliation signals can mark the ledger inconsistent.
+  const findingInputs = findingInputsFrom(stageDomain, stageDomain ? remediationStage : null)
+  const reviewExplanation = explainReviewPopulation({
+    rows: inboxQueue, decisions: inboxDecisions, automatic: runAiApproval.enabled === true, files, ...findingInputs,
+  })
+  const reviewProgress = reviewExplanation.progress
+  // The bar fills with FINAL outcomes only: a recorded decision whose change is still awaiting its
+  // re-check is not done, so it does not paint the bar green.
+  const reviewPct = reviewProgress.total > 0 ? Math.round((reviewProgress.finished / reviewProgress.total) * 100) : 0
   const reviewDocCount = new Set(reviewNeeds.map((f) => f.file).filter(Boolean)).size
   // Navigation counts pending human review items, excluding already-applied inspection rows.
   useEffect(() => { onHitlCount?.(reviewCounts.pendingItems) }, [reviewCounts.pendingItems, onHitlCount])
+  // C5 — open one specific review item. Anything may ask (the remaining-findings panel below, the
+  // stage card's queue drawer) through the window event; this page is the one listener. It shows
+  // the review workspace, and the inbox selects, scrolls to and focuses the row in the tab that
+  // holds it. A request made before this page mounted is picked up once, on mount.
+  const [reviewItemRequest, setReviewItemRequest] = useState(null)
+  useEffect(() => {
+    const open = (detail) => {
+      if (detail?.itemId == null) return
+      if (detail.scanId && runId && detail.scanId !== runId) return
+      takePendingReviewItem(runId)
+      // focusPanel:false — the inbox moves focus to the requested row; the panel must not take it back.
+      setWorkspaceRequest({ mode: 'review', focusPanel: false })
+      setReviewItemRequest((previous) => ({ itemId: String(detail.itemId),
+        tab: QUEUE_TAB_KEY[detail.tab] || detail.tab || null, nonce: (previous?.nonce || 0) + 1 }))
+    }
+    const listener = (event) => open(event.detail)
+    window.addEventListener(OPEN_REVIEW_ITEM_EVENT, listener)
+    const pending = takePendingReviewItem(runId)
+    if (pending) open(pending)
+    return () => window.removeEventListener(OPEN_REVIEW_ITEM_EVENT, listener)
+  }, [runId])
+  const openReviewItem = (itemId, tab) => requestOpenReviewItem({ itemId, scanId: runId, tab })
   // The automation-first summary's numbers. Every one counts something the run actually produced —
   // applied-fix evidence, the live HITL queue, the workflow partition — computed from the same
   // sources the panels below use, so the header can never advertise a different total than they do.
@@ -1710,14 +1807,18 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
                 </p>
               // NOT unconditionally "All clear": an unreadable document is not a clear one, and
               // the reader who sees "All clear" stops reading (reviewQueueCopy.js).
-              : <p className="muted" style={{ margin: '2px 0 0', fontSize: 13 }}>{hasRemediationResults ? (inboxQueue.some(row => row.automaticQueued) ? 'No individual approval is needed now. Automatic checks are queued; remaining work stays visible.' : reviewLeadLine(files, reviewCounts.pendingItems)) : 'Run the plan to generate fixes. Review items appear when there is a proposal or an exception to handle.'}</p>}
+              // And not on the human count alone either: status checks, processing, saved changes
+              // awaiting their outcome and server-reported unresolved findings all withhold it. The
+              // explanation's headline is the only sentence allowed to say it (reviewPopulationExplanation.js).
+              : <p className="muted" style={{ margin: '2px 0 0', fontSize: 13 }}>{hasRemediationResults ? reviewLeadLine(files, reviewCounts.pendingItems, reviewExplanation) : 'Run the plan to generate fixes. Review items appear when there is a proposal or an exception to handle.'}</p>}
           </div>
           {reviewProgress.total > 0 && (
             <div className="rem-sec-prog">
               <div className="conftrack" style={{ width: 120 }}><i style={{ width: `${reviewPct}%`, background: reviewPct === 100 ? 'var(--success-fg)' : 'var(--info-fg)' }} /></div>
-              {/* "reviewed", the inbox pane's word — an approved fix awaiting the re-scan has been
-                  reviewed and is not yet Completed, so "resolved" here contradicted the tabs. */}
-              <span className="muted">{reviewProgress.resolved} of {reviewProgress.total} reviewed · tasks and change inspections</span>
+              {/* One denominator, two named measures: a recorded decision is not a final outcome,
+                  and a saved change awaiting its re-check is counted as awaiting, never as done.
+                  The inbox prints the same two labels from the same explanation. */}
+              <span className="muted rem-review-progress" title={reviewProgress.definition}>{reviewProgress.decidedLabel} · {reviewProgress.finishedLabel}</span>
             </div>
           )}
           {/* The remediation report, in the same three modes as the document and scan reports
@@ -1796,6 +1897,21 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
         {/* A decision the server refused. It rolled back, so the card is in the queue again —
             say so loudly, because a reviewer who thinks they signed something off and did not
             is the worst outcome this screen can produce. */}
+        {/* What is still open, by name: each remaining task and each server-reported unresolved
+            finding, with the tab that holds it and a button that opens it (C5). Renders nothing
+            when the explanation is all clear. */}
+        {hasRemediationResults && <RemainingFindingsExplainer explanation={reviewExplanation} onOpenItem={openReviewItem} showHeadline={false} />}
+        {/* C8 — settle an already-completed run on request: re-check the open items against the
+            recorded check of the saved copy. Offered only while something is still open, and not
+            on a historical (time-travel) scan. On success the queue and the stage snapshot are both
+            re-read, so the panel above and the tiles reflect the server's new ledger. */}
+        {hasRemediationResults && runId && !reviewReadOnly && <ReconcileReviewTargets scanId={runId}
+          available={!reviewExplanation.allClear && (reviewExplanation.remaining.length > 0
+            || reviewExplanation.unmatchedFindings.length > 0 || !!reviewExplanation.unlistedFindings)}
+          onReconciled={() => {
+            window.dispatchEvent(new CustomEvent('acp:hitl-changed', { detail: { scanId: runId } }))
+            window.dispatchEvent(new CustomEvent(STAGE_LINEAGE_REFRESH_EVENT, { detail: { scanId: runId } }))
+          }} />}
         <ReviewRefreshNotice error={reviewRefreshError} onRetry={refreshReviewQueue}/>
         {actError && (
           <p role="alert" className="rem-act-error"
@@ -1843,6 +1959,7 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
             preparingProposals={!runStream?.snapshot?.terminal && ((runStream?.status?.running ?? remProg?.running ?? 0) > 0 || (runStream?.status?.queued ?? remProg?.queued ?? 0) > 0)}
             onVerifySaved={reviewReadOnly ? undefined : verifySaved}
             onRetryApproved={reviewReadOnly ? undefined : retryApprovedFix}
+            onReapprove={reviewReadOnly ? undefined : reapproveHeld}
             renderDetailExtra={(sel) => (sel ? (
               <>
                 {/* R15 · only for a row ACP applied itself — a drafted-AI or manually-authored
@@ -1864,6 +1981,8 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
             ) : null)}
             queue={inboxQueue}
             decisions={inboxDecisions}
+            explanation={reviewExplanation}
+            requestedSelection={reviewItemRequest}
             scanId={run?.id}
             onDecide={(f, d) => {
               if (reviewReadOnlyRef.current) return Promise.reject(new Error('Historical scans are available for results browsing only.'))
@@ -1878,12 +1997,13 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
               // back to the AI's proposal when they didn't touch it. act() writes it to the document.
               // Every branch RETURNS act()'s promise. The review pane awaits it and only advances to
               // the next finding once the write has actually landed — see act() above.
-              if (d.state === 'accepted') return act(f.id, 'approved', d.value ?? f.after ?? null, d.approvedValues, null, d.selectionFingerprint ? { finding: f, decision: d } : null)
-              if (d.state === 'rejected') return act(f.id, 'rejected')
-              if (d.state === 'assigned') return act(f.id, 'deferred')
+              // `f` is the row the pane was showing — the version every decision below is bound to.
+              if (d.state === 'accepted') return act(f.id, 'approved', d.value ?? f.after ?? null, d.approvedValues, null, d.selectionFingerprint ? { finding: f, decision: d } : null, f)
+              if (d.state === 'rejected') return act(f.id, 'rejected', undefined, undefined, null, null, f)
+              if (d.state === 'assigned') return act(f.id, 'deferred', undefined, undefined, null, null, f)
               // Not applicable / out of scope: resolved as approved-with-no-value + an out_of_scope
               // resolution, so it never blocks certification and leaves the coverage denominator.
-              if (d.state === 'not_applicable') return act(f.id, 'approved', null, undefined, 'out_of_scope')
+              if (d.state === 'not_applicable') return act(f.id, 'approved', null, undefined, 'out_of_scope', null, f)
               return Promise.resolve()
             }}
             assignees={assignees}
@@ -1925,7 +2045,7 @@ export default function Remediate({ run, files = [], decisions = {}, setDecision
       {planAccepted && <>
         <RemediationAutomationLayout progressHostId={progressHostId} scanId={runId} batchId={scopedSnapshot?.batch_id}
           policy={runAiApproval.policy} error={runAiApproval.error} saving={runAiApproval.saving}
-          reviewCount={reviewCounts.pendingItems} onOpenReview={() => setWorkspaceRequest({ mode: 'review' })} onRetry={runAiApproval.retry}
+          reviewCount={reviewCounts.pendingItems} statusCheckCount={reviewExplanation.statusCheckCount} onOpenReview={() => setWorkspaceRequest({ mode: 'review' })} onRetry={runAiApproval.retry}
           authorization={acceptedAuthorization} publicationPending={acceptedAuthorization === undefined && !automaticReleaseState?.error}
           publicationError={automaticReleaseState?.error} destinationLabel={acceptedAuthorization?.destination?.provider} />
       </>}

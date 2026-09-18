@@ -38,6 +38,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from hitl_viewed import approve_bound
 
 ACP = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ACP / "api"))
@@ -146,6 +147,9 @@ class _Blob:
         self.data = data
         self.uploads.append((f, mime))
         return "http://b/2"
+    # The approved writer publishes digest-scoped and moves the pointer at commit.
+    def upload_immutable_retry(self, owner, sid, f, data, mime):
+        return self.upload_remediated(owner, sid, f, data, mime)
 
 
 @pytest.fixture()
@@ -237,8 +241,7 @@ def applied(store, monkeypatch, original):
              if p.get("locator") == VAGUE_HREF]
     item_id = _seed(store, [{k: p[k] for k in ("locator", "before", "proposed_value",
                                                "rationale", "source")} for p in props])
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, [APPROVED_TEXT])   # the reviewer edits the draft
+    approve_bound(store, item_id, [APPROVED_TEXT])   # the reviewer edits the draft
     blob = _Blob(original)
     _run_lane(monkeypatch, store, blob)
     return blob, item_id, store
@@ -321,8 +324,7 @@ def test_an_approved_value_that_does_not_clear_the_criterion_is_not_credited(
              if p.get("locator") == VAGUE_HREF]
     item_id = _seed(store, [{k: p[k] for k in ("locator", "before", "proposed_value",
                                                "rationale", "source")} for p in props])
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, ["read more"])     # still vague
+    approve_bound(store, item_id, ["read more"])     # still vague
     blob = _Blob(original)
     _run_lane(monkeypatch, store, blob)
 

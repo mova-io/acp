@@ -1,0 +1,760 @@
+{
+ "docTitle": "Accessibility Assessment Report — Hospital",
+ "filename": "mova-hospital-scan-evidence-report",
+ "lang": "en-US",
+ "mode": "full",
+ "kind": "scan",
+ "identity": {
+  "scanId": "s-2026-09-links",
+  "file": null,
+  "sourceChecksum": null,
+  "sourceChecksumKind": null,
+  "sourceSha256": null,
+  "correctedSha256": null,
+  "currentArtifact": null,
+  "artifactVersion": null,
+  "generatedAt": "2026-09-18T12:00:00.000Z",
+  "platformVersion": null,
+  "targetLevel": "AA",
+  "factsDigest": "1c7ce35801f120133d99b6aad55d4097899644095352a276d6e2fbf872cf1b7f"
+ },
+ "factsDigest": "1c7ce35801f120133d99b6aad55d4097899644095352a276d6e2fbf872cf1b7f",
+ "targetLevel": "AA",
+ "footerVersion": null,
+ "footerGenerated": "September 18, 2026, 12:00 PM UTC",
+ "cover": {
+  "title": "Accessibility Assessment Report",
+  "subtitle": "Hospital · WCAG 2.1 Level AA",
+  "meta": [
+   "Full evidence · generated September 18, 2026, 12:00 PM UTC",
+   "Scan s-2026-09-links"
+  ]
+ },
+ "blocks": [
+  {
+   "k": "heading",
+   "text": "Decision summary",
+   "level": 1
+  },
+  {
+   "k": "callout",
+   "text": "0 of 0 documents came back with no blocking findings among the WCAG 2.1 Level AA criteria ACP checked. 0 documents are eligible for automatic fixing — a recommendation, not work performed.",
+   "o": {
+    "color": "#3B6D11"
+   }
+  },
+  {
+   "k": "decisionSummary",
+   "caption": "Estate decision evidence",
+   "items": [
+    {
+     "key": "documentsAssessed",
+     "label": "Documents assessed",
+     "value": 5,
+     "detail": "5 documents in this scan; 0 not assessed, errored or only partly assessed — an empty finding list for those is not \"no findings\""
+    },
+    {
+     "key": "editsSaved",
+     "label": "Documents with saved edits",
+     "value": null,
+     "detail": "Saved-copy status was not included in the file list"
+    },
+    {
+     "key": "findingsVerifiedResolved",
+     "label": "Findings verified resolved",
+     "value": null,
+     "detail": "NOT RECORDED — at least one document has no per-finding ledger, so the scan-level resolved count cannot be stated. Remediation records could not be loaded, which is a change count, not a finding count."
+    },
+    {
+     "key": "findingsRemaining",
+     "label": "Findings remaining",
+     "value": 0,
+     "detail": "Blocking findings on documents without a corrected copy"
+    },
+    {
+     "key": "humanChecksPending",
+     "label": "Human checks pending",
+     "value": null,
+     "detail": "The review queue could not be read"
+    },
+    {
+     "key": "checksNotPerformed",
+     "label": "Documents not checked",
+     "value": 0,
+     "detail": "Not assessed yet, or could not be analysed"
+    }
+   ]
+  },
+  {
+   "k": "stageStrip",
+   "items": [
+    {
+     "key": "suggestions",
+     "label": "Suggestions",
+     "value": null,
+     "status": "unknown",
+     "detail": "Review queue not loaded"
+    },
+    {
+     "key": "savedEdits",
+     "label": "Saved edits",
+     "value": null,
+     "status": "unknown",
+     "detail": "Documents with a saved corrected copy"
+    },
+    {
+     "key": "technicalChecks",
+     "label": "Technical re-checks",
+     "value": null,
+     "status": "unknown",
+     "detail": "Not recorded"
+    },
+    {
+     "key": "humanConfirmation",
+     "label": "Human confirmation",
+     "value": null,
+     "status": "unknown",
+     "detail": "Not recorded"
+    },
+    {
+     "key": "publication",
+     "label": "Publication",
+     "value": null,
+     "status": "unknown",
+     "detail": "Publication status not recorded in this report"
+    }
+   ]
+  },
+  {
+   "k": "text",
+   "text": "Average score across scored documents: Not recorded — a secondary indicator.",
+   "o": {
+    "size": 9,
+    "color": "#6B6670"
+   }
+  },
+  {
+   "k": "heading",
+   "text": "What this report covers",
+   "level": 1
+  },
+  {
+   "k": "table",
+   "headers": [
+    "Field",
+    "Value"
+   ],
+   "caption": "Report scope and identity",
+   "rows": [
+    [
+     "Organisation",
+     "Hospital"
+    ],
+    [
+     "Assessment (scan) id",
+     "s-2026-09-links"
+    ],
+    [
+     "Target",
+     "WCAG 2.1 Level AA"
+    ],
+    [
+     "Documents in scan",
+     "0"
+    ],
+    [
+     "Criteria with automated checks in scope",
+     "0 of 42"
+    ],
+    [
+     "Report generated",
+     "2026-09-18T12:00:00.000Z"
+    ],
+    [
+     "Platform version",
+     "Not recorded"
+    ],
+    [
+     "Report mode",
+     "Full evidence"
+    ]
+   ]
+  },
+  {
+   "k": "heading",
+   "text": "Documents by outcome",
+   "level": 2
+  },
+  {
+   "k": "table",
+   "headers": [
+    "Outcome",
+    "Documents"
+   ],
+   "caption": "Documents by outcome",
+   "rows": []
+  },
+  {
+   "k": "heading",
+   "text": "Since the previous assessment",
+   "level": 1
+  },
+  {
+   "k": "text",
+   "text": "Change since the previous assessment: not compared. no document in this scan has an earlier assessment under the same rubric and scope; 5 have no earlier assessment at all.",
+   "o": {
+    "bold": true,
+    "color": "#854F0B"
+   }
+  },
+  {
+   "k": "text",
+   "text": "Documents: 0 compared with their own most recent earlier assessment; 5 with no earlier assessment (new to the record).",
+   "o": {
+    "size": 9,
+    "color": "#6B6670"
+   }
+  },
+  {
+   "k": "text",
+   "text": "Re-assessments inside this scan: 5 have no replaced assessment recorded, which is not evidence that none was replaced.",
+   "o": {
+    "size": 9,
+    "color": "#6B6670"
+   }
+  },
+  {
+   "k": "table",
+   "headers": [
+    "Measure",
+    "Count"
+   ],
+   "caption": "Change since each document’s previous assessment",
+   "rows": [
+    [
+     "Newly reported findings",
+     "0"
+    ],
+    [
+     "No longer reported",
+     "0"
+    ],
+    [
+     "Still present",
+     "0"
+    ],
+    [
+     "Reopened",
+     "0"
+    ],
+    [
+     "Findings not matchable one by one (no location)",
+     "0"
+    ],
+    [
+     "Documents compared",
+     "0"
+    ],
+    [
+     "Documents renamed since then (matched by provider id)",
+     "0"
+    ],
+    [
+     "Documents with no earlier assessment",
+     "5"
+    ],
+    [
+     "Documents with no comparable earlier assessment",
+     "0"
+    ],
+    [
+     "Documents whose earlier assessment is not a usable baseline",
+     "0"
+    ],
+    [
+     "Documents not fully assessed this time",
+     "0"
+    ]
+   ]
+  },
+  {
+   "k": "table",
+   "headers": [
+    "Document",
+    "Since previous assessment",
+    "Previous assessment"
+   ],
+   "caption": "Documents that changed, or could not be compared",
+   "rows": []
+  },
+  {
+   "k": "heading",
+   "text": "Remaining work across documents",
+   "level": 1
+  },
+  {
+   "k": "text",
+   "text": "1 document(s) with a saved corrected copy are not listed here until they are re-assessed.",
+   "o": {
+    "size": 9,
+    "color": "#6B6670"
+   }
+  },
+  {
+   "k": "text",
+   "text": "Each finding below links its exact record in ACP; a finding with no recorded location still opens its own record.",
+   "o": {
+    "size": 9,
+    "color": "#6B6670"
+   }
+  },
+  {
+   "k": "findingCard",
+   "id": "c2445dd50ec39489144c1a4bf6156273",
+   "status": "open",
+   "priority": "high",
+   "severity": "SERIOUS",
+   "title": "Board/Q1 #2 – Überblick.docx — 1.1.1 · Non-text Content",
+   "criterion": "1.1.1",
+   "criterionName": "Non-text Content",
+   "location": {
+    "label": "Image 1",
+    "kind": "object",
+    "page": null,
+    "slide": null,
+    "sheet": null,
+    "cell": null,
+    "objectId": "image:1",
+    "element": "docx:image:1",
+    "raw": "docx:image:1",
+    "href": "/?view=evidence&scan=s-2026-09-links&file=Board%2FQ1+%232+%E2%80%93+%C3%9Cberblick.docx&finding=c2445dd50ec39489144c1a4bf6156273"
+   },
+   "recommendedAction": null,
+   "description": "Image has no description",
+   "impact": "Screen-reader users hear nothing, or a file name, where this image or object carries meaning.",
+   "steps": [
+    "Where to look: Images, charts, logos and other objects with no text alternative (alt text).",
+    "Right-click the image or chart > Edit Alt Text… (or select it > Picture/Graphic Format tab > Alt Text). Write one plain sentence describing it; tick “Mark as decorative” only for pure decoration."
+   ],
+   "owner": null,
+   "recheck": "Re-run the ACP assessment on the corrected copy: this finding must no longer be reported for WCAG 1.1.1.",
+   "state": "open",
+   "stateReason": "recorded by the current assessment and not resolved by any per-finding record",
+   "rank": 1,
+   "file": "Board/Q1 #2 – Überblick.docx"
+  },
+  {
+   "k": "findingCard",
+   "id": "f1b841ae2b5c735022e0bd4cf62a934a",
+   "status": "open",
+   "priority": "high",
+   "severity": "SERIOUS",
+   "title": "Board/Q1 #2 – Überblick.docx — 1.1.1 · Non-text Content",
+   "criterion": "1.1.1",
+   "criterionName": "Non-text Content",
+   "location": {
+    "label": "Image 2",
+    "kind": "object",
+    "page": null,
+    "slide": null,
+    "sheet": null,
+    "cell": null,
+    "objectId": "image:2",
+    "element": "docx:image:2",
+    "raw": "docx:image:2",
+    "href": "/?view=evidence&scan=s-2026-09-links&file=Board%2FQ1+%232+%E2%80%93+%C3%9Cberblick.docx&finding=f1b841ae2b5c735022e0bd4cf62a934a"
+   },
+   "recommendedAction": null,
+   "description": "Image has no description",
+   "impact": "Screen-reader users hear nothing, or a file name, where this image or object carries meaning.",
+   "steps": [
+    "Where to look: Images, charts, logos and other objects with no text alternative (alt text).",
+    "Right-click the image or chart > Edit Alt Text… (or select it > Picture/Graphic Format tab > Alt Text). Write one plain sentence describing it; tick “Mark as decorative” only for pure decoration."
+   ],
+   "owner": null,
+   "recheck": "Re-run the ACP assessment on the corrected copy: this finding must no longer be reported for WCAG 1.1.1.",
+   "state": "open",
+   "stateReason": "recorded by the current assessment and not resolved by any per-finding record",
+   "rank": 2,
+   "file": "Board/Q1 #2 – Überblick.docx"
+  },
+  {
+   "k": "findingCard",
+   "id": "d06b4edfd78830d530b4fb5e5d2754b4",
+   "status": "open",
+   "priority": "high",
+   "severity": "SERIOUS",
+   "title": "decks/Q3 review & plan.pptx — 1.1.1 · Non-text Content",
+   "criterion": "1.1.1",
+   "criterionName": "Non-text Content",
+   "location": {
+    "label": "Slide 2 · shape 5",
+    "kind": "object",
+    "page": 2,
+    "slide": 2,
+    "sheet": null,
+    "cell": null,
+    "objectId": "shape:5",
+    "element": "pptx:slide:1:element:5",
+    "raw": "pptx:slide:1:element:5",
+    "href": "/?view=evidence&scan=s-2026-09-links&file=decks%2FQ3+review+%26+plan.pptx&finding=d06b4edfd78830d530b4fb5e5d2754b4"
+   },
+   "recommendedAction": null,
+   "description": "Shape 5 has no alt text",
+   "impact": "Screen-reader users hear nothing, or a file name, where this image or object carries meaning.",
+   "steps": [
+    "Where to look: Images, charts, logos and other objects with no text alternative (alt text).",
+    "Right-click the picture, chart or shape > Edit Alt Text… (or Picture/Graphic Format > Alt Text). Describe each visual; mark background/decorative shapes as decorative."
+   ],
+   "owner": null,
+   "recheck": "Re-run the ACP assessment on the corrected copy: this finding must no longer be reported for WCAG 1.1.1.",
+   "state": "open",
+   "stateReason": "recorded by the current assessment and not resolved by any per-finding record",
+   "rank": 3,
+   "file": "decks/Q3 review & plan.pptx"
+  },
+  {
+   "k": "findingCard",
+   "id": "a44d8ab7a1aa092c3763c70a7bcad1bb",
+   "status": "open",
+   "priority": "high",
+   "severity": "SERIOUS",
+   "title": "reports/annual 100%.pdf — 1.1.1 · Non-text Content",
+   "criterion": "1.1.1",
+   "criterionName": "Non-text Content",
+   "location": {
+    "label": "Page 3 · Figure 2",
+    "kind": "page",
+    "page": 3,
+    "slide": null,
+    "sheet": null,
+    "cell": null,
+    "objectId": null,
+    "element": "Figure 2",
+    "raw": "Figure 2",
+    "href": "/?view=evidence&scan=s-2026-09-links&file=reports%2Fannual+100%25.pdf&finding=a44d8ab7a1aa092c3763c70a7bcad1bb"
+   },
+   "recommendedAction": null,
+   "description": "Figure has no alternate text",
+   "impact": "Screen-reader users hear nothing, or a file name, where this image or object carries meaning.",
+   "steps": [
+    "Where to look: Images, charts, logos and other objects with no text alternative (alt text).",
+    "Acrobat Pro > Tools > Accessibility > Accessibility Check (Full Check) locates issues; use Reading Order / Tags to fix."
+   ],
+   "owner": null,
+   "recheck": "Re-run the ACP assessment on the corrected copy: this finding must no longer be reported for WCAG 1.1.1.",
+   "state": "open",
+   "stateReason": "recorded by the current assessment and not resolved by any per-finding record",
+   "rank": 4,
+   "file": "reports/annual 100%.pdf"
+  },
+  {
+   "k": "findingCard",
+   "id": "0abe927ca2cc6ffe8da4560ff63e737d",
+   "status": "open",
+   "priority": "high",
+   "severity": "SERIOUS",
+   "title": "Board/Q1 #2 – Überblick.docx — 3.1.1 · Language of Page",
+   "criterion": "3.1.1",
+   "criterionName": "Language of Page",
+   "location": {
+    "label": null,
+    "kind": null,
+    "page": null,
+    "slide": null,
+    "sheet": null,
+    "cell": null,
+    "objectId": null,
+    "element": null,
+    "raw": null,
+    "href": "/?view=evidence&scan=s-2026-09-links&file=Board%2FQ1+%232+%E2%80%93+%C3%9Cberblick.docx&finding=0abe927ca2cc6ffe8da4560ff63e737d"
+   },
+   "recommendedAction": null,
+   "description": "Document language is not set",
+   "impact": "Screen readers may pronounce the content in the wrong language.",
+   "steps": [
+    "Where to look: The document’s default language is not set, so screen readers may use the wrong pronunciation.",
+    "macOS: Tools > Language > pick the document language and Set As Default (or Review > Language).",
+    "Windows: Review > Language > Set Proofing Language > choose the language > Set As Default."
+   ],
+   "owner": null,
+   "recheck": "Re-run the ACP assessment on the corrected copy: this finding must no longer be reported for WCAG 3.1.1.",
+   "state": "open",
+   "stateReason": "recorded by the current assessment and not resolved by any per-finding record",
+   "rank": 5,
+   "file": "Board/Q1 #2 – Überblick.docx"
+  },
+  {
+   "k": "findingCard",
+   "id": "0d4291b1f7703f05229724c3f363df85",
+   "status": "open",
+   "priority": "medium",
+   "severity": "MODERATE",
+   "title": "sheets/budget.xlsx — 2.4.4 · Link Purpose (In Context)",
+   "criterion": "2.4.4",
+   "criterionName": "Link Purpose (In Context)",
+   "location": {
+    "label": "Sheet Budget 2026 · cell B3",
+    "kind": "cell",
+    "page": null,
+    "slide": null,
+    "sheet": "Budget 2026",
+    "cell": "B3",
+    "objectId": null,
+    "element": "xlsx:sheet:Budget 2026:cell:B3",
+    "raw": "xlsx:sheet:Budget 2026:cell:B3",
+    "href": "/?view=evidence&scan=s-2026-09-links&file=sheets%2Fbudget.xlsx&finding=0d4291b1f7703f05229724c3f363df85"
+   },
+   "recommendedAction": null,
+   "description": "Link text is 'click here'",
+   "impact": "Link text does not say where the link goes when it is read out of context.",
+   "steps": [
+    "Where to look: Links whose text does not say where they go (“click here”, “read more”, or a raw URL).",
+    "macOS: Review tab > Check Accessibility. Double-click a flagged item to jump to it, then use the fix in the Accessibility pane.",
+    "Windows: Review tab > Check Accessibility. Select a flagged item under “Inspection Results”, then apply the “Recommended Actions” shown."
+   ],
+   "owner": null,
+   "recheck": "Re-run the ACP assessment on the corrected copy: this finding must no longer be reported for WCAG 2.4.4.",
+   "state": "open",
+   "stateReason": "recorded by the current assessment and not resolved by any per-finding record",
+   "rank": 6,
+   "file": "sheets/budget.xlsx"
+  },
+  {
+   "k": "findingCard",
+   "id": "e30730c2ea70bebe9eb50af257738cb7",
+   "status": "open",
+   "priority": "medium",
+   "severity": "REVIEW",
+   "title": "sheets/budget.xlsx — 1.3.1 · Info and Relationships",
+   "criterion": "1.3.1",
+   "criterionName": "Info and Relationships",
+   "location": {
+    "label": "Sheet Budget 2026",
+    "kind": "sheet",
+    "page": null,
+    "slide": null,
+    "sheet": "Budget 2026",
+    "cell": null,
+    "objectId": null,
+    "element": "xlsx:sheet:Budget 2026",
+    "raw": "xlsx:sheet:Budget 2026",
+    "href": "/?view=evidence&scan=s-2026-09-links&file=sheets%2Fbudget.xlsx&finding=e30730c2ea70bebe9eb50af257738cb7"
+   },
+   "recommendedAction": null,
+   "description": "Check the header row is marked",
+   "impact": "Screen-reader users cannot tell headings, lists or table headers apart from body text, so structure is lost.",
+   "steps": [
+    "Where to look: Structure that is only visual — tables without header rows, text sized to look like a heading instead of using a Heading style.",
+    "macOS: Select the data range > Insert > Table (⌘T) and keep “My table has headers”. Give each sheet a real header row; avoid blank rows/columns inside data.",
+    "Windows: Select the data range > Insert > Table (Ctrl+T) and keep “My table has headers”. Ensure one clear header row per table."
+   ],
+   "owner": null,
+   "recheck": "Re-run the ACP assessment on the corrected copy: this finding must no longer be reported for WCAG 1.3.1.",
+   "state": "open",
+   "stateReason": "recorded by the current assessment and not resolved by any per-finding record",
+   "rank": 7,
+   "file": "sheets/budget.xlsx"
+  },
+  {
+   "k": "heading",
+   "text": "Most frequent failing criteria",
+   "level": 1
+  },
+  {
+   "k": "table",
+   "headers": [
+    "WCAG",
+    "Criterion",
+    "Level",
+    "Documents failing",
+    "Findings"
+   ],
+   "caption": "Most frequent failing criteria",
+   "rows": []
+  },
+  {
+   "k": "heading",
+   "text": "Recommended routes",
+   "level": 1
+  },
+  {
+   "k": "text",
+   "text": "The classifier’s recommendation for each document. These are recommendations, not work performed — saved and verified edits are counted in the decision summary.",
+   "o": {
+    "size": 9,
+    "color": "#6B6670"
+   }
+  },
+  {
+   "k": "table",
+   "headers": [
+    "Recommendation",
+    "Documents"
+   ],
+   "caption": "Recommended remediation routes",
+   "rows": []
+  },
+  {
+   "k": "heading",
+   "text": "Manual remediation checklist",
+   "level": 1
+  },
+  {
+   "k": "table",
+   "headers": [
+    "WCAG",
+    "Criterion",
+    "Format",
+    "Documents",
+    "Where",
+    "macOS",
+    "Windows"
+   ],
+   "caption": "Manual remediation checklist, most actionable first",
+   "rows": []
+  },
+  {
+   "k": "pageBreak"
+  },
+  {
+   "k": "heading",
+   "text": "Complete evidence appendix",
+   "level": 1
+  },
+  {
+   "k": "appendixTable",
+   "id": "appendix-documents",
+   "complete": true,
+   "totalRecords": 5,
+   "limitNote": null,
+   "source": "server-index",
+   "headers": [
+    "Document",
+    "Assessment",
+    "Findings",
+    "Open",
+    "Verified resolved",
+    "Saved changes (verified / not verified)",
+    "Reviewer decisions pending",
+    "Since previous assessment",
+    "Approvals needing recheck",
+    "Department",
+    "Recommendation"
+   ],
+   "caption": "Master index of every document (server evidence index)",
+   "rows": [
+    [
+     {
+      "text": "Board/Q1 #2 – Überblick.docx",
+      "href": "/?view=evidence&scan=s-2026-09-links&file=Board%2FQ1+%232+%E2%80%93+%C3%9Cberblick.docx"
+     },
+     "Assessed",
+     "3",
+     "3",
+     "Not recorded",
+     "0 / 0",
+     "0",
+     "No earlier assessment (new to the record)",
+     "0",
+     "Not recorded",
+     "Not recorded"
+    ],
+    [
+     {
+      "text": "decks/Q3 review & plan.pptx",
+      "href": "/?view=evidence&scan=s-2026-09-links&file=decks%2FQ3+review+%26+plan.pptx"
+     },
+     "Assessed",
+     "1",
+     "1",
+     "Not recorded",
+     "0 / 0",
+     "0",
+     "No earlier assessment (new to the record)",
+     "0",
+     "Not recorded",
+     "Not recorded"
+    ],
+    [
+     {
+      "text": "remediated/fixed.docx",
+      "href": "/?view=evidence&scan=s-2026-09-links&file=remediated%2Ffixed.docx"
+     },
+     "Assessed",
+     "1",
+     "1",
+     "Not recorded",
+     "0 / 0",
+     "0",
+     "No earlier assessment (new to the record)",
+     "0",
+     "Not recorded",
+     "Not recorded"
+    ],
+    [
+     {
+      "text": "reports/annual 100%.pdf",
+      "href": "/?view=evidence&scan=s-2026-09-links&file=reports%2Fannual+100%25.pdf"
+     },
+     "Assessed",
+     "1",
+     "1",
+     "Not recorded",
+     "0 / 0",
+     "0",
+     "No earlier assessment (new to the record)",
+     "0",
+     "Not recorded",
+     "Not recorded"
+    ],
+    [
+     {
+      "text": "sheets/budget.xlsx",
+      "href": "/?view=evidence&scan=s-2026-09-links&file=sheets%2Fbudget.xlsx"
+     },
+     "Assessed",
+     "2",
+     "2",
+     "Not recorded",
+     "0 / 0",
+     "0",
+     "No earlier assessment (new to the record)",
+     "0",
+     "Not recorded",
+     "Not recorded"
+    ]
+   ]
+  },
+  {
+   "k": "appendixTable",
+   "id": "appendix-verified-fixes",
+   "complete": false,
+   "totalRecords": null,
+   "limitNote": "remediation records could not be loaded",
+   "headers": [
+    "Record id",
+    "Document",
+    "Criterion",
+    "Reason",
+    "Before",
+    "After"
+   ],
+   "caption": "Verified fix records (full before and after)",
+   "rows": []
+  },
+  {
+   "k": "heading",
+   "text": "What this report is, and is not",
+   "level": 1
+  },
+  {
+   "k": "text",
+   "text": "A record of what ACP detected, changed and re-verified across this scan against the WCAG 2.1 Level AA criteria in scope. It is not a conformance determination, a certification or legal advice; it can support an ADA, Section 508 or EN 301 549 / European Accessibility Act review as evidence alongside a qualified human evaluation.",
+   "o": {
+    "size": 9,
+    "color": "#6B6670"
+   }
+  }
+ ]
+}

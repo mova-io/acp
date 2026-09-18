@@ -501,8 +501,17 @@ def main():
         if queued_n > 0:
             # Spot: approve first item
             first = items[0]
+            # An approval names the version it approves (the row as GET /hitl/queue lists it);
+            # without it the server answers 409 viewed_version_required and records nothing.
+            listed = next(x for x in _get(f"/hitl/queue?scan_id={scan_id}") if x["id"] == first["id"])
             updated = _put(f"/hitl/queue/{first['id']}",
-                           {"status": "approved", "reviewer_note": "E2E auto-approval test"})
+                           {"status": "approved", "reviewer_note": "E2E auto-approval test",
+                            "approval_scope": "single",
+                            "expected_version": listed.get("decision_version") or 0,
+                            "expected_source_revision": listed.get("source_revision"),
+                            "expected_proposal_snapshot_ids": listed.get("proposal_snapshot_ids") or [],
+                            "expected_corrected_sha256": listed.get("corrected_artifact"),
+                            "expected_proposal_digest": listed.get("proposal_digest")})
             assert updated["status"] == "approved", f"Expected approved, got {updated['status']}"
             print(c("green", f"  ✓ Approved item {first['id']} ({first['rule_id']} in {first['file']})"))
 

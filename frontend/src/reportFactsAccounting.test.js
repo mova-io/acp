@@ -680,9 +680,12 @@ describe('comparison comes only from a real comparable snapshot', () => {
     expect(c.previous).toMatchObject({ scanId: 'scan-0', sha256: SHA_OLD })
   })
 
-  it('a different scope, a different document, or an unrecorded scope is UNKNOWN', () => {
+  it('a different scope or an unrecorded scope is UNKNOWN', () => {
     expect(buildComparisonFromFacts(facts({ previous: { ...previous, scopeDigest: 'x'.repeat(64) } })).status).toBe('unknown')
-    expect(buildComparisonFromFacts(facts({ previous: { ...previous, file: 'other.pdf' } })).status).toBe('unknown')
+    // Audit C3, reproduced on the real store: the SERVER matched this baseline by the provider's
+    // own file id, so a different name is a RENAME of this document, not another one. Rejecting
+    // it here was the defect — the comparison is made.
+    expect(buildComparisonFromFacts(facts({ previous: { ...previous, file: 'other.pdf' } })).status).toBe('compared')
     expect(buildComparisonFromFacts(facts({
       previous: { ...previous, scopeDigest: null, scanScope: null },
     })).status).toBe('unknown')

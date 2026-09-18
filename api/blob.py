@@ -139,11 +139,14 @@ def _remediated_client(svc, owner, scan_id, filename):
     record = record or {}
     if record.get('blob_url') == canonical.url or '.retry/' not in str(record.get('blob_url') or ''):
         return canonical, None
-    if (not owner or any(part in {'.', '..'} for part in filename.split('/'))
+    if (any(part in {'.', '..'} for part in filename.split('/'))
             or '%' in filename or '\\' in filename):
         raise ValueError('retry_artifact_identity_invalid')
+    # Owner-scoped: the caller's owner must be the scan's recorded owner. An owner-less scan
+    # (SSO-less/demo) matches only an owner-less caller, and its objects live under the same
+    # 'demo/' prefix _blob_path gives its writer; an owned scan still refuses a caller with none.
     scan = core.store.get_scan(scan_id) or {}
-    if scan.get('run', {}).get('owner_email') != owner:
+    if (scan.get('run', {}).get('owner_email') or None) != (owner or None):
         raise ValueError('retry_artifact_owner_mismatch')
     digest = record.get('corrected_sha256') or ''
     if len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):

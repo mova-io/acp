@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 import core
@@ -41,8 +41,21 @@ class HitlUpdate(BaseModel):
     resolution: str | None = None       # decorative | essential_exception | described_not_replaced | out_of_scope
     request_id: str | None = None       # stable across transport retries of one decision
     expected_version: int | None = None # row version the reviewer actually saw
-    expected_proposal_snapshot_ids: list[str] | None = None
+    # The VIEWED binding (audit gap 8): the row's `proposal_snapshot_ids` as served (`[]` when it
+    # has none) and its `source_revision`. An approval must send both, plus expected_version;
+    # see hitl_update. Entries may be null exactly where the served list has null.
+    expected_proposal_snapshot_ids: list[str | None] | None = None
     expected_source_revision: str | None = None
+    # The corrected ARTIFACT the reviewer saw: the row's `corrected_artifact` exactly as GET
+    # /hitl/queue lists it — the saved copy's sha256, or "none" before any corrected copy exists.
+    expected_corrected_sha256: str | None = None
+    # The reviewable CONTENT the reviewer saw: the row's `proposal_digest` exactly as GET
+    # /hitl/queue serves it (Store.proposal_digest — opaque; echoed, never recomputed).
+    expected_proposal_digest: str | None = None
+    # "single" — one reviewer's decision on the row on screen: the viewed binding is compared
+    # under the row lock and edited values are allowed. Absent (or "batch") with a binding keeps
+    # the frozen-batch guard: unedited drafts with complete, current proposal lineage only.
+    approval_scope: str | None = None
 
 
 REJECT_REASONS = {"incorrect_object", "too_vague", "hallucinated", "missed_text", "org_preference", "other", "unspecified"}
@@ -69,6 +82,36 @@ RESOLUTIONS = {
     # counts it as its own `not_applicable` bucket, outside in_scope), like an N/A cell on the matrix.
     "out_of_scope": "reviewer marked finding not applicable / out of scope for this document",
 }
+
+
+APPROVAL_SCOPES = {"single", "batch"}
+
+# 409 codes for an approval that cannot be bound to what the reviewer saw. Nothing is recorded
+# and no job exists when either is returned (`changes: "none"`), so the client refreshes the row
+# and asks for a fresh decision — it never retries the approval on its own.
+STALE_VIEWED_VERSION = "stale_viewed_version"
+VIEWED_VERSION_REQUIRED = "viewed_version_required"
+TARGET_REMOVED = "target_removed"
+_CONFLICT_MESSAGES = {
+    STALE_VIEWED_VERSION: ("This suggestion or its document changed after you opened it. "
+                           "Review the current version, then approve again."),
+    VIEWED_VERSION_REQUIRED: ("This approval did not say which version of the suggestion and "
+                              "document you reviewed, so nothing was approved. Refresh this item, "
+                              "review the current version, then approve again."),
+    TARGET_REMOVED: Store.RETRY_TARGET_REMOVED,
+}
+
+
+def _approval_conflict(code: str) -> JSONResponse:
+    """409 with the machine code and the human sentence at the TOP level of the body.
+
+    Top level because that is where frontend/src/api.js reads them (`message` becomes the Error's
+    text; `code` and `changes` are lifted onto it). An HTTPException would nest them under
+    `detail`, and the reviewer would read "[object Object]". `detail` repeats the sentence for
+    clients that only read that field."""
+    message = _CONFLICT_MESSAGES[code]
+    return JSONResponse(status_code=409, content={
+        "code": code, "message": message, "detail": message, "changes": "none"})
 
 
 def _request_owner(request: Request | None) -> str | None:
@@ -103,9 +146,47 @@ def hitl_auto_queue(scan_id: str, request: Request):
     if core.store.get_scan(scan_id, owner=_request_owner(request)) is None:
         raise HTTPException(404, "scan not found")
     created = core.store.queue_hitl_items(scan_id)
-    created.extend(core.store.reconcile_completed_remediation_reviews(scan_id))
+    # Also retires rows whose targets a different verified fix removed, from persisted saved-copy
+    # evidence on the current corrected artifact (decision_log + finding_disposition only).
+    removals: dict = {}
+    created.extend(core.store.reconcile_completed_remediation_reviews(scan_id, report=removals))
     core.fire_webhook(created)
-    return {"queued": len(created), "items": created}
+    return {"queued": len(created), "items": created,
+            "target_removals": {
+                "superseded": sorted({s["item_id"] for r in removals.values()
+                                      for s in r.get("superseded", [])}),
+                "unchanged": sorted({s["item_id"] for r in removals.values()
+                                     for s in r.get("unchanged", [])}),
+                "skipped": [{"file": f, **s} for f, r in sorted(removals.items())
+                            for s in r.get("skipped", [])]}}
+
+
+@router.post("/hitl/queue/{scan_id}/reconcile-targets")
+def hitl_reconcile_targets(scan_id: str, request: Request):
+    """Re-check open review items against the RECORDED check of each saved Word copy.
+
+    Retires an item only when a different verified change removed every one of its targets
+    and a complete assessment of the current saved copy proves it (see
+    review_target_reconciliation). Deliberately narrower than /auto: no queue routing, no AI,
+    no document write, no review-status change — only a decision_log line and the exact
+    finding_disposition rows. Idempotent: a repeat call retires nothing new and, for items
+    already retired on current evidence, reads no stored document at all.
+    """
+    if core.store.get_scan(scan_id, owner=_request_owner(request)) is None:
+        raise HTTPException(404, "scan not found")
+    from review_target_reconciliation import reconcile_scan
+    files = []
+    for file, result in sorted(reconcile_scan(core.store, scan_id).items()):
+        files.append({
+            "file": file,
+            "superseded": sorted({str(s["item_id"]) for s in result.get("superseded", [])}),
+            "unchanged": sorted({str(s["item_id"]) for s in result.get("unchanged", [])}),
+            "skipped": [{"item_id": s.get("item_id"), "reason": s.get("reason")}
+                        for s in result.get("skipped", [])],
+        })
+    return {"scan_id": scan_id,
+            "superseded_count": sum(len(f["superseded"]) for f in files),
+            "files": files}
 
 
 @router.post("/hitl/queue/{scan_id}/verify")
@@ -138,17 +219,29 @@ def hitl_list(request: Request, status: str | None = None, scan_id: str | None =
     owner = getattr(request.state, "user_email", None)
     rows = core.store.list_hitl_queue(status=status, scan_id=scan_id, owner=owner,
                                       include_superseded=include_superseded)
+    # The viewed-content digest, from the STORED row — before serialization shapes it for the
+    # client — so it is exactly what complete_hitl_decision recomputes under the row lock.
+    digests = {row.get("id"): Store.proposal_digest(row) for row in rows}
     # Match the sealed assessment input used by remediation; legacy runs use the scan hash.
     from review_item_kind import serialize_review_item
     rows = [serialize_review_item(row) for row in rows]
     from automatic_review_queue import annotate
     rows = annotate(core.store, rows, owner)
-    revisions = {}
+    revisions, artifacts = {}, {}
     for row in rows:
         sid = row.get("scan_id")
         if sid and sid not in revisions:
             revisions[sid] = core.store.remediation_source_revision(sid)
+            artifacts[sid] = {f: (r.get("corrected_sha256") or "")
+                              for f, r in core.store.get_file_records(sid).items()}
         row["source_revision"] = revisions.get(sid)
+        # The corrected artifact this row is shown against — what an approval sends back as
+        # expected_corrected_sha256: the saved copy's sha256, or "none" when the document has no
+        # corrected copy yet. Not named corrected_sha256 on purpose: "none" is not a digest, and
+        # a truthiness check on a sha-named field would read it as one.
+        row["corrected_artifact"] = ((artifacts.get(sid) or {}).get(row.get("file"))
+                                   or core.store.NO_CORRECTED_ARTIFACT)
+        row["proposal_digest"] = digests.get(row.get("id"))
     return rows
 
 
@@ -188,6 +281,22 @@ def hitl_update(item_id: str, body: HitlUpdate, request: Request = None):
         raise HTTPException(422, f"reject_reason must be one of {sorted(REJECT_REASONS)}")
     if body.resolution is not None and body.resolution not in RESOLUTIONS:
         raise HTTPException(422, f"resolution must be one of {sorted(RESOLUTIONS)}")
+    if body.approval_scope is not None and body.approval_scope not in APPROVAL_SCOPES:
+        raise HTTPException(422, f"approval_scope must be one of {sorted(APPROVAL_SCOPES)}")
+    # AN APPROVAL NAMES THE VERSION IT APPROVES (audit gap 8). This used to accept a bare
+    # expected_version and stamp whatever assessment revision was current at click time, so a
+    # re-assessment between opening a suggestion and approving it bound the approval to bytes the
+    # reviewer never saw — and the writer would honour it. Every human approval now carries the
+    # viewed source revision and proposal snapshots; the store compares them under the row lock.
+    # The automatic paths (standing approvals, release continuation) do not come through here and
+    # bind to their own authorised revision. Reject/skip write nothing and need no binding.
+    if body.status == "approved" and (
+            body.expected_version is None or body.expected_proposal_snapshot_ids is None
+            or not str(body.expected_source_revision or "").strip()
+            or not str(body.expected_corrected_sha256 or "").strip()
+            or not str(body.expected_proposal_digest or "").strip()):
+        return _approval_conflict(VIEWED_VERSION_REQUIRED)
+    viewed = body.approval_scope == "single"
     # ADR 0055: describe-instead-of-replace is the one resolution that is incomplete without
     # text, so it is refused without text — here, BEFORE anything is written, rather than
     # discovered after the row has been updated. Both halves are checked because both halves
@@ -293,8 +402,18 @@ def hitl_update(item_id: str, body: HitlUpdate, request: Request = None):
             actor=actor, detail=_detail, request_id=body.request_id,
             expected_version=body.expected_version,
             expected_proposal_snapshot_ids=body.expected_proposal_snapshot_ids,
-            expected_source_revision=body.expected_source_revision)
+            expected_source_revision=body.expected_source_revision,
+            viewed=viewed, expected_corrected_sha256=body.expected_corrected_sha256,
+            expected_proposal_digest=body.expected_proposal_digest)
     except ValueError as exc:
+        if str(exc) == "viewed version required":
+            return _approval_conflict(VIEWED_VERSION_REQUIRED)
+        if str(exc) == "stale viewed version":
+            return _approval_conflict(STALE_VIEWED_VERSION)
+        if viewed and body.status == "approved" and str(exc) == "stale proposal selection":
+            # Under `single` the batch guard never runs, so this can only be the target-removal
+            # refusal: say that, rather than a batch term the reviewer never chose.
+            return _approval_conflict(TARGET_REMOVED)
         if str(exc) in {"stale decision version", "stale proposal selection", "stale source revision",
                         "decision request id was reused with a different payload"}:
             raise HTTPException(409, str(exc))
@@ -310,13 +429,21 @@ def hitl_update(item_id: str, body: HitlUpdate, request: Request = None):
     try:
         _action = ("edit" if (body.status == "approved" and body.edited)
                    else {"approved": "approve", "rejected": "reject", "skipped": "skip"}.get(body.status, body.status))
+        approved = body.status == "approved"
         event_kwargs = {
             "review_ms": body.review_ms,
             "reviewer": (getattr(request.state, "user_email", None) if request is not None else None),
-            "proposal_snapshot_ids": updated.get("approved_proposal_snapshot_ids")
-                or updated.get("proposal_snapshot_ids"),
-            "source_revision": updated.get("approved_source_revision"),
-            "approved_value_sha256": updated.get("approved_value_sha256"),
+            # A reject/skip records the version the reviewer SENT, when they sent one — never the
+            # binding a PREVIOUS approval of this row left in the approved_* columns, which would
+            # attribute this decision to a version nobody was looking at.
+            "proposal_snapshot_ids": ((updated.get("approved_proposal_snapshot_ids")
+                                       or updated.get("proposal_snapshot_ids")) if approved
+                                      else body.expected_proposal_snapshot_ids
+                                      if body.expected_proposal_snapshot_ids is not None
+                                      else updated.get("proposal_snapshot_ids")),
+            "source_revision": (updated.get("approved_source_revision") if approved
+                                else (body.expected_source_revision or None)),
+            "approved_value_sha256": updated.get("approved_value_sha256") if approved else None,
         }
         if body.model_call_ids is not None:
             proposals = item.get("proposals") or item.get("evidence") or []

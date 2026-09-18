@@ -1,10 +1,22 @@
-import { approvalRecordedOn, approvalSuperseded, workflowStatusOf, matchesWorkflow } from './remediationInboxModel.js'
+import { activeAutomaticStateOf, approvalRecordedOn, approvalSuperseded, resultKindOf, workflowStatusOf, matchesWorkflow } from './remediationInboxModel.js'
 import { exclusionReason } from './batchReviewSelection.js'
-const AUTO_RULES = new Set(['1.1.1','2.4.4','2.4.9','4.1.2','1.3.3','3.1.2','2.4.6'])
+export const AUTO_RULES = new Set(['1.1.1','2.4.4','2.4.9','4.1.2','1.3.3','3.1.2','2.4.6'])
+// Batch-exclusion reasons that mean "not decidable yet" rather than "a person's to decide".
+export const CHECK_EXCLUSIONS = ['Missing proposal', 'Version unavailable — review individually',
+  'Stale — refresh and review', 'Invalid structural proposal — refresh suggestions', 'Blocked or unavailable']
+export const normalizedRuleOf =row => String(row?.rule_id || row?.ruleId || '').replace(/^(WCAG_?|SC_)/,'').replace(/_/g,'.')
 export function automaticReviewResponsibility(row, decisions = {}) {
   const status=workflowStatusOf(row, decisions)
-  if (status==='completed') return 'results'
-  if (row.automaticQueued || (status === 'awaiting-validation' && ['queued','checking','applying','verifying','processing'].includes(row.automaticDisposition?.state))) return 'acp'
+  // Every recorded result (verified, rejected, decided, inspection, target replaced by a verified
+  // fix) is a Result and nothing else — never a status check, never a request for input.
+  if (status==='completed' || resultKindOf(row, decisions) != null) return 'results'
+  // A queued or running writer / retry / eligibility job is ACP's, and ONLY ACP's: counted once, as
+  // Processing, never also as a pending human task. `activeAutomaticStateOf` reads only the
+  // exact-scope disposition, so a marker from another run cannot claim a job. A pending proposal
+  // needs the projection's admission (`automaticQueued`); an approved row just needs the job.
+  const active = activeAutomaticStateOf(row)
+  const retrying = ['failed', 'apply_failed', 'verification_failed'].includes(String(row.status || '').toLowerCase())
+  if (row.automaticQueued || (active && (status === 'awaiting-validation' || retrying || approvalRecordedOn(row, decisions)))) return 'acp'
   const decision=decisions[row.id] || decisions[row.file]
   if (['assigned','deferred','rejected'].includes(decision?.state) || row.rejectedFix) return 'human'
   // An approval that no longer binds is a person's again. It has to be decided BEFORE every branch
@@ -31,19 +43,22 @@ export function automaticReviewResponsibility(row, decisions = {}) {
   // Incomplete drafts need recovery before a person can make a decision.
   // This is not evidence of a queued job or permission to auto-approve.
   if (row.aiDraftable === true && !row.hasProposal && !row.after) return 'check'
+  // A draft nobody can decide on yet (missing or stale proposal, no version lineage, no approval
+  // route) is a status check even when the server marker says a person will decide it: it has to be
+  // repaired first (actionableReviewInput.test.jsx pins this). The status-check reason names the gap
+  // (reviewQueueAction.statusReasonOf), never a generic sentence.
   const exclusion = exclusionReason(row, decisions)
-  if (['Missing proposal', 'Version unavailable — review individually',
-    'Stale — refresh and review', 'Invalid structural proposal — refresh suggestions',
-    'Blocked or unavailable'].includes(exclusion)) return 'check'
+  if (CHECK_EXCLUSIONS.includes(exclusion)) return 'check'
   // The backend's own classification of THIS row wins over the rule list, which is only a fallback
   // for rows the backend did not classify. AUTO_RULES mirrors api/ai_standing_approval.py RULES and
   // governs ADMISSION, not display: reading it as "not auto-approvable, therefore a person owns it"
   // is what overrode an explicit `responsibility: 'check'` from the backend and put a 1.4.5 row the
-  // backend had already called ACP's into the human queue.
+  // backend had already called ACP's into the human queue. A decidable row the server says a person
+  // must decide is the person's, with the server's reason.
   const assigned = row.automaticDisposition?.responsibility
   if (assigned === 'human') return 'human'
   if (assigned === 'check') return 'check'
-  const rule=String(row.rule_id || row.ruleId || '').replace(/^(WCAG_?|SC_)/,'').replace(/_/g,'.')
+  const rule=normalizedRuleOf(row)
   if (rule && !AUTO_RULES.has(rule)) return 'human'
   // No admitted job is unknown, not automatic processing or a verified fix.
   return 'check'

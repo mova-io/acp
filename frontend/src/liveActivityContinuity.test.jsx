@@ -49,6 +49,19 @@ it('uses an image frame for recovered descriptions without a verified checkmark'
  expect(host.querySelector('[data-activity-icon="image-description"]')).not.toBeNull()
  expect(host.querySelector('.remops-activity-event>span').textContent).not.toContain('✓')
 })
+it('keeps a cancelled obsolete retry in history, neutral, and out of the needs-attention filter',async()=>{
+ const obsolete=addRemediationEvent([],{kind:'remediate.vision_retry_obsolete',document:'a.docx',document_ref:'ref-a',activity_stage:'draft_generation',detail:{retry:2,reason_code:'vision_retry_input_changed',no_ai_request:true}},9)[0]
+ const paused=addRemediationEvent([],{kind:'remediate.vision_retry_blocked',document:'b.docx',document_ref:'ref-b',detail:{reason_code:'vision_budget_exhausted'}},8)[0]
+ await render([obsolete,paused])
+ const [first,second]=host.querySelector('ol').children
+ expect(first.className).toContain('remops-activity-neutral');expect(first.textContent).toContain('No AI request was made.')
+ expect(first.dataset.activityStage).toBe('draft_generation');expect(first.textContent).not.toContain('!')
+ expect(second.className).toContain('remops-activity-attention');expect(second.textContent).toContain('paused')
+ await act(()=>[...host.querySelectorAll('button')].find(b=>b.textContent.startsWith('Filter')).click())
+ const outcome=[...host.querySelectorAll('select')][0]
+ await act(()=>{outcome.value='attention';outcome.dispatchEvent(new Event('change',{bubbles:true}))})
+ expect(host.querySelector('ol').children).toHaveLength(1);expect(host.querySelector('ol').textContent).toContain('paused')
+})
 it('mounts criterion and exact-version evidence details for a durable event binding',async()=>{
  const sha='a'.repeat(64)
  const event=addRemediationEvent([],{kind:'remediate.verified',document:'report.docx',detail:{fixes:1,evidence_id:'123456abcdef',artifact_sha256:sha,criteria:['1.3.1']}},8)[0]

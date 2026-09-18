@@ -14,7 +14,8 @@ describe('review in place — the FileDrawer mounts the real EvidenceCard per fi
     // drawer, and reviewableInPlace (reviewCard.js) is the single definition of what is shown.
     expect(src).toMatch(/listHitlQueue\(scanId\)/)
     expect(src).not.toMatch(/listHitlQueue\(scanId, 'pending'\)/)
-    expect(src).toMatch(/\.filter\(\(r\) => r\.file === file\.file && reviewableInPlace\(r\)\)/)
+    // …plus an approval the writer is holding (approval_recheck_required), which needs a fresh approval.
+    expect(src).toMatch(/\.filter\(\(r\) => r\.file === file\.file && \(reviewableInPlace\(r\) \|\| needsReapproval\(r\)\)\)/)
     expect(src).toMatch(/import \{[^}]*\breviewableInPlace\b[^}]*\} from '\.\/reviewCard\.js'/)
     expect(src).toMatch(/addEventListener\('acp:hitl-changed', load\)/)
   })

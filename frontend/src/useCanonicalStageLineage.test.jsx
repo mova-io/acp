@@ -3,7 +3,7 @@ import { createElement } from 'react'
 import { act } from 'react-dom/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createTestRoot, unmountAll } from './testRoots.js'
-import { isNewerLineage, useCanonicalStageLineage } from './useCanonicalStageLineage.js'
+import { isNewerLineage, useCanonicalStageLineage, STAGE_LINEAGE_REFRESH_EVENT } from './useCanonicalStageLineage.js'
 
 afterEach(() => { unmountAll(); vi.useRealTimers() })
 
@@ -34,6 +34,17 @@ describe('canonical stage lineage continuity', () => {
     await act(async () => window.dispatchEvent(new Event('focus')))
     expect(container.textContent).toBe('scan-1:2')
     expect(load).toHaveBeenCalledTimes(2)
+  })
+
+  it('re-reads on an explicit refresh request for its own scan, and ignores one for another scan', async () => {
+    const load = vi.fn().mockResolvedValueOnce(response(1, 1)).mockResolvedValueOnce(response(1, 2))
+    const { container, root } = createTestRoot()
+    await act(async () => root.render(createElement(Probe, { scanId: 'scan-1', load })))
+    await act(async () => window.dispatchEvent(new CustomEvent(STAGE_LINEAGE_REFRESH_EVENT, { detail: { scanId: 'other-scan' } })))
+    expect(load).toHaveBeenCalledTimes(1)
+    await act(async () => window.dispatchEvent(new CustomEvent(STAGE_LINEAGE_REFRESH_EVENT, { detail: { scanId: 'scan-1' } })))
+    expect(load).toHaveBeenCalledTimes(2)
+    expect(container.textContent).toBe('scan-1:2')
   })
 
   it('clears the previous scan before loading the next', async () => {

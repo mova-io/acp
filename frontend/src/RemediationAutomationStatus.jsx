@@ -11,7 +11,7 @@ export default function RemediationAutomationStatus({ policy, error, saving, rev
       <p>{unavailable ? 'ACP could not confirm the saved approval permission. Refresh the setting before changing it.' : !policy ? 'ACP is checking the saved approval permission for this run.' : enabled ? 'ACP automatically approves eligible proposals, saves the changes, and checks the corrected copy. Exceptions remain available for review.' : 'Eligible AI proposals need approval before ACP saves and checks them.'}</p>
       {policy?.explanation && <p>{policy.explanation}</p>}{unavailable && <><p role="status">{error || policy.reason}</p>{onRetry && <button className="ghost small" onClick={onRetry}>Refresh setting</button>}</>}
     </details>
-    <details><summary><span className="remediation-automation-status__label">Review workspace</span><span className="remediation-automation-status__summary">{reviewCount.toLocaleString()} {enabled ? 'need your input' : 'review items'}</span></summary><p>Review items still unresolved. This is an item count, not a count of findings or verified fixes.</p>
+    <details><summary><span className="remediation-automation-status__label">Review workspace</span><span className="remediation-automation-status__summary">{reviewCount.toLocaleString()} {enabled ? 'need your input' : 'review tasks'}</span></summary><p>Review tasks still open. This is a task count, not a count of findings or verified fixes; the two are never added.</p>
       {onOpenReview && <button className="ghost small" onClick={onOpenReview}>Open review items</button>}
     </details>
   </section>

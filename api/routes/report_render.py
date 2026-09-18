@@ -73,6 +73,33 @@ def _platform_version() -> str | None:
         return None
 
 
+def request_app_origin(request: Request) -> str | None:
+    """The origin THIS request was addressed to, when it can stand in for the app's own origin.
+
+    Used only when ACP_PUBLIC_URL is not configured, so a downloaded PDF can still carry absolute
+    links back into ACP instead of relative ones (a relative link in a saved PDF resolves against
+    the reader's disk). It comes from the request line — Host, plus the TLS terminator's
+    X-Forwarded-Proto — and never from the report model. When the browser names a DIFFERENT
+    origin (the SPA served from another host than the API), the app's real origin is not one this
+    server can vouch for, and the answer is None: locations print as text, unlinked.
+    """
+    host = (request.headers.get("host") or "").strip()
+    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "").split(",")[0].strip().lower()
+    if not host or proto not in ("https", "http"):
+        return None
+    own = f"{proto}://{host}"
+    origin = (request.headers.get("origin") or "").strip().rstrip("/")
+    if origin and origin.lower() != own.lower():
+        return None
+    return report_render.trusted_app_origin(own)
+
+
+def app_base_url(request: Request) -> str | None:
+    """ACP_PUBLIC_URL when it is a usable origin, else the request's own origin, else None."""
+    return report_render.trusted_app_origin(getattr(core, "PUBLIC_URL", "") or None,
+                                            request_app_origin(request))
+
+
 @router.post("/scans/{sid}/report-render")
 async def report_render_pdf(sid: str, request: Request):
     owner = _owner(request)
@@ -111,7 +138,7 @@ async def report_render_pdf(sid: str, request: Request):
     identity = report_render.server_identity(
         scan_id=sid, kind=request_["kind"], file=file, record=record,
         client_identity=model.get("identity"), platform_version=_platform_version())
-    base_url = getattr(core, "PUBLIC_URL", "") or None
+    base_url = app_base_url(request)
     pdf = await run_in_threadpool(report_render.render_pdf, model, identity,
                                   request_["mode"], base_url)
     name = report_render.download_name(request_["kind"], request_["mode"], sid, file)

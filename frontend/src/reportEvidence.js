@@ -76,36 +76,216 @@ export function boundList(items, cap) {
 const posInt = (v) => { const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null }
 const str = (v) => (v == null || v === '' ? null : String(v))
 
+// ── Contract 1: ONE location parser, mirrored exactly by api/report_location.py ──────────────
+// tests/fixtures/report_location_cases.json is read by both sides (reportLocation.test.js and
+// tests/test_report_location.py): the same detector string must name the same place in a report
+// built on the server and one built here. Rules, each broken somewhere before:
+//   * no page-1 default; `page` only from a recorded page;
+//   * `page` is a RENDERED page — a PDF page or a PPTX slide. A Word paragraph and an Excel cell
+//     have none, even when the issue row carries a number;
+//   * `pptx:slide:{i}` and Word paragraph/table indices are 0-based in the analyser; labels are
+//     1-based, `objectId` keeps the machine index;
+//   * an unknown format keeps `raw` verbatim and is labelled from it.
+export const LOCATION_FORMATS = Object.freeze(['pdf', 'docx', 'pptx', 'xlsx', 'html'])
+const NO_PAGE_FORMATS = ['docx', 'xlsx']
+const idx = (v) => (/^[0-9]+$/.test(String(v ?? '')) ? Number(v) : null)
+const mkLoc = (label, kind, { page = null, slide = null, sheet = null, cell = null, objectId = null, raw = null } = {}) => ({
+  label: label || null, kind, page, slide, sheet, cell, objectId, element: raw, raw,
+})
+const cap1 = (s) => s.charAt(0).toUpperCase() + s.slice(1)
+
+function parsePdf(raw, page) {
+  let m = raw.match(/^pdf:(fig|field):(\?|[0-9]+):([0-9]+)$/)
+  if (m) {
+    const word = m[1] === 'fig' ? 'figure' : 'form field'
+    const p = page ?? posInt(m[2])
+    const seq = Number(m[3])
+    const oid = `${m[1] === 'fig' ? 'figure' : 'field'}:${m[2]}:${seq}`
+    return mkLoc(p != null ? `Page ${p} · ${word} ${seq + 1}` : `${cap1(word)} ${seq + 1} (page not recorded)`, 'object', { page: p, objectId: oid, raw })
+  }
+  m = raw.match(/^pdf:struct:([0-9]+(?:\.[0-9]+)*)(?::[0-9a-f]+)?$/)
+  if (m) return mkLoc(`${page != null ? `Page ${page} · ` : ''}structure element ${m[1]}`, 'object', { page, objectId: `struct:${m[1]}`, raw })
+  if (/^pdf:(lang|title|producer|metadata)\b/i.test(raw)) return mkLoc('Document-wide', 'document', { raw })
+  return null
+}
+
+function parseDocx(raw) {
+  let m = raw.match(/^docx:paragraph:([0-9]+)$/)
+  if (m) return mkLoc(`Paragraph ${Number(m[1]) + 1}`, 'paragraph', { objectId: `paragraph:${Number(m[1])}`, raw })
+  m = raw.match(/^docx:drawing:(.+?):paragraph:([0-9]+)$/)
+  if (m) return mkLoc(`Image (drawing id ${m[1]}) · paragraph ${Number(m[2]) + 1}`, 'object', { objectId: `drawing:${m[1]}`, raw })
+  m = raw.match(/^docx:image:([0-9]+)$/)
+  if (m) return mkLoc(`Image ${Number(m[1])}`, 'object', { objectId: `image:${Number(m[1])}`, raw })
+  m = raw.match(/^docx:table:([0-9]+)(?::row:([0-9]+))?$/)
+  if (m) return mkLoc(`Table ${Number(m[1]) + 1}${m[2] != null ? ` · row ${Number(m[2]) + 1}` : ''}`, 'object', { objectId: `table:${Number(m[1])}`, raw })
+  m = raw.match(/^docx:hyperlink:paragraph:([0-9]+)(?::url:[\s\S]*)?$/)
+  if (m) return mkLoc(`Link in paragraph ${Number(m[1]) + 1}`, 'paragraph', { objectId: `paragraph:${Number(m[1])}`, raw })
+  m = raw.match(/^docx:sdt:#?(.+)$/)
+  if (m) return mkLoc(`Content control ${m[1]}`, 'object', { objectId: `sdt:${m[1]}`, raw })
+  m = raw.match(/^docx:document-properties:(.+)$/)
+  if (m) return mkLoc(`Document-wide (${m[1]} property)`, 'document', { raw })
+  if (raw.startsWith('docx:document')) return mkLoc('Document-wide', 'document', { raw })
+  return null
+}
+
+function parsePptx(raw, page) {
+  const m = raw.match(/^pptx:slide:([0-9]+)(?::(element|table):(.+))?$/)
+  if (!m) return null
+  const slide = page ?? (Number(m[1]) + 1)
+  if (m[2] === 'element') return mkLoc(`Slide ${slide} · shape ${m[3]}`, 'object', { page: slide, slide, objectId: `shape:${m[3]}`, raw })
+  if (m[2] === 'table') {
+    const t = idx(m[3])
+    return mkLoc(`Slide ${slide} · table ${t != null ? t + 1 : m[3]}`, 'object', { page: slide, slide, objectId: `table:${m[3]}`, raw })
+  }
+  return mkLoc(`Slide ${slide}`, 'slide', { page: slide, slide, raw })
+}
+
+function parseXlsx(raw) {
+  if (raw === 'xlsx:document') return mkLoc('Document-wide', 'document', { raw })
+  const m = raw.match(/^xlsx:sheet:([^:]+)(?::(cell|drawing|table|row|col):(.+))?$/)
+  if (!m) return null
+  const [, sheet, part, value] = m
+  if (part == null) return mkLoc(`Sheet ${sheet}`, 'sheet', { sheet, raw })
+  if (part === 'cell') {
+    const a1 = value.match(/^\$?([A-Za-z]{1,3})\$?([0-9]+)$/)
+    const cell = a1 ? `${a1[1].toUpperCase()}${a1[2]}` : value
+    return mkLoc(`Sheet ${sheet} · cell ${cell}`, 'cell', { sheet, cell, raw })
+  }
+  const word = { drawing: 'drawing', table: 'table', row: 'row', col: 'column' }[part]
+  const oid = part === 'col' ? 'column' : part
+  return mkLoc(`Sheet ${sheet} · ${word} ${value}`, 'object', { sheet, objectId: `${oid}:${value}`, raw })
+}
+
+// ACP's own Office writer locators (R1 remediation_diff.locator). `word:p:N` etc. are 1-based
+// OOXML document order — shown as recorded. None of these ever carries a page: a Word page is a
+// layout artefact, and a slide PART name is not a slide number (presentation.xml orders slides).
+function parseWordToken(raw) {
+  let m = raw.match(/^word:p:([1-9][0-9]*)(?::run:([1-9][0-9]*))?$/)
+  if (m) return mkLoc(`Paragraph ${Number(m[1])}${m[2] ? ` · text run ${Number(m[2])}` : ''}`, 'paragraph', { objectId: raw, raw })
+  m = raw.match(/^word:table:([1-9][0-9]*)(?::row:([1-9][0-9]*))?$/)
+  if (m) return mkLoc(`Table ${Number(m[1])}${m[2] ? ` · row ${Number(m[2])}` : ''}`, 'object', { objectId: raw, raw })
+  if (raw === 'word:document:outline') return mkLoc('Document-wide (heading outline)', 'document', { raw })
+  return null
+}
+
+const OOXML_PART = /^((?:word|ppt|xl)\/[^#\s][^#]*?\.xml)(?:#([\s\S]+))?$/
+const OOXML_PART_NAMES = [
+  [/^word\/document\.xml$/, () => 'document body'],
+  [/^word\/header([0-9]*)\.xml$/, (m) => `header ${m[1]}`.trim()],
+  [/^word\/footer([0-9]*)\.xml$/, (m) => `footer ${m[1]}`.trim()],
+  [/^word\/(footnotes|endnotes|comments)\.xml$/, (m) => m[1]],
+  [/^ppt\/slides\/(slide[0-9]+\.xml)$/, (m) => `slide file ${m[1]}`],
+  [/^ppt\/slideLayouts\/slideLayout([0-9]+)\.xml$/, (m) => `slide layout ${m[1]}`],
+  [/^ppt\/slideMasters\/slideMaster([0-9]+)\.xml$/, (m) => `slide master ${m[1]}`],
+  [/^ppt\/notesSlides\/(notesSlide[0-9]+\.xml)$/, (m) => `speaker notes file ${m[1]}`],
+  [/^xl\/tables\/(table[0-9]+\.xml)$/, (m) => `Excel table file ${m[1]}`],
+  [/^xl\/drawings\/(drawing[0-9]+\.xml)$/, (m) => `drawing layer file ${m[1]}`],
+  [/^xl\/worksheets\/(sheet[0-9]+\.xml)$/, (m) => `worksheet file ${m[1]}`],
+]
+
+function parseOoxmlPart(raw) {
+  const m = raw.match(OOXML_PART)
+  if (!m) return null
+  const part = m[1]
+  const fragment = (m[2] || '').trim() || null
+  let where = null
+  for (const [re, name] of OOXML_PART_NAMES) {
+    const pm = part.match(re)
+    if (pm) { where = name(pm); break }
+  }
+  where = where || `part ${part}`
+  if (fragment == null) return mkLoc(where.charAt(0).toUpperCase() + where.slice(1), 'object', { objectId: raw, raw })
+  const what = /^rId[0-9]+$/.test(fragment) ? `Image (relationship ${fragment})` : `Object “${fragment}”`
+  return mkLoc(`${what} · ${where}`, 'object', { objectId: raw, raw })
+}
+
+// Text a reader can take as it stands (mirrors report_location._is_human): starts with a letter,
+// only letters, digits, spaces and ordinary punctuation, and more than one word when it has
+// digits ("image 1", not "rId5"). A machine string stays in `raw` but out of a label.
+const HUMAN_TEXT = /^\p{L}(?:[\p{L}\p{N}]|[ .,'’()\-–])*$/u
+const isHumanText = (raw) => HUMAN_TEXT.test(raw) && (raw.includes(' ') || !/\p{Nd}/u.test(raw))
+
+function parseLegacySheetCell(raw) {
+  const bang = raw.match(/^'?([^'!:/#]+)'?!\$?([A-Za-z]{1,3})\$?([0-9]+)/)
+  if (bang) { const cell = `${bang[2].toUpperCase()}${bang[3]}`; return mkLoc(`Sheet ${bang[1]} · cell ${cell}`, 'cell', { sheet: bang[1], cell, raw }) }
+  const s = raw.match(/sheet[:=]([^:!/#]+)/i)
+  const c = raw.match(/cell[:=]\$?([A-Za-z]{1,3})\$?([0-9]+)/i)
+  if (s && c) { const cell = `${c[1].toUpperCase()}${c[2]}`; return mkLoc(`Sheet ${s[1]} · cell ${cell}`, 'cell', { sheet: s[1], cell, raw }) }
+  if (s) return mkLoc(`Sheet ${s[1]}`, 'sheet', { sheet: s[1], raw })
+  return null
+}
+
+// The structured location for a detector's `location` string and recorded `page` — the same
+// object api/report_location.py parse_location returns. null when nothing was recorded.
+export function parseLocation(rawIn, pageIn = null, fmtIn = null) {
+  const raw = rawIn == null ? null : (String(rawIn).trim() || null)
+  let page = posInt(pageIn)
+  const prefix = raw && raw.includes(':') ? raw.split(':', 1)[0].toLowerCase() : null
+  const fmt = (LOCATION_FORMATS.includes(prefix) ? prefix : null) || (fmtIn ? String(fmtIn).toLowerCase() : null)
+  if (NO_PAGE_FORMATS.includes(fmt)) page = null
+  if (raw == null) {
+    if (page == null) return null
+    return fmt === 'pptx' ? mkLoc(`Slide ${page}`, 'slide', { page, slide: page }) : mkLoc(`Page ${page}`, 'page', { page })
+  }
+  let parsed = null
+  if (prefix === 'pdf') parsed = parsePdf(raw, page)
+  else if (prefix === 'docx') parsed = parseDocx(raw)
+  else if (prefix === 'pptx') parsed = parsePptx(raw, page)
+  else if (prefix === 'xlsx') parsed = parseXlsx(raw)
+  else if (prefix === 'word') parsed = parseWordToken(raw)
+  if (parsed == null) parsed = parseOoxmlPart(raw)
+  if (parsed == null) parsed = parseLegacySheetCell(raw)
+  if (parsed != null) return parsed
+  // Unknown format: `raw` is kept verbatim; it is in the label only when it already reads as words.
+  const rawIsPage = page != null && [`slide ${page}`, `page ${page}`].includes(raw.toLowerCase())
+  const tail = !rawIsPage && isHumanText(raw) ? ` · ${raw}` : ''
+  if (page != null && fmt === 'pptx') return mkLoc(`Slide ${page}${tail}`, 'slide', { page, slide: page, raw })
+  if (page != null) return mkLoc(`Page ${page}${tail}`, 'page', { page, raw })
+  return mkLoc(raw, null, { raw })
+}
+
 // A structured location from whatever a detector attached. Returns null when nothing was recorded —
 // never a page-1 default (scanner.py _issue_with_loc makes the same promise at the source).
+// Server facts already carry the contract-1 object (it has a `kind` key) and it is used verbatim;
+// anything else — a raw issue row, a legacy nested object — goes through parseLocation.
 export function locationOf(rec, { fmt = null, locationHref = null } = {}) {
   if (!rec) return null
   const nested = rec.location && typeof rec.location === 'object' ? rec.location : null
-  const raw = nested ? null : str(rec.location) || str(rec.locator)
-  const src = nested || rec
-  let page = posInt(src.page ?? src.pageNumber)
-  let slide = posInt(src.slide ?? src.slideNumber)
-  if (fmt === 'pptx' && page != null && slide == null) { slide = page; page = null }
-  let sheet = str(src.sheet ?? src.sheetName)
-  let cell = str(src.cell)
-  if (raw && sheet == null) {
-    const m = raw.match(/sheet[:=]([^:!/#]+)/i) || raw.match(/^'?([^'!:/#]+)'?!\$?[A-Z]{1,3}\$?\d+/)
-    if (m) sheet = m[1]
+  let loc
+  if (nested && Object.prototype.hasOwnProperty.call(nested, 'kind')) {
+    loc = {
+      label: str(nested.label), kind: nested.kind ?? null,
+      page: posInt(nested.page), slide: posInt(nested.slide), sheet: str(nested.sheet), cell: str(nested.cell),
+      objectId: str(nested.objectId), element: str(nested.element ?? nested.raw), raw: str(nested.raw ?? nested.element),
+    }
+    // R1: a saved change's location says where it came from — 'recorded' (the writer stored it)
+    // or 'legacy_note' (read back from the saving step's note; its label already says so).
+    if (nested.source != null) loc.source = str(nested.source)
+    // An href-only location (contract 2: attachEvidenceLinks gives a finding with no recorded
+    // location `{label:null, kind:null, href}`) stays — the record is still linkable, and
+    // locationLabel() says "Location not recorded". Nothing else about it is invented.
+    if (!loc.label && loc.page == null && loc.slide == null && loc.sheet == null && loc.cell == null
+      && loc.raw == null && !isSafeHref(nested.href)) return null
+  } else {
+    const src = nested || rec
+    const raw = str(nested ? (nested.raw ?? nested.element) : (rec.location ?? rec.locator))
+      || str(src.element) || str(src.selector) || str(src.xpath) || str(src.xPath)
+      || (nested ? str(nested.label) : null)
+    const slideIn = posInt(src.slide ?? src.slideNumber)
+    const pageIn = posInt(src.page ?? src.pageNumber) ?? (slideIn != null ? slideIn : null)
+    const f = fmt || (slideIn != null ? 'pptx' : null)
+    loc = parseLocation(raw, pageIn, f)
+    // Explicit sheet/cell fields some record shapes carry instead of a locator string.
+    const sheet = str(src.sheet ?? src.sheetName)
+    const cell = str(src.cell)
+    if (!loc && (sheet != null || cell != null)) {
+      loc = mkLoc([sheet != null ? `Sheet ${sheet}` : null, cell != null ? `cell ${cell}` : null].filter(Boolean).join(' · '),
+        cell != null ? 'cell' : 'sheet', { sheet, cell })
+    }
+    if (!loc && nested && isSafeHref(nested.href)) loc = mkLoc(null, null)
+    if (!loc) return null
   }
-  if (raw && cell == null) {
-    const m = raw.match(/!\$?([A-Z]{1,3})\$?(\d+)/) || raw.match(/cell[:=]\$?([A-Z]{1,3})\$?(\d+)/i)
-    if (m) cell = `${m[1]}${m[2]}`
-  }
-  const element = str(src.element) || str(src.selector) || str(src.xpath) || str(src.xPath)
-    || (nested ? str(nested.label) : null) || raw
-  if (page == null && slide == null && sheet == null && cell == null && element == null) return null
-  const parts = []
-  if (page != null) parts.push(`Page ${page}`)
-  if (slide != null) parts.push(`Slide ${slide}`)
-  if (sheet != null) parts.push(`Sheet ${sheet}`)
-  if (cell != null) parts.push(`Cell ${cell}`)
-  if (element != null && !(nested && nested.label && element === nested.label && parts.length)) parts.push(element)
-  const loc = { label: parts.join(' · '), page, slide, sheet, cell, element, href: null }
+  loc.href = null
   let href = nested && isSafeHref(nested.href) ? nested.href : null
   if (!href && typeof locationHref === 'function') {
     try { const h = locationHref({ ...rec, location: loc }); if (isSafeHref(h)) href = h } catch { /* no link */ }
@@ -113,6 +293,23 @@ export function locationOf(rec, { fmt = null, locationHref = null } = {}) {
   loc.href = href
   return loc
 }
+// R1: a saved change's location the store read back from the saving step's own note
+// (`location_source: 'legacy_note'`) is never presented as a recorded one. The server puts this
+// qualifier in the label (report_location.LEGACY_NOTE_QUALIFIER — pinned to the same text by the
+// shared fixture); a record that reaches the browser without it (a raw diff row) gets it here, once.
+export const LEGACY_NOTE_QUALIFIER = " (from the saving step's note, not a recorded location)"
+export function withLocationSource(loc, source) {
+  if (!loc || source !== 'legacy_note') return loc
+  const base = loc.label || loc.raw
+  return {
+    ...loc,
+    page: null,
+    slide: null,
+    source: 'legacy_note',
+    label: base && !base.endsWith(LEGACY_NOTE_QUALIFIER) ? `${base}${LEGACY_NOTE_QUALIFIER}` : base,
+  }
+}
+
 export const LOCATION_NOT_RECORDED = 'Location not recorded'
 export const locationLabel = (loc) => (loc && loc.label) || LOCATION_NOT_RECORDED
 
@@ -332,7 +529,9 @@ export function buildChangeCards({ file, diffs = [], reviews = null, previews = 
     const id = str(x.id) || changeIdOf(name, x, idx)
     const sc = scOfValue(x.sc) || scOfValue(x.rule_id ?? x.ruleId)
     const cname = names[sc] || criterionName(sc)
-    const location = locationOf(x, { fmt, locationHref })
+    // 'recorded' | 'legacy_note' (reconstructed by the store from an exact writer note) | null
+    const locationSource = str(x.locationSource ?? x.location_source ?? x.location?.source)
+    const location = withLocationSource(locationOf(x, { fmt, locationHref }), locationSource)
     const before = x.before == null ? null : String(x.before)
     const after = x.after == null ? null : String(x.after)
     const bT = clamp && needsClamp(before)
@@ -361,6 +560,7 @@ export function buildChangeCards({ file, diffs = [], reviews = null, previews = 
       criterionName: cname,
       ruleId: str(x.ruleId ?? x.rule_id),
       location,
+      locationSource: location ? locationSource : null,
       before, after,
       beforeTruncated: bT, afterTruncated: aT,
       fullRef: (bT || aT) ? `${fullRefPrefix}${id}` : null,
@@ -571,33 +771,99 @@ const canon = (v) => {
 
 // previous: { scanId, generatedAt, sha256, file?, scope, findings:[{id, ruleId, location}] }
 // current:  { file, scope, findings:[{id, ruleId|sc, location}] | null }
+const comparisonItem = (f) => {
+  const loc = f.location && typeof f.location === 'object' ? locationOf({ location: f.location }) : locationOf(f)
+  return { id: String(f.id), title: `${f.ruleId || f.sc || 'Finding'}${f.detail ? ` — ${f.detail}` : ''}`, location: loc ? loc.label : LOCATION_NOT_RECORDED }
+}
+// `comparable: false` is the server's statement that a finding's identity is a synthetic,
+// snapshot-scoped ordinal (no detector location). Two snapshots' "instance 1" are not the same
+// finding, so such findings are never matched — and therefore never "resolved" or "new" (C1).
+const isComparable = (f) => f?.comparable !== false
+
+// previous: { scanId, generatedAt, sha256, file?, sameDocument?, scope, findings:[{id, ruleId, location, comparable?}] }
+// current:  { file, scope, findings:[{id, ruleId|sc, location, comparable?}] | null }
+// The client-side FALLBACK. When the server supplied `facts.comparison`, buildComparisonFromFacts
+// renders that instead and nothing is re-derived here.
 export function buildComparison(previous, current) {
   const unknown = (reason, prev = null) => ({ k: 'comparison', status: 'unknown', reason, previous: prev, resolved: [], introduced: [], persisting: null })
   if (!previous || typeof previous !== 'object') return unknown('No earlier assessment snapshot of this document was supplied, so no change is reported.')
   const prevRef = { scanId: str(previous.scanId), generatedAt: str(previous.generatedAt), sha256: str(previous.sha256) }
-  if (previous.file != null && current.file != null && previous.file !== current.file) {
+  // The server matches a baseline by SOURCE identity (the provider's file id), so a name that
+  // differs is a rename of this document, not another one (C3). Only an unmatched snapshot is
+  // rejected on its name.
+  if (previous.sameDocument !== true && previous.file != null && current.file != null && previous.file !== current.file) {
     return unknown('The earlier snapshot is of a different document, so it is not comparable.', prevRef)
   }
   if (previous.scope == null || current.scope == null) return unknown('The assessment scope was not recorded for one of the two snapshots, so they are not comparable.', prevRef)
   if (canon(previous.scope) !== canon(current.scope)) return unknown('The earlier snapshot used a different assessment scope, so a difference in findings would not mean a change in the document.', prevRef)
   if (!Array.isArray(previous.findings)) return unknown('The earlier snapshot did not record its individual findings.', prevRef)
   if (!Array.isArray(current.findings)) return unknown('The current findings were not itemised, so they cannot be matched one by one.', prevRef)
-  const cur = new Map(current.findings.map((f) => [f.id, f]))
-  const prev = new Map(previous.findings.filter((f) => f && f.id != null).map((f) => [String(f.id), f]))
-  const label = (f) => {
-    const loc = f.location && typeof f.location === 'object' ? f.location : locationOf(f)
-    return { id: String(f.id), title: `${f.ruleId || f.sc || 'Finding'}${f.detail ? ` — ${f.detail}` : ''}`, location: loc ? loc.label : LOCATION_NOT_RECORDED }
-  }
-  const resolved = [...prev.values()].filter((f) => !cur.has(String(f.id))).map(label)
-  const introduced = [...cur.values()].filter((f) => !prev.has(String(f.id))).map(label)
-  const persisting = [...cur.keys()].filter((id) => prev.has(String(id))).length
+  const curAll = current.findings.filter((f) => f && f.id != null)
+  const prevAll = previous.findings.filter((f) => f && f.id != null)
+  const cur = new Map(curAll.filter(isComparable).map((f) => [String(f.id), f]))
+  const prev = new Map(prevAll.filter(isComparable).map((f) => [String(f.id), f]))
+  const resolved = [...prev.values()].filter((f) => !cur.has(String(f.id))).map(comparisonItem)
+  const introduced = [...cur.values()].filter((f) => !prev.has(String(f.id))).map(comparisonItem)
+  const persisting = [...cur.keys()].filter((id) => prev.has(id)).length
+  const notComparable = { current: curAll.length - cur.size, previous: prevAll.length - prev.size }
+  const nc = notComparable.current + notComparable.previous
   return {
     k: 'comparison',
     status: 'compared',
-    reason: `Matched finding by finding against the assessment of ${prevRef.generatedAt || 'an earlier date'} with the same document and scope.`,
+    reason: `Matched finding by finding against the assessment of ${prevRef.generatedAt || 'an earlier date'} with the same document and scope.${nc ? ` ${notComparableSentence(notComparable)}` : ''}`,
     previous: prevRef,
     resolved, introduced, persisting,
+    notComparable,
   }
+}
+
+function notComparableSentence(nc, byCriterion = null) {
+  const parts = (byCriterion || []).map((g) => `${g.sc || g.ruleId || 'unknown criterion'}: ${g.previous} before, ${g.current} now`)
+  return `${nc.current} current and ${nc.previous} earlier finding(s) have no detector location, so they cannot be matched one by one and are counted as neither new nor resolved${parts.length ? ` (${parts.join('; ')})` : ''}.`
+}
+
+const sentence = (s) => { const t = String(s || '').trim(); return t ? `${t.charAt(0).toUpperCase()}${t.slice(1)}${/[.!?]$/.test(t) ? '' : '.'}` : null }
+
+// Contract 4: the SERVER's classification (facts.comparison), rendered — never re-derived. The
+// block keeps the shape every renderer already reads (status 'compared' | 'unknown', reason,
+// previous, resolved[], introduced[], persisting) and adds reopened / notComparable / baseline.
+// Anything the older renderers do not lay out separately is also stated in `reason`, so no
+// renderer can print a comparison that omits it.
+export function comparisonFromServer(facts, { locationHref = null } = {}) {
+  const sc = facts?.comparison
+  if (!sc || typeof sc !== 'object') return null
+  const prev = facts.previous && typeof facts.previous === 'object' ? facts.previous : null
+  const base = sc.baseline && typeof sc.baseline === 'object' ? sc.baseline : null
+  const previous = base || prev
+    ? { scanId: str(base?.scanId ?? prev?.scanId), generatedAt: str(base?.generatedAt ?? prev?.generatedAt), sha256: str(prev?.sha256), file: str(base?.file ?? prev?.file) }
+    : null
+  const block = {
+    k: 'comparison', status: sc.status === 'compared' ? 'compared' : 'unknown',
+    serverStatus: str(sc.status), reasonCode: str(sc.reasonCode), source: 'server',
+    previous, renamed: sc.renamed === true, baselineStatus: str(base?.status), baselineRunStatus: str(base?.runStatus),
+    resolved: [], introduced: [], reopened: null, persisting: null, notComparable: null, notComparableByCriterion: [],
+  }
+  if (sc.status !== 'compared') {
+    block.reason = sentence(sc.reason) || 'No comparison was recorded.'
+    return block
+  }
+  const current = new Map(factsFindings(facts, { locationHref }).map((f) => [f.id, f]))
+  const item = (id) => (current.has(id) ? comparisonItem(current.get(id)) : { id: String(id), title: 'Finding', location: LOCATION_NOT_RECORDED })
+  block.introduced = (sc.introduced || []).map(item)
+  block.resolved = (sc.resolved || []).map((f) => comparisonItem(f))
+  block.reopened = Array.isArray(sc.reopened) ? sc.reopened.map(item) : null
+  block.persisting = Array.isArray(sc.persisting) ? sc.persisting.length : null
+  block.notComparable = sc.notComparable && typeof sc.notComparable === 'object' ? sc.notComparable : null
+  block.notComparableByCriterion = Array.isArray(sc.notComparableByCriterion) ? sc.notComparableByCriterion : []
+  block.reopenedReason = str(sc.reopenedReason)
+  const extra = []
+  // `reopenedReason` (why reopened is unknown) is its own field: the HTML report prints it, and it
+  // is left out of `reason` so the one-page summary does not spend a line on it.
+  if (block.reopened && block.reopened.length) extra.push(`${block.reopened.length} finding(s) the earlier assessment recorded as resolved are reported again (reopened): ${block.reopened.map((x) => x.title).join('; ')}.`)
+  const nc = block.notComparable
+  if (nc && (nc.current || nc.previous)) extra.push(notComparableSentence(nc, block.notComparableByCriterion))
+  block.reason = [sentence(sc.reason), ...extra].filter(Boolean).join(' ')
+  return block
 }
 
 // ── Server facts (report-facts v1) ──────────────────────────────────────────────────────────
@@ -633,6 +899,8 @@ export function factsFindings(facts, { locationHref = null } = {}) {
       impact: null,
       state: str(f.state) || 'unknown',
       stateReason: str(f.stateReason),
+      // Whether this finding's identity survives a re-assessment (false = synthetic ordinal).
+      comparable: f.comparable === false ? false : f.comparable === true ? true : null,
       page: location?.page ?? null, slide: location?.slide ?? null, sheet: location?.sheet ?? null,
       cell: location?.cell ?? null, element: location?.element ?? null,
     }
@@ -673,10 +941,32 @@ export function findingCardsFromFacts(facts, { assignee = null, locationHref = n
   return rankFindingCards(cards)
 }
 
+// C6 (R-B2): one sentence for the server's `sameScanHistory` — this document against the
+// assessment a re-assessment replaced inside the same scan. The counts are the server's; nothing
+// is re-derived. "not_recorded" and "not_available" are worded as absence of a record, never as
+// "assessed once", and a snapshot whose context was not recorded is never "a different scope".
+export function sameScanHistoryText(s) {
+  if (!s || typeof s !== 'object') return null
+  const reason = str(s.reason)
+  const n = (v) => (Array.isArray(v) ? v.length : null)
+  if (s.status === 'compared') {
+    const nc = s.notComparable && typeof s.notComparable === 'object' ? s.notComparable.current || 0 : 0
+    return `Within this scan: this document was re-assessed. Against the assessment it replaced, ${n(s.introduced) ?? NR_TEXT} finding(s) are new, ${n(s.resolved) ?? NR_TEXT} no longer reported and ${n(s.persisting) ?? NR_TEXT} still reported${nc ? `; ${nc} without a detector location cannot be matched one by one` : ''}. "No longer reported" is not a verified fix.`
+  }
+  if (s.status === 'baseline_unusable' || s.status === 'not_comparable') {
+    return `Within this scan: an earlier assessment of this document was replaced, but it is not compared — ${reason || 'the reason was not recorded'}.`
+  }
+  return `Within this scan: ${reason || 'no replaced assessment is recorded; this is not evidence that there was none'}.`
+}
+const NR_TEXT = 'Not recorded'
+
 // Comparison built ONLY from a real comparable snapshot the server supplied. There is no fallback
 // that subtracts aggregate counts: "fewer findings than last time" is not evidence that a
 // particular finding was resolved, and this is the one place that temptation lives.
 export function buildComparisonFromFacts(facts, { locationHref = null } = {}) {
+  // The server's own classification (contract 4) wins whenever it is present.
+  const server = comparisonFromServer(facts, { locationHref })
+  if (server) return server
   const reason = str(facts?.previousReason)
   const prev = facts?.previous && typeof facts.previous === 'object' ? facts.previous : null
   if (!prev) {
@@ -690,6 +980,9 @@ export function buildComparisonFromFacts(facts, { locationHref = null } = {}) {
     : { scopeDigest: scopeDigest ?? null, scanScope: scanScope ?? null })
   return buildComparison({
     scanId: prev.scanId, generatedAt: prev.generatedAt, sha256: prev.sha256, file: prev.file,
+    // A server-supplied baseline was matched by source identity (provider file id or source +
+    // path), so it IS this document even when it was named differently then (C3).
+    sameDocument: true,
     scope: scopeOf(prev.scopeDigest, prev.scanScope),
     findings: Array.isArray(prev.findings)
       ? prev.findings.map((f) => ({ ...f, location: f.location || null }))

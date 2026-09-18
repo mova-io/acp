@@ -30,6 +30,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from hitl_viewed import viewed_fields
 
 ACP = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ACP / "api"))
@@ -62,7 +63,7 @@ def _decide(st, monkeypatch, item_id, *, values):
     import core
     from routes.hitl import HitlUpdate, hitl_update
     monkeypatch.setattr(core, "store", st)
-    return hitl_update(item_id, HitlUpdate(status="approved",
+    return hitl_update(item_id, HitlUpdate(status="approved", **viewed_fields(item_id),
                                            resolution=st.DESCRIBED_RESOLUTION,
                                            approved_values=values), None)
 
@@ -167,7 +168,7 @@ def test_an_ordinary_approval_still_accepts_the_draft(st, monkeypatch):
     from routes.hitl import HitlUpdate, hitl_update
     item_id = _two_image_row(st)
     monkeypatch.setattr(core, "store", st)
-    hitl_update(item_id, HitlUpdate(status="approved", approved_values=[DESCRIPTION_1, ""]), None)
+    hitl_update(item_id, HitlUpdate(status="approved", **viewed_fields(item_id), approved_values=[DESCRIPTION_1, ""]), None)
 
     owed = st.approved_images_of_text_values(SID, FILE, ("1.4.5",))
     assert owed == {"image 1": DESCRIPTION_1, "image 2": TRANSCRIPT_2}, (

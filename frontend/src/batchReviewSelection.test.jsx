@@ -7,7 +7,7 @@ import { batchDecision, exclusionReason, snapshotFinding, selectionProblem } fro
 afterEach(unmountAll)
 const finding = (id, overrides = {}) => ({ id, file: `${String(id).padStart(3, '0')}.docx`, scanId: 'scan', ruleId: '1.1.1', hasProposal: true,
   after: `draft ${id}`, proposals: [{ proposed_value: `draft ${id}`, before: 'old' }],
-  _raw: { decision_version: 2, proposal_snapshot_ids: [`snapshot-${id}`], source_revision: 'source-1' }, ...overrides })
+  _raw: { decision_version: 2, proposal_snapshot_ids: [`snapshot-${id}`], source_revision: 'source-1', corrected_artifact: 'none', proposal_digest: 'digest-test' }, ...overrides })
 const click = async el => act(async () => el.dispatchEvent(new MouseEvent('click', { bubbles: true })))
 async function mount(props) {
   const { container, root } = createTestRoot()
@@ -141,4 +141,54 @@ it('distinguishes proposal values from covered findings in the primary approval 
   expect(v.container.textContent).toContain('1 findings covered by 2 ready proposals')
   await click(v.button('Approve all ready'))
   expect(v.container.querySelector('[aria-label="Approval summary"]').textContent).toContain('1 findings · 1 review item · 2 proposals · 1 file')
+})
+
+it('a row whose target a verified fix removed is settled work: never selectable, explained, not "not included"', async () => {
+  const replaced = finding(7, { _raw: { ...finding(7)._raw, superseded: true, superseded_reason: 'target_removed_by_verified_fix',
+    superseded_evidence: { removed_by_rule_id: '1.4.5', targets: ['docx:drawing:1:paragraph:32'] } } })
+  expect(exclusionReason(replaced)).toBe('Replaced by a verified change — nothing left to approve')
+  expect(() => batchDecision(snapshotFinding(replaced))).toThrow(/Replaced by a verified change/)
+  const onDecide = vi.fn()
+  const v = await mount({ visible: [replaced, finding(8)], onDecide })
+  const summary = v.container.querySelector('.batch-review-exclusions summary').textContent
+  expect(summary).toBe('0 pending review items not included · 1 already resolved')
+  expect(v.container.querySelector('.batch-review-why')?.textContent ?? '')
+    .not.toContain('pending review items')
+  expect(onDecide).not.toHaveBeenCalled()
+})
+
+it('explains a target-replaced exclusion when it is the reason nothing can be approved', async () => {
+  const replaced = finding(9, { _raw: { ...finding(9)._raw, superseded: true, superseded_reason: 'target_removed_by_verified_fix' } })
+  const v = await mount({ visible: [replaced] })
+  expect(v.container.querySelector('.batch-review-why').textContent)
+    .toContain('replaced by a verified change — nothing left to approve — another verified fix removed what this item described')
+})
+
+// D -> F phase 5: a frozen selection names the corrected copy it was made against.
+describe('the frozen selection binds the corrected artifact', () => {
+  const sha = (c) => c.repeat(64)
+  const withArtifact = (artifact, digest = 'dig-1') => finding(7, { _raw: { decision_version: 2, proposal_snapshot_ids: ['snapshot-7'], source_revision: 'source-1', corrected_artifact: artifact, proposal_digest: digest } })
+  it('freezes it into the decision verbatim (a hash, or "none")', () => {
+    expect(batchDecision(snapshotFinding(withArtifact(sha('a')))).expectedCorrectedSha256).toBe(sha('a'))
+    expect(batchDecision(snapshotFinding(withArtifact('none'))).expectedCorrectedSha256).toBe('none')
+  })
+  it('a corrected copy changed by another approved write invalidates the frozen entry', () => {
+    const entry = snapshotFinding(withArtifact(sha('a')))
+    expect(selectionProblem(entry, [withArtifact(sha('a'))], {}, {})).toBeNull()
+    expect(selectionProblem(entry, [withArtifact(sha('c'))], {}, {})).toBe('Proposal or source changed — select again')
+  })
+  it('freezes the proposal digest too: a refreshed proposal invalidates the entry, and a row without it is never batched', () => {
+    const entry = snapshotFinding(withArtifact(sha('a'), 'dig-1'))
+    expect(batchDecision(entry).expectedProposalDigest).toBe('dig-1')
+    expect(selectionProblem(entry, [withArtifact(sha('a'), 'dig-2')], {}, {})).toBe('Proposal or source changed — select again')
+    const noDigest = withArtifact(sha('a'), null)
+    expect(exclusionReason(noDigest)).toBe('Version unavailable — review individually')
+    expect(() => batchDecision(snapshotFinding(noDigest))).toThrow(/Version unavailable/)
+  })
+  it('a row without it is never offered for, or sent in, a batch', () => {
+    const { corrected_artifact, ...raw } = withArtifact(sha('a'))._raw // eslint-disable-line no-unused-vars
+    const unbound = finding(7, { _raw: raw })
+    expect(exclusionReason(unbound)).toBe('Version unavailable — review individually')
+    expect(() => batchDecision(snapshotFinding(unbound))).toThrow(/Version unavailable/)
+  })
 })

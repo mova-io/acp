@@ -62,7 +62,7 @@ describe('W2 — rejected fix appears in the inbox as manual-handling work', () 
   })
   it('acting on it clears it via onDecide(assigned)', async () => {
     const calls = []
-    await render({ queue: QUEUE.map(f => ({ ...f, _raw: { decision_version: 0, proposal_snapshot_ids: [String(f.id)], source_revision: 'source' } })), decisions: {}, onDecide: (f, d) => calls.push([f.id, d.state]) })
+    await render({ queue: QUEUE.map(f => ({ ...f, _raw: { corrected_artifact: 'none', proposal_digest: 'digest-test', decision_version: 0, proposal_snapshot_ids: [String(f.id)], source_revision: 'source' } })), decisions: {}, onDecide: (f, d) => calls.push([f.id, d.state]) })
     await click(btnByText('Fix manually'))
     await click(btnByText('Defer'))
     expect(calls).toEqual([[9, 'assigned']])
@@ -104,7 +104,7 @@ describe('W8 — apply a decision to every matching finding in the same cluster'
 
   it('applies the decision to its cluster only — every format of that rule, and no other rule', async () => {
     const calls = []
-    await render({ queue: QUEUE.map(f => ({ ...f, _raw: { decision_version: 0, proposal_snapshot_ids: [String(f.id)], source_revision: 'source' } })), decisions: {}, onDecide: (f, d) => calls.push([f.id, d.state]) })
+    await render({ queue: QUEUE.map(f => ({ ...f, _raw: { corrected_artifact: 'none', proposal_digest: 'digest-test', decision_version: 0, proposal_snapshot_ids: [String(f.id)], source_revision: 'source' } })), decisions: {}, onDecide: (f, d) => calls.push([f.id, d.state]) })
     await click(btnByText('Select matching proposals (3)'))
     expect(calls).toEqual([])
     await click(btnByText('Select all ready'))
@@ -130,7 +130,7 @@ describe('W8 — apply a decision to every matching finding in the same cluster'
       rule_id: '1.1.1', hasProposal: true, after: `alt ${i + 1}`,
     }))
     const calls = []
-    await render({ queue: queue.map(f => ({ ...f, _raw: { decision_version: 0, proposal_snapshot_ids: [String(f.id)], source_revision: 'source' } })), decisions: {}, onDecide: (f) => calls.push(f.id) })
+    await render({ queue: queue.map(f => ({ ...f, _raw: { corrected_artifact: 'none', proposal_digest: 'digest-test', decision_version: 0, proposal_snapshot_ids: [String(f.id)], source_revision: 'source' } })), decisions: {}, onDecide: (f) => calls.push(f.id) })
     await click(btnByText('Select matching proposals (12)'))
     expect(calls).toEqual([])
     expect(btnByText('Approve selected')).toBeUndefined()

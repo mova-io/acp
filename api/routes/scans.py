@@ -2419,7 +2419,7 @@ def _resume_plan(sid: str, raw_cursor: str | None) -> tuple[int | None, str | No
     return (cursor, None)
 
 
-def _project_event(event: dict, sid: str, privacy: str) -> dict:
+def _project_event(event: dict, sid: str, privacy: str, *, remapped: dict | None = None) -> dict:
     """One durable event as it goes on the wire: structured, correlated, and privacy-checked.
 
     THE PROJECTION IS THE ENFORCEMENT POINT, and there is exactly one of it. PRD §22 lets a
@@ -2438,9 +2438,18 @@ def _project_event(event: dict, sid: str, privacy: str) -> dict:
     wrong about it is a disclosure that cannot be taken back.
     """
     import remediation_run
+    import remediation_activity_history
     out = dict(event)
     out["document_ref"] = remediation_run.document_ref(sid, event.get("document"))
     out["material"] = core.store.is_material_event(event.get("kind"))
+    # Contract V3: which part of the work this narrates (draft / review / document write /
+    # verification / delivery / run). Set here, once, so every read path carries the same label.
+    out["activity_stage"] = remediation_activity_history.activity_stage(event.get("kind"))
+    # A read-time correction `_project_events` computed for a stored event whose recorded detail
+    # was provably wrong (a historical obsolete retry written as a generic block). Applied BEFORE
+    # the suppression scrub below, so the scrub sees the detail that actually ships.
+    if remapped and event.get("seq") is not None and int(event["seq"]) in remapped:
+        out["detail"] = dict(remapped[int(event["seq"])])
     if privacy == "suppressed":
         out["document"] = None
         out["document_suppressed"] = True
@@ -2449,6 +2458,20 @@ def _project_event(event: dict, sid: str, privacy: str) -> dict:
             out["detail"] = {k: v for k, v in detail.items()
                              if k not in ("file", "filename", "path", "source_path")}
     return out
+
+
+def _project_events(events: list[dict], sid: str, privacy: str, *, store=None) -> list[dict]:
+    """A PAGE of events through `_project_event`, with that page's read-time corrections.
+
+    Every read path (stream replay, live tick, /history, /remediation/activity) projects through
+    here, so the historical obsolete-retry mapping is decided once per page — one decision_log
+    read, not one per event — and identically wherever the event is shown. The mapping reads the
+    raw `document` column, so it runs before suppression blanks it; it never raises.
+    """
+    import remediation_activity_history
+    remapped = remediation_activity_history.historical_retry_projections(
+        store or core.store, sid, events)
+    return [_project_event(event, sid, privacy, remapped=remapped) for event in events]
 
 
 def _stream_is_finished(out: dict) -> bool:
@@ -2566,12 +2589,14 @@ async def stream_remediation_status(sid: str, request: Request):
         elif after_seq is not None:
             missed = await asyncio.to_thread(core.store.list_scan_events, sid,
                                              after_seq=after_seq)
-            for event in missed:
+            projected = (await asyncio.to_thread(_project_events, missed, sid, privacy)
+                         if missed else [])
+            for event in projected:
                 # `id:` is what makes this resumable at all — the client stores the last one it
                 # rendered and sends it back on the next connect.
                 yield (f"id: {event['seq']}\n"
                        "event: remediation-event\n"
-                       f"data: {_json.dumps(_project_event(event, sid, privacy), default=str)}\n\n")
+                       f"data: {_json.dumps(event, default=str)}\n\n")
             cursor = missed[-1]["seq"] if missed else after_seq
         else:
             # FIRST CONNECT, no cursor. Start from the newest event rather than 0: this client has
@@ -2589,10 +2614,12 @@ async def stream_remediation_status(sid: str, request: Request):
             if cursor is not None:
                 fresh = await asyncio.to_thread(core.store.list_scan_events, sid,
                                                 after_seq=cursor)
-                for event in fresh:
+                projected = (await asyncio.to_thread(_project_events, fresh, sid, privacy)
+                             if fresh else [])
+                for event in projected:
                     yield (f"id: {event['seq']}\n"
                            "event: remediation-event\n"
-                           f"data: {_json.dumps(_project_event(event, sid, privacy), default=str)}"
+                           f"data: {_json.dumps(event, default=str)}"
                            "\n\n")
                 if fresh:
                     cursor = fresh[-1]["seq"]
@@ -3092,8 +3119,8 @@ def scan_history(sid: str, request: Request, after_seq: int | None = Query(None,
     # was looking at — and this is the half a client falls back to precisely when the stream is
     # unavailable, so it is the less-watched one by construction.
     privacy = core.store.remediation_filename_privacy(sid)
-    events = [_project_event(e, sid, privacy)
-              for e in core.store.list_scan_events(sid, after_seq=after_seq, limit=limit)]
+    events = _project_events(core.store.list_scan_events(sid, after_seq=after_seq, limit=limit),
+                             sid, privacy)
     return {"available": True, "scan_id": sid, "events": events, "count": len(events),
             # The cursor for the next call. None on an empty page rather than 0 — 0 is a real
             # `after_seq` meaning "from the start", and returning it for "nothing here" would make
@@ -5101,7 +5128,22 @@ def get_file_page(scan_id: str, filename: str, page: int, request: Request,
     """Serve a PNG of page N of a file — the rendering primitive the Intelligent Review
     Workspace's 'locate in document' evidence uses. Same blob-cache → render-on-demand →
     cache → serve as the thumbnail; the renderer clamps `page` to the document's real range.
-    PDF only in phase 1 (Office → 404 → placeholder). Owner-scoped, non-blocking."""
+    PDF always; Office (docx/pptx/xlsx) wherever LibreOffice is installed (render.can_render),
+    otherwise 404 → placeholder. Owner-scoped, non-blocking.
+
+    THE CLAMP IS KEPT, AND NOW IT IS SAID. Page 999 of a one-page PDF is still a 200 with page 1,
+    byte-identical — but the 200 carries `X-ACP-Rendered-Page` (the page actually drawn,
+    min(page, count)) and `X-ACP-Page-Count`, so a client can tell "page 999" from "the last page".
+    Both are omitted, never guessed, when the count is unknown: the client captions that as
+    "not confirmed".
+
+    PROVENANCE IS BOUND TO THE EXACT CACHED PNG, never to the file. Each cached page carries a
+    sidecar (`{filename}#p{N}#meta`) recording the sha256 of the PNG it describes plus the page
+    that PNG shows and the count at the time it was drawn. A hit emits headers only when the
+    sidecar parses, is self-consistent, and its digest equals the cached bytes. A per-file count
+    cannot do this: page 999 cached from a one-page version shows page 1, and a later two-page
+    render would relabel those same pixels "page 2". Anything else — a legacy PNG with no sidecar,
+    a partial cache write, a digest mismatch — serves the PNG with no provenance at all."""
     import blob as _blob
     import render as _render
 
@@ -5115,11 +5157,42 @@ def get_file_page(scan_id: str, filename: str, page: int, request: Request,
 
     page = max(1, min(int(page or 1), 5000))          # sane bound; renderer clamps to real range
     cache_key = f"{filename}#p{page}"                  # page-specific blob cache entry
+    meta_key = f"{cache_key}#meta"                     # provenance of THAT exact PNG
+
+    def served(png: bytes, provenance: tuple[int, int] | None) -> Response:
+        headers = {"Cache-Control": "private, max-age=86400"}
+        if provenance:
+            headers["X-ACP-Rendered-Page"] = str(provenance[0])
+            headers["X-ACP-Page-Count"] = str(provenance[1])
+        return Response(png, media_type="image/png", headers=headers)
+
+    def cached_provenance(png: bytes) -> tuple[int, int] | None:
+        """(rendered_page, page_count) iff the sidecar describes exactly these bytes.
+
+        Absent (legacy), partial or garbled sidecars are EXPECTED states of a best-effort cache,
+        not failures: each answers None (no provenance), explicitly. download_render never raises,
+        so the only thing caught is the parse of bytes we already hold."""
+        raw = _blob.download_render(owner, scan_id, meta_key)
+        if not raw:
+            return None                                # legacy PNG or sidecar write that never landed
+        try:
+            meta = _json.loads(raw.decode())
+        except (UnicodeDecodeError, ValueError):       # partial/garbled sidecar → say nothing
+            return None
+        if not isinstance(meta, dict):
+            return None
+        rendered, count = meta.get("rendered_page"), meta.get("page_count")
+        if (meta.get("v") == 1
+                and meta.get("png_sha256") == hashlib.sha256(png).hexdigest()
+                and type(rendered) is int and type(count) is int
+                and count >= 1 and rendered == min(page, count)):
+            return rendered, count
+        return None
+
     if not fresh:
         cached = _blob.download_render(owner, scan_id, cache_key)
         if cached is not None:
-            return Response(cached, media_type="image/png",
-                            headers={"Cache-Control": "private, max-age=86400"})
+            return served(cached, cached_provenance(cached))
 
     data = _source_bytes_for_render(request, scan_id, filename, owner)
     if not data:
@@ -5129,9 +5202,19 @@ def get_file_page(scan_id: str, filename: str, page: int, request: Request,
     if not png:
         raise HTTPException(404, "could not render this page")
 
-    _blob.upload_render(owner, scan_id, cache_key, png)   # best-effort cache; never raises
-    return Response(png, media_type="image/png",
-                    headers={"Cache-Control": "private, max-age=86400"})
+    count = _render.page_count(data, ext)             # never raises; None = unknown
+    provenance = (min(page, count), count) if count else None
+    # PNG first, then its sidecar — and the sidecar only if the PNG write landed. The digest makes
+    # the order a belt, not the braces: a sidecar can only ever vouch for the bytes it hashed, so a
+    # PNG write that failed after, or a sidecar write that failed after, leaves a digest mismatch
+    # (no headers) rather than a borrowed label. Unknown count → no sidecar worth trusting: write
+    # one with no digest so an older sidecar for this key cannot survive a fresh re-render.
+    if _blob.upload_render(owner, scan_id, cache_key, png):     # best-effort; never raises
+        meta = ({"v": 1, "png_sha256": hashlib.sha256(png).hexdigest(),
+                 "rendered_page": provenance[0], "page_count": provenance[1]}
+                if provenance else {"v": 1, "png_sha256": None})
+        _blob.upload_render(owner, scan_id, meta_key, _json.dumps(meta).encode())
+    return served(png, provenance)
 
 
 @router.get("/scans/{scan_id}/files/{filename:path}/geometry")

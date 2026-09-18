@@ -8,6 +8,8 @@ import { allRules, PLAIN_NAMES } from './rules/index.js'
 import { explainFinding, getFileContent, uploadToDrive, markRemediated, remediateScan, getQueueJob, queueHitlReview, queueHitlVerify, getFileRemediationState, getFileRemediationDiffs, downloadRemediated, getRules, getRubric, getConfig, getCapability, listHitlQueue, updateHitlItem, openTraceUrl, getDocumentTimeline } from './api.js'
 import { reviewableInPlace } from './reviewCard.js'
 import EvidenceCard from './EvidenceCard.jsx'
+import { SIM as SIM_MODE } from './sim.js'
+import { HELD_LABEL, REAPPROVE_ACTION, heldExplanation, needsReapproval, requestReviewQueueRefresh, viewedBindingKey, viewedDecisionOptions, viewedVersionConflict, viewedVersionMissingError } from './viewedApprovalBinding.js'
 import { CAPABILITY_FALLBACK, fmtOf, autoSCs, modeFor, reviewRecommended } from './capability.js'
 import PagePreview from './PagePreview.jsx'
 import SharePointMetadata from './SharePointMetadata.jsx'
@@ -25,7 +27,9 @@ import { confirmCriterion, getFileStatus, getExamined, disposeCriterion, listDis
 import { listScanDecisions, getDecisions, getFilePage, getFileArtifactPage, getFileReportFacts, getScan, getScanDiff } from './api.js'
 import ChangeReviewPanel from './ChangeReviewPanel.jsx'
 import ReportModeMenu from './ReportModeMenu.jsx'
-import { buildFileReportData, loadFileReportFacts, savedChangeToDiff, collectPreviews, savedChangesGap } from './fileReportData.js'
+import { buildFileReportData, loadFileReportFacts, savedChangeToDiff, collectPreviews, savedChangesGap, occurrenceOf } from './fileReportData.js'
+import { attachEvidenceLinks } from './evidenceLink.js'
+import { fmtOfFile, locationOf, LOCATION_NOT_RECORDED } from './reportEvidence.js'
 import { errorReasonFor, noFindingsLine, looksLikeFetchFailure, friendlyFileError } from './fileErrorReason.js'
 import { retentionSignal } from './retentionSignal.js'
 import { showsAssessmentHero } from './riskOverUnassessed.js'
@@ -71,10 +75,12 @@ const fixLabel = (sc, mode, aiEnabled) => {
   return '✋ human'
 }
 
-// Only PDFs can be rasterized server-side (api/render.py RENDERABLE_EXTS = ('.pdf',)).
-// Office formats would need a LibreOffice round-trip, so for a deck we show the slide
-// number and no image — rather than a row of "preview unavailable" placeholders.
-const PAGE_RENDERABLE = new Set(['pdf'])
+// Formats whose findings sit on a rendered PAGE: a PDF page, or a PowerPoint slide (the server
+// rasterises decks through LibreOffice where the image has it — api/render.py can_render). A deck
+// preview is requested on click and, where LibreOffice is absent, the route's 404 is shown as
+// "Preview unavailable" rather than hidden. Word paragraphs and Excel cells have no page, so they
+// get their location in words and no picture — never page 1.
+const PAGE_RENDERABLE = new Set(['pdf', 'pptx'])
 
 // Audit trail (maturity Phase 4): the document's REAL recorded history — scanned, AI drafted
 // (with provider/zone), human decided (with who + why), fix written, published — every row a
@@ -176,17 +182,47 @@ function AssessmentTimeline({ scanId, file }) {
 
 // Click-to-reveal, not eager: a drawer can list 20+ findings and rendering a PNG per row
 // would fire that many page-render requests the reviewer never asked for.
-function FindingPagePreview({ scanId, file, pages }) {
+//
+// `sha256` (the source's recorded sha-256, when there is one) sends the request to the exact-bytes
+// route, which refuses a page the document does not have instead of drawing the nearest one.
+export function FindingPagePreview({ scanId, file, page, unit = 'page', sha256 = null }) {
   const [open, setOpen] = useState(false)
-  const page = [...pages].sort((a, b) => a - b)[0]
-  if (!scanId) return null
+  if (!scanId || !page) return null
+  const noun = unit === 'slide' ? 'slide' : 'page'
   return (
-    <div style={{ marginTop: 6 }}>
+    <span className="finding-occ-preview">
       <button className="explain-btn" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
-        {open ? 'Hide page' : `Show page ${page}`}
+        {open ? `Hide ${noun}` : `Show ${noun} ${page}`}
       </button>
-      {open && <div style={{ marginTop: 6 }}><PagePreview scanId={scanId} file={file} page={page} maxHeight={220} /></div>}
-    </div>
+      {open && <div style={{ marginTop: 6 }}><PagePreview scanId={scanId} file={file} page={page} unit={noun} sha256={sha256} maxHeight={220} /></div>}
+    </span>
+  )
+}
+
+// Every occurrence of a grouped finding, each with its OWN location — the drawer used to keep only
+// a page per group, so an Excel finding in cells B3 and D9, or a Word finding in paragraphs 4 and
+// 15, said nothing about where to look. Each line carries the human location text, the exact
+// evidence link when the row could be matched to one server record (never a guessed one), and a
+// page/slide preview where a rendered page exists.
+export const OCCURRENCES_SHOWN = 8
+export function FindingOccurrences({ occurrences, scanId, file, sha256 = null, renderable = false }) {
+  const list = occurrences || []
+  if (!list.some((o) => o.label || o.href || o.page)) return null
+  const shown = list.slice(0, OCCURRENCES_SHOWN)
+  const more = list.length - shown.length
+  return (
+    <ul className="finding-occurrences" aria-label="Where this finding occurs" style={{ margin: '6px 0 0', paddingLeft: 18, fontSize: 12 }}>
+      {shown.map((o, k) => (
+        <li key={k} style={{ margin: '2px 0' }}>
+          <span className={o.label ? undefined : 'muted'}>{o.label || LOCATION_NOT_RECORDED}</span>
+          {o.href && (
+            <> · <a href={o.href} target="_blank" rel="noopener noreferrer" className="finding-evidence-link">Open exact evidence</a></>
+          )}
+          {renderable && o.page && <> · <FindingPagePreview scanId={scanId} file={file} page={o.page} unit={o.unit} sha256={sha256} /></>}
+        </li>
+      ))}
+      {more > 0 && <li className="muted">{more} more occurrence{more === 1 ? '' : 's'} not listed here — the full list is in the file report.</li>}
+    </ul>
   )
 }
 
@@ -566,7 +602,7 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
     // reviewer approved, nothing changed, and this card is where they learn why. reviewableInPlace
     // is the one definition of that set.
     const load = () => listHitlQueue(scanId)
-      .then((rows) => { if (live) setHitlItems((rows || []).filter((r) => r.file === file.file && reviewableInPlace(r))) })
+      .then((rows) => { if (live) setHitlItems((rows || []).filter((r) => r.file === file.file && (reviewableInPlace(r) || needsReapproval(r)))) })
       .catch(() => {})
     load()
     window.addEventListener('acp:hitl-changed', load)
@@ -585,15 +621,35 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
     }).catch(() => false)
   // Same contract as the inbox's act(): the card carries the note/value/telemetry; a
   // success removes the item locally and tells the bell to reconcile.
-  const drawerAct = (itemId, status, note = null, approvedValue = null, telemetry = {}) =>
-    updateHitlItem(itemId, status, note, approvedValue, {
-      ...telemetry,
-      expectedVersion: hitlItems.find((item) => item.id === itemId)?.decision_version ?? 0,
-    })
+  //
+  // Bound to the VIEWED version: the row this drawer is rendering (the in-place card below is keyed by
+  // that version, so its editors were seeded from it). An approval without a complete binding is not
+  // sent; a 409 viewed-version refusal is stated above the card, the row is re-read, and the card
+  // remounts on the current version for a fresh decision. Nothing is retried automatically.
+  const [viewedNotice, setViewedNotice] = useState(null)   // { id, message }
+  const drawerAct = (itemId, status, note = null, approvedValue = null, telemetry = {}) => {
+    const viewed = hitlItems.find((item) => item.id === itemId)
+    const bound = viewedDecisionOptions(viewed, status)
+    if (!SIM_MODE && status === 'approved' && !bound) {
+      const refused = viewedVersionMissingError()
+      setViewedNotice({ id: itemId, message: refused.message })
+      requestReviewQueueRefresh()
+      return Promise.reject(refused)
+    }
+    setViewedNotice(null)
+    return updateHitlItem(itemId, status, note, approvedValue, { ...telemetry, ...bound,
+      expectedVersion: bound?.expectedVersion ?? viewed?.decision_version ?? 0 })
       .then(() => {
         setHitlItems((cur) => cur.filter((h) => h.id !== itemId))
         window.dispatchEvent(new Event('acp:hitl-changed'))
+      }, (e) => {
+        const conflict = viewedVersionConflict(e)
+        if (!conflict) throw e
+        setViewedNotice({ id: itemId, message: conflict.message })
+        requestReviewQueueRefresh()
+        throw conflict
       })
+  }
   // Download the stored fixed copy. downloadRemediated() rejects on a non-2xx (e.g. the
   // 404 an ADR 0011 incremental re-scan produced for a file whose fixed copy lives under
   // an earlier scan_id) — but the bare onClick used to drop that rejection, so the button
@@ -684,6 +740,11 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
   const [savedDiffsErr, setSavedDiffsErr] = useState(null)
   // Page previews for the review panel, each tagged with the version it provably is.
   const [changePreviews, setChangePreviews] = useState(null)
+  // The server's findings (with their evidence links) and identity, read from the same facts
+  // request — so an occurrence row can link to its exact record and its page preview can ask for
+  // the recorded source bytes. null until read, and null (no links) when the read failed.
+  const [factsFindings, setFactsFindings] = useState(null)
+  const [factsSourceSha, setFactsSourceSha] = useState(null)
   // The authoritative status model, reported up by the AccessibilityStatus hero below so both
   // panels answer "does this file have findings" from ONE derivation — see findingsClaim().
   const [statusModel, setStatusModel] = useState(null)
@@ -695,6 +756,7 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
       .then((rows) => { if (!cancelled) setRemediatedRuleIds(new Set((rows || []).filter((r) => r.state === 'complete').map((r) => r.rule_id))) })
       .catch(() => { if (!cancelled) setRemediatedRuleIds(new Set()) })
     setSavedDiffs(null); setSavedDiffsErr(null); setChangePreviews(null)
+    setFactsFindings(null); setFactsSourceSha(null)
     // The SERVER's saved-change list, because it is the only one that includes changes the AI
     // applied and nothing re-scanned. /remediation-diffs returns verified records only, so a panel
     // fed from it showed a reviewer everything except the changes that actually needed reviewing.
@@ -702,6 +764,12 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
       .then(() => loadFileReportFacts(scanId, file.file, { getFileReportFacts }))
       .then(async ({ facts, factsError }) => {
         if (cancelled) return
+        if (facts) {
+          const linked = attachEvidenceLinks(facts)
+          setFactsFindings(Array.isArray(linked.findings) ? linked.findings : null)
+          const src = linked.identity?.sourceSha256
+          setFactsSourceSha(typeof src === 'string' && /^[0-9a-f]{64}$/.test(src) ? src : null)
+        }
         if (facts && Array.isArray(facts.savedChanges)) {
           const rows = facts.savedChanges.map((c) => savedChangeToDiff(c, file.file))
           setSavedDiffs(rows)
@@ -838,7 +906,7 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
     </>
   )
 
-  if (context === 'graph') return <GraphFindingsDrawer key={`${scanId}:${file.file}`} file={file} scanId={scanId} onClose={onClose} items={hitlItems} readOnly={readOnly} onAct={drawerAct} />
+  if (context === 'graph') return <GraphFindingsDrawer key={`${scanId}:${file.file}`} file={file} scanId={scanId} onClose={onClose} items={hitlItems} readOnly={readOnly} onAct={drawerAct} notice={viewedNotice} />
 
   // Discover (steps 1–3): inventory · classify · retain — NO accessibility assessment.
   if (context === 'discover') {
@@ -1043,16 +1111,21 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
               // Engines emit one finding per occurrence (e.g. reading order: one per
               // slide) — collapse identical (criterion, severity, detail) rows into one
               // with a count, but keep every occurrence's page so the reviewer is told
-              // WHERE to look instead of hunting through the document.
+              // WHERE to look instead of hunting through the document. Each occurrence also
+              // keeps its OWN location (label, object id, page, evidence link): collapsing them
+              // to a page list left Word and Excel findings with no location at all.
+              const fmt = file.type || fmtOfFile(file.file)
               const groups = []
               const byKey = {}
               issues.forEach((i) => {
                 const k = `${scOf(i.wcag) || i.wcag}::${i.severity || ''}::${i.detail || ''}`
-                if (byKey[k] == null) { byKey[k] = groups.length; groups.push({ ...i, count: 1, pages: i.page ? [i.page] : [] }) }
+                const occ = occurrenceOf(i, { fmt, findings: factsFindings, locationOf })
+                if (byKey[k] == null) { byKey[k] = groups.length; groups.push({ ...i, count: 1, pages: i.page ? [i.page] : [], occurrences: [occ] }) }
                 else {
                   const g = groups[byKey[k]]
                   g.count++
                   if (i.page && !g.pages.includes(i.page)) g.pages.push(i.page)
+                  g.occurrences.push(occ)
                 }
               })
               // Action-first grouping: the reviewer thinks in WORK, not WCAG numbers. Show the
@@ -1117,8 +1190,8 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
                       <PdfImageContrastCheck scanId={scanId} file={file.file} />}
                     {i.impact && <div className="muted findingimpact">{i.impact}</div>}
                     {i.fix && <div className="findingfix"><span className={findingAuto(i) ? 'fixauto' : 'fixreview'}>{findingAuto(i) ? '⚡ auto-fixable' : '✎ needs review'}</span> · {i.fix}<span className="muted"> · {i.rule_id ?? i.ruleId}</span></div>}
-                    {i.pages?.length > 0 && PAGE_RENDERABLE.has(file.type) &&
-                      <FindingPagePreview scanId={scanId} file={file.file} pages={i.pages} />}
+                    <FindingOccurrences occurrences={i.occurrences} scanId={scanId} file={file.file}
+                                        sha256={factsSourceSha} renderable={PAGE_RENDERABLE.has(fmt)} />
                     {(() => {
                       // Evidence-based confidence (confidence.js) — never a fabricated %.
                       // The basis is always shown next to the level so the signal is auditable.
@@ -1146,11 +1219,30 @@ export default function FileDrawer({ file, onClose, context = 'full', overrideOw
                         <div style={{ marginTop: 8 }}>
                           <button className="ghost small" aria-expanded={openHere}
                                   onClick={() => setReviewSc(openHere ? null : sc)}>
-                            {openHere ? '× Close review' : `⚖ Review here — ${hi.finding_count > 1 ? `${hi.finding_count} findings, ` : ''}evidence & approve`}
+                            {openHere ? '× Close review' : needsReapproval(hi) ? `⚖ ${REAPPROVE_ACTION} — ${HELD_LABEL.toLowerCase()}`
+                              : `⚖ Review here — ${hi.finding_count > 1 ? `${hi.finding_count} findings, ` : ''}evidence & approve`}
                           </button>
                           {openHere && (
                             <div style={{ marginTop: 8 }}>
-                              <EvidenceCard item={hi} onAct={drawerAct}
+                              {/* A refused approval of a version that is no longer current, stated
+                                  here because the card below remounts on the current version. */}
+                              {viewedNotice?.id === hi.id && (
+                                <div role="alert" className="drawer-viewed-version"
+                                     style={{ marginBottom: 8, padding: '8px 10px', borderRadius: 8, fontSize: 12.5,
+                                              border: '1px solid #C0392B', background: '#FDEDEC', color: '#7B241C' }}>
+                                  <b>Not approved.</b> {viewedNotice.message}
+                                </div>
+                              )}
+                              {/* A held approval: the card below is the CURRENT version; approving it
+                                  re-binds the approval (one 'single' decision, never repeated). */}
+                              {needsReapproval(hi) && (
+                                <p className="drawer-reapprove" role="note" style={{ margin: '0 0 8px', fontSize: 12.5 }}>
+                                  <b>{HELD_LABEL}.</b> {heldExplanation(hi)}
+                                </p>
+                              )}
+                              {/* Keyed by the row's version: an editor seeded from an older version
+                                  must not carry its text into an approval of a newer one. */}
+                              <EvidenceCard item={hi} onAct={drawerAct} key={viewedBindingKey(hi)}
                                             onResolved={() => setReviewSc(null)}
                                             traceUrl={hi.scan_id ? openTraceUrl(hi.scan_id, 'file', hi.file) : null} />
                             </div>

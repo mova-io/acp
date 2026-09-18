@@ -1,0 +1,10 @@
+.remaining-findings-explainer { border: 1px solid var(--line, #e2dce4); border-radius: 12px; padding: 12px 14px; margin: 10px 0; background: var(--surface-2, #f6f5f8); }
+.remaining-findings-explainer h3 { margin: 0 0 4px; font-size: 14px; }
+.remaining-findings-explainer h4 { margin: 10px 0 4px; font-size: 13px; }
+.remaining-findings-explainer__headline { margin: 0 0 4px; font-weight: 600; }
+.remaining-findings-explainer__units { margin: 0; font-size: 12.5px; }
+.remaining-findings-explainer__list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.remaining-findings-explainer__list li { display: grid; gap: 2px; padding: 8px 10px; border-radius: 8px; background: var(--surface, #fff); font-size: 12.5px; }
+.remaining-findings-explainer__list li button { justify-self: start; margin-top: 4px; }
+.remaining-findings-explainer__where { color: var(--muted, #5f5866); }
+.remaining-findings-explainer__progress { display: grid; gap: 2px; margin-top: 10px; font-size: 12.5px; }

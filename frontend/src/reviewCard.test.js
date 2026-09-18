@@ -151,19 +151,25 @@ describe('buildEvidenceCard — AI proposals (hitl_queue.proposals)', () => {
 describe('verificationLadder — the honest connected pipeline', () => {
   it('value-fix, unvalidated: write + re-scan are still ahead (todo), never a green pass', () => {
     const l = verificationLadder({ certifiesOnApprove: false, proposal: { list: [{}], validated: false } })
-    expect(l.map((s) => s.label)).toEqual(['AI draft generated', 'Human review', 'Written to document', 'Re-scan verified', 'Certified'])
+    expect(l.map((s) => s.label)).toEqual(['AI draft generated', 'Human review', 'Written to document', 'Re-scan verified', 'Outcome recorded'])
     expect(l.map((s) => s.state)).toEqual(['done', 'current', 'todo', 'todo', 'todo'])
   })
 
   it('value-fix, validated: write + re-scan already done, the human is the last gate', () => {
     const l = verificationLadder({ certifiesOnApprove: false, proposal: { list: [{}], validated: true } })
-    expect(l.map((s) => s.label)).toEqual(['AI draft generated', 'Written to document', 'Re-scan verified', 'Human review', 'Certified'])
+    expect(l.map((s) => s.label)).toEqual(['AI draft generated', 'Written to document', 'Re-scan verified', 'Human review', 'Outcome recorded'])
     expect(l.map((s) => s.state)).toEqual(['done', 'done', 'done', 'current', 'todo'])
   })
 
   it('judgement finding: short pipeline — the sign-off IS the resolution', () => {
     const l = verificationLadder({ certifiesOnApprove: true })
-    expect(l.map((s) => s.label)).toEqual(['Detected', 'Human review', 'Certified'])
+    expect(l.map((s) => s.label)).toEqual(['Detected', 'Human review', 'Decision recorded'])
+  })
+
+  it('never claims certification for a single finding on any path', () => {
+    const cards = [{ certifiesOnApprove: true }, { proposal: { list: [{}], validated: true } }, { proposal: { list: [{}] } },
+      { applyOutcome: { state: 'nothing_written' } }, { applyOutcome: { state: 'still_failing' } }]
+    for (const card of cards) expect(verificationLadder(card).map((s) => s.label).join(' ')).not.toMatch(/certif/i)
   })
 })
 

@@ -35,6 +35,7 @@ sys.path.insert(0, str(ACP / "tests"))
 
 from test_pdf_figure_alt_approval import _alts, _tagged_pdf  # noqa: E402
 from test_pdf_form_field_names import _form_pdf, _tus  # noqa: E402
+from hitl_viewed import approve_bound
 
 FILE = "report.pdf"
 SID = "s-pdf"
@@ -53,6 +54,9 @@ class _Blob:
     def download_remediated(self, owner, sid, f): return self.data
     def upload_remediated(self, owner, sid, f, data, mime):
         self.data = data; self.uploads.append((f, mime)); return "http://b/2"
+    # The approved writer publishes digest-scoped and moves the pointer at commit.
+    def upload_immutable_retry(self, owner, sid, f, data, mime):
+        return self.upload_remediated(owner, sid, f, data, mime)
 
 
 def _seed(store, *, sc, rule_name, locators, wcag_rule):
@@ -126,8 +130,7 @@ def test_approved_figure_alt_is_written_into_the_pdf(store, monkeypatch, tmp_pat
     blob = _Blob(src.read_bytes())
     item_id = _seed(store, sc="1.1.1", rule_name="Non-text Content",
                     locators=["pdf:fig:1:0", "pdf:fig:1:1"], wcag_rule="pdf.missing-alt-text")
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, ["Bar chart of revenue by region", "Team photo"])
+    approve_bound(store, item_id, ["Bar chart of revenue by region", "Team photo"])
 
     assert store.mark_file_compliant_if_reviewed(SID, FILE) is False   # nothing written yet
 
@@ -150,8 +153,7 @@ def test_approved_field_name_is_written_and_verified_by_a_real_re_scan(store, mo
     blob = _Blob(src.read_bytes())
     item_id = _seed(store, sc="4.1.2", rule_name="Name, Role, Value",
                     locators=["pdf:field:1:0"], wcag_rule="PDF_FORM_NO_ACCESSIBLE_NAME")
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, ["Home address"])
+    approve_bound(store, item_id, ["Home address"])
 
     _run_handler(monkeypatch, store, blob, residual="real")
 
@@ -172,8 +174,7 @@ def test_approved_exact_pdf_language_written_and_rechecked(store, monkeypatch, t
     blob = _Blob(data)
     item_id = _seed(store, sc='3.1.2', rule_name='Language of Parts',
                     locators=[target.locator], wcag_rule='PDF_PART_LANGUAGE')
-    store.update_hitl_item(item_id, 'approved', None, None)
-    store.approve_proposal_values(item_id, ['fr-FR'])
+    approve_bound(store, item_id, ['fr-FR'])
 
     _run_handler(monkeypatch, store, blob, residual='real')
 
@@ -197,8 +198,7 @@ def test_pdf_language_stale_or_prose_locator_is_never_credited(store, monkeypatc
     blob = _Blob(data)
     item_id = _seed(store, sc='3.1.2', rule_name='Language of Parts',
                     locators=[locator], wcag_rule='PDF_PART_LANGUAGE')
-    store.update_hitl_item(item_id, 'approved', None, None)
-    store.approve_proposal_values(item_id, ['fr'])
+    approve_bound(store, item_id, ['fr'])
 
     _run_handler(monkeypatch, store, blob, residual='real')
 
@@ -220,8 +220,7 @@ def test_language_approval_cannot_write_other_pdf_properties(store, monkeypatch,
     blob = _Blob(original)
     item_id = _seed(store, sc='3.1.2', rule_name='Language of Parts',
                     locators=[locator], wcag_rule='PDF_PART_LANGUAGE')
-    store.update_hitl_item(item_id, 'approved', None, None)
-    store.approve_proposal_values(item_id, ['fr'])
+    approve_bound(store, item_id, ['fr'])
 
     _run_handler(monkeypatch, store, blob, residual='real')
 
@@ -237,8 +236,7 @@ def test_a_write_that_does_not_clear_the_criterion_credits_nothing(store, monkey
     blob = _Blob(src.read_bytes())
     item_id = _seed(store, sc="1.1.1", rule_name="Non-text Content",
                     locators=["pdf:fig:1:0"], wcag_rule="pdf.missing-alt-text")
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, ["Bar chart of revenue by region"])
+    approve_bound(store, item_id, ["Bar chart of revenue by region"])
 
     _run_handler(monkeypatch, store, blob, residual={"1.1.1"})   # still failing after the write
 
@@ -254,8 +252,7 @@ def test_an_approval_for_a_figure_the_document_lost_is_recorded_not_guessed(stor
     blob = _Blob(src.read_bytes())
     item_id = _seed(store, sc="1.1.1", rule_name="Non-text Content",
                     locators=["pdf:fig:9:9"], wcag_rule="pdf.missing-alt-text")
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, ["Alt for a figure that is gone"])
+    approve_bound(store, item_id, ["Alt for a figure that is gone"])
 
     _run_handler(monkeypatch, store, blob, residual=set())
 
@@ -289,13 +286,11 @@ def test_alt_and_field_names_are_written_in_one_pass(store, monkeypatch, tmp_pat
 
     alt_item = _seed(store, sc="1.1.1", rule_name="Non-text Content",
                      locators=["pdf:fig:1:0"], wcag_rule="pdf.missing-alt-text")
-    store.update_hitl_item(alt_item, "approved", None, None)
-    store.approve_proposal_values(alt_item, ["Bar chart of revenue by region"])
+    approve_bound(store, alt_item, ["Bar chart of revenue by region"])
     fld_item = store.enqueue_proposals(SID, FILE, "4.1.2", [
         {"locator": "pdf:field:1:0", "before": "(nothing)", "proposed_value": "",
          "rationale": "r", "source": "human"}], rule_name="Name, Role, Value")
-    store.update_hitl_item(fld_item, "approved", None, None)
-    store.approve_proposal_values(fld_item, ["Home address"])
+    approve_bound(store, fld_item, ["Home address"])
 
     _run_handler(monkeypatch, store, blob, residual=set())
 
@@ -316,8 +311,7 @@ def test_the_written_values_are_recorded_as_remediation_diffs(store, monkeypatch
     blob = _Blob(src.read_bytes())
     item_id = _seed(store, sc="1.1.1", rule_name="Non-text Content",
                     locators=["pdf:fig:1:0"], wcag_rule="pdf.missing-alt-text")
-    store.update_hitl_item(item_id, "approved", None, None)
-    store.approve_proposal_values(item_id, ["Bar chart of revenue by region"])
+    approve_bound(store, item_id, ["Bar chart of revenue by region"])
 
     _run_handler(monkeypatch, store, blob, residual=set())
 

@@ -5,8 +5,24 @@ import Tiles, { outcomeTileModel } from './WorkflowOutcomeTiles.jsx'
 const findingDomain = { total:30,accounted:30,exact:true,buckets:{resolved_verified:12,awaiting_review:5,approved_pending_verification:3,unchanged_no_fix:2,failed:1,excluded:1,superseded:1,awaiting_recorded_outcome:5} }
 it('groups every finding once with verified separate from approved work',()=> {
  const result=outcomeTileModel('remediate',findingDomain)
- expect(result.tiles.map(tile=>[tile.label,tile.value])).toEqual([['Awaiting outcome',5],['Applying & checking',3],['Verified fixes',12],['Unresolved findings',8],['Excluded',2]])
+ expect(result.tiles.map(tile=>[tile.label,tile.value])).toEqual([['Awaiting outcome',5],['Applying & checking',3],['Verified fixes',12],['Unresolved findings',8],['Excluded or replaced',2]])
  expect(result.tiles.reduce((sum,tile)=>sum+tile.value,0)).toBe(30)
+})
+// The gray tile holds two different facts. A superseded finding (its target was replaced by a
+// verified change, or re-assessed away) is not a policy exclusion, and the tile says which is which.
+it('names replaced or superseded findings apart from policy exclusions and states findings are not review tasks',()=> {
+ const domain={total:5,buckets:{resolved_verified:3,awaiting_review:0,superseded:1,excluded:1}}
+ const tile=outcomeTileModel('remediate',domain).tiles.find(t=>t.key==='excluded')
+ expect(tile.parts).toEqual([{key:'superseded',label:'replaced or superseded',value:1},{key:'excluded',label:'excluded by policy',value:1}])
+ const html=renderToStaticMarkup(<Tiles stage="remediate" domain={domain} executionId="run" />)
+ expect(html).toContain('1 replaced or superseded · 1 excluded by policy')
+ expect(html).toContain('These tiles count findings. Review workspace counts review tasks')
+ expect(html).toContain('never added')
+ const onlyReplaced=renderToStaticMarkup(<Tiles stage="remediate" domain={{total:2,buckets:{resolved_verified:1,superseded:1}}} executionId="run" />)
+ expect(onlyReplaced).toContain('1 replaced or superseded · 0 excluded by policy')
+ expect(onlyReplaced).not.toMatch(/certif/i)
+ // Unbalanced: no parts, no numbers invented for them.
+ expect(outcomeTileModel('remediate',{total:9,buckets:{superseded:1}}).tiles.find(t=>t.key==='excluded').parts).toBeNull()
 })
 it('removes both stage bars and exposes large tiles with collapsed outcome details',()=> {
  for(const stage of ['remediate','release']) {

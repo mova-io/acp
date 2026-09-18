@@ -11,7 +11,7 @@ describe('Review queue action pills', () => {
   it('distinguishes scope-bound PDF map editing from native-tag approval without trusting stale reasons', () => {
     const policy={enabled:true,supported:true,run_id:'r',source_revision:1}
     const base={id:71,file:'document.pdf',rule_id:'1.3.1',status:'pending',hasProposal:true,after:'draft',
-      _raw:{scan_id:'s',proposal_snapshot_ids:['p'],source_revision:1,decision_version:0},automatic_approval:{state:'blocked',responsibility:'human',
+      _raw:{corrected_artifact:'none',proposal_digest:'digest-test',scan_id:'s',proposal_snapshot_ids:['p'],source_revision:1,decision_version:0},automatic_approval:{state:'blocked',responsibility:'human',
         scan_id:'s',proposal_snapshot_ids:['p'],run_id:'r',source_revision:1}}
     const mapReason='This PDF needs headings or table structure added in the original document. ACP cannot apply this draft automatically.'
     const nativeReason='This PDF structure draft was created from document rules and needs your review before ACP applies it.'
@@ -35,7 +35,7 @@ describe('Review queue action pills', () => {
   it('renders admitted automatic work and unknown verification as blue status pills', async () => {
     const {container,root}=createTestRoot()
     await act(async()=>root.render(createElement(RemediationInbox,{queue:[
-      {id:81,file:'queued.docx',scanId:'s',rule_id:'1.1.1',hasProposal:true,after:'draft',aiAssisted:true,_raw:{scan_id:'s',source_revision:1,decision_version:0,proposal_snapshot_ids:['p']},proposal_snapshot_ids:['p'],automatic_approval:{state:'queued',run_id:'r',scan_id:'s',source_revision:1,proposal_snapshot_ids:['p'],responsibility:'acp'}},
+      {id:81,file:'queued.docx',scanId:'s',rule_id:'1.1.1',hasProposal:true,after:'draft',aiAssisted:true,_raw:{corrected_artifact:'none',proposal_digest:'digest-test',scan_id:'s',source_revision:1,decision_version:0,proposal_snapshot_ids:['p']},proposal_snapshot_ids:['p'],automatic_approval:{state:'queued',run_id:'r',scan_id:'s',source_revision:1,proposal_snapshot_ids:['p'],responsibility:'acp'}},
       {id:82,file:'checking.docx',rule_id:'1.1.1',applied:true,validated:false},
     ],autoApprove:true,automaticApprovalPolicy:{enabled:true,supported:true,run_id:'r',source_revision:1},initialTab:'all',initialGroup:'document',decisions:{}})))
     expect(container.querySelector('#rinbox-row-81 .rinbox-action-chip--processing')?.textContent).toBe('Processing')

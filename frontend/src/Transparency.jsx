@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { openTraceUrl, getTraceStatus, getScanTraces, getScanReportFacts } from './api.js'
 import SegmentDrawer from './SegmentDrawer.jsx'
 import ReportModeMenu from './ReportModeMenu.jsx'
+import { packetZipFormat, packetsSteerNote } from './reportPacketExport.js'
 import FileDrawer from './FileDrawer.jsx'
 import TracePanel from './TracePanel.jsx'
 import SessionPanel from './SessionPanel.jsx'
@@ -226,7 +227,8 @@ export function RuleBreakdown({ scanId, files }) {
     ])
     setFactsProgress({ loaded: 0, total: null, complete: false })
     try {
-      const got = await loadScanReportFacts(scanId, { getScanReportFacts, onProgress: setFactsProgress })
+      // Reviewer/Full link each finding card to its exact record (contract 8); Summary has no cards.
+      const got = await loadScanReportFacts(scanId, { getScanReportFacts, onProgress: setFactsProgress, includeFindings: mode !== 'summary' })
       const cmp = scanComparisonFromFacts(got.facts, targetLevel)
       return await generateScanReport({
         scanId, files: files || [], mode,
@@ -337,7 +339,9 @@ export function RuleBreakdown({ scanId, files }) {
           <span style={{ marginLeft: 8, fontSize: 11 }}>
             <ReportModeMenu label="Export scan report" disabled={!scanId}
                             progress={factsProgress && `Reading report evidence\u2026 ${factsProgress.loaded}${factsProgress.total != null ? ` of ${factsProgress.total}` : ''} document(s)`}
-                            formats={[{ key: 'pdf', label: 'PDF', run: runScanReport }]} />
+                            modeNotes={{ full: packetsSteerNote((files || []).length) }}
+                            formats={[{ key: 'pdf', label: 'PDF', run: runScanReport },
+                                      ...(scanId ? [packetZipFormat({ scanId, getFiles: () => files || [] })] : [])]} />
           </span></span>
       </div>
       <div className="rulerows">
