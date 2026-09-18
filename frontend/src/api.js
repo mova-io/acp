@@ -1766,6 +1766,7 @@ export const REPUBLISH_ERROR_MESSAGES = {
   remaining_issues_confirmation_required: 'This version still has remaining issues. Confirm publishing it with its remaining issues recorded, then try again.',
   republish_blocked: 'The updated copy cannot be published yet. Approved changes may still be applying, or another publication is in progress.',
   release_not_found: 'No saved release was found for this scan. Refresh release status.',
+  republish_refused: 'None of the selected copies were published. The reason for each is shown below; earlier published copies are unchanged.',
 }
 // remaining_issue_files names exactly the files whose confirmation box was ticked; the server
 // refuses any file needing confirmation that is not listed (409, detail.files).
@@ -1781,6 +1782,7 @@ export const republishRelease = (scanId, { expected_artifacts, allow_remaining_i
       const code = detail?.code || error?.code
       if (code) error.code = code
       if (Array.isArray(detail?.files)) error.files = detail.files
+      if (Array.isArray(detail?.results)) error.results = detail.results
       const serverMessage = detail?.message || null
       if (code === 'remaining_issues_confirmation_required' && error.files?.length) {
         error.message = `${error.files.join(', ')} still ${error.files.length === 1 ? 'has' : 'have'} remaining issues. Refresh release status, confirm publishing ${error.files.length === 1 ? 'that version' : 'those versions'} with remaining issues recorded, then try again.`

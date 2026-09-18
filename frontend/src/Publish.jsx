@@ -564,7 +564,11 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
   // Settled means publication is no longer in flight, whatever the outcome. A failed republish
   // leaves the delivered receipt untouched (published, out_of_date, same digest) and reports the
   // refusal as publication.out_of_date[i].last_attempt_failure, so digest movement is NOT the test.
-  // Returns 'current' | 'failed' (settled but still out of date) | 'settled' | 'pending' | 'unknown'.
+  // Success is DIGEST MOVEMENT to the version that was sent: a row now naming the sent digest was
+  // published, even if a newer correction saved meanwhile makes it out_of_date again.
+  // Returns 'current' | 'published_newer' (sent version published, a newer one exists) | 'failed'
+  // (settled, sent version not delivered) | 'settled' | 'pending' | 'unknown'.
+  // `items` are ONLY the admitted files: a refused file is never polled or shown as publishing.
   const afterRepublish = async (result, items) => {
     const context = releaseContext.current
     const files = items.map((item) => item.file)
@@ -572,10 +576,13 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
       const row = (status?.documents || []).find((item) => item.file === file)
       return row && !['queued', 'running'].includes(row.status) && row.publication_state !== 'publishing'
     })
+    const sent = Object.fromEntries(items.map((item) => [item.file, item.current_artifact_digest || null]))
+    const delivered = (row) => row?.status === 'published' && !!sent[row.file] && row.published_artifact_digest === sent[row.file]
     const outcome = (status) => {
       const rows = files.map((file) => (status?.documents || []).find((item) => item.file === file))
       if (rows.every((row) => row?.status === 'published' && row.publication_state === 'current')) return 'current'
-      return rows.some((row) => row?.publication_state === 'out_of_date' || ['failed', 'interrupted'].includes(row?.status)) ? 'failed' : 'settled'
+      if (rows.some((row) => !delivered(row) && (row?.publication_state === 'out_of_date' || ['failed', 'interrupted'].includes(row?.status)))) return 'failed'
+      return rows.every(delivered) ? 'published_newer' : 'settled'
     }
     setRepublishing(true)
     setReportsRefresh((value) => value + 1)
@@ -592,7 +599,7 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
         applyReleaseStatus(status)
         setReleaseError(null)
         if (settled(status)) {
-          ;(status.documents || []).filter((row) => files.includes(row.file) && row.status === 'published' && row.publication_state === 'current')
+          ;(status.documents || []).filter((row) => files.includes(row.file) && (delivered(row) || (row.status === 'published' && row.publication_state === 'current')))
             .forEach((row) => onPublish?.(row.file))
           return outcome(status)
         }
@@ -914,6 +921,11 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
     const receiptNotCurrent = result?.publication_state ? result.publication_state !== 'current'
       : result?.status === 'published' && !deliveryIsCurrent(file, result)
     if (category === 'published' && receiptNotCurrent) return states[index]
+    // A server verdict that the delivered copy is an earlier version (or unconfirmed) outranks any
+    // batch classification: "Classification unavailable" must not hide an exact version mismatch.
+    if (category && ['out_of_date', 'identity_unknown', 'publishing'].includes(result?.publication_state)) return states[index]
+    // An unclassified plan member with a server-confirmed CURRENT receipt (e.g. after republish) is delivered.
+    if (category === 'unclassified' && result?.publication_state === 'current' && deliveryIsCurrent(file, result)) return states[index]
     return category ? ({
       published:{status:'released',label:'Published',reason:'Current corrected copy confirmed at the saved destination.'},
       waiting:{status:'waiting',label:'Waiting for delivery',reason:'ACP is waiting for processing and release checks.'},
@@ -992,7 +1004,8 @@ export default function Publish({ run, files = [], certified = [], readOnly = fa
                     onClick={startRelease}>More delivery options</button>}
           </div>
         </div>
-        <AutomaticPublicationStatus authorization={currentAutomaticAuthorization} pending={automaticStatusPending} error={automaticStatusError} compact destinationLabel={releaseDestination?.name || releaseProvider} />
+        <AutomaticPublicationStatus authorization={currentAutomaticAuthorization} pending={automaticStatusPending} error={automaticStatusError} compact destinationLabel={releaseDestination?.name || releaseProvider}
+          outOfDateFiles={(publication?.out_of_date || []).map((item) => item?.file).filter(Boolean)} />
         <ReleaseOutcomeSummary scanId={run?.id} authorization={automaticCoveredFiles.length ? currentAutomaticAuthorization : null}
           pending={automaticStatusPending} error={automaticStatusError} files={releaseFiles} results={releaseResults}
           snapshot={remediationSnapshot} folders={releaseFolders.length ? releaseFolders : releaseFolder?.url ? [releaseFolder] : []}

@@ -20,6 +20,7 @@ export default function ReleaseCorrectionNotice({ scanId, publication, busy = fa
   const [message, setMessage] = useState('')
   const [error, setError] = useState(null)
   const [settledFailed, setSettledFailed] = useState(false)
+  const [refused, setRefused] = useState([])
   const outOfDate = (publication?.out_of_date || []).filter((item) => item?.file)
   const unknown = (publication?.identity_unknown || []).filter(Boolean)
   const publishing = busy || sending || publication?.state === 'publishing'
@@ -40,22 +41,33 @@ export default function ReleaseCorrectionNotice({ scanId, publication, busy = fa
       allow_remaining_issues: remainingIssueFiles.length > 0,
       remaining_issue_files: remainingIssueFiles,
     }
-    setSending(true); setError(null); setSettledFailed(false)
-    setMessage('Publishing the updated copy. Reports refresh after it finishes.')
+    setSending(true); setError(null); setSettledFailed(false); setRefused([])
+    setMessage('Sending the publish request for the updated copy.')
     try {
       const result = await (republish || republishRelease)(scanId, body)
       const alreadyCurrent = result?.already_current === true || result?.result === 'already_current'
+      // Contract v3: a 200 names the admitted files in `republished` and any refused ones in
+      // `refused`. Only admitted files are followed; a refused file is never called "publishing".
+      const refusedRows = (Array.isArray(result?.refused) ? result.refused : []).filter((row) => row?.file)
+      const admittedNames = Array.isArray(result?.republished) && result?.result === 'republished' ? result.republished : null
+      const admitted = admittedNames ? outOfDate.filter((item) => admittedNames.includes(item.file))
+        : outOfDate.filter((item) => !refusedRows.some((row) => row.file === item.file))
+      setRefused(refusedRows)
+      if (!admitted.length && !alreadyCurrent) { setMessage(''); return }
       setMessage(alreadyCurrent ? 'The published copy is already the current corrected copy.'
         : result?.already_publishing === true ? 'This updated copy is already being published. Release status and reports will refresh when it finishes.'
-        : 'Updated copy publishing started. Release status and reports will refresh when it finishes.')
-      const outcome = await onRepublished?.(result, outOfDate)
+        : `Publishing started for ${admitted.map((item) => item.file).join(', ')}. Release status and reports will refresh when it finishes.`)
+      const outcome = await onRepublished?.(result, admitted)
       // A settled-but-still-out-of-date outcome is a failure: its reason is rendered from
       // last_attempt_failure below (one alert), so this status line never claims progress.
       if (outcome === 'current') setMessage('Updated copy published. Reports refresh with it.')
+      else if (outcome === 'published_newer') setMessage('The updated copy was published; a newer correction was saved since. Publish again to deliver the newest version.')
       else if (outcome === 'failed' || outcome === 'settled' || outcome === 'unknown') { setMessage(''); setSettledFailed(outcome === 'failed') }
       else if (outcome === 'pending') setMessage('The updated copy is still publishing in the background. You may leave this page and return later.')
     } catch (failure) {
       setMessage('')
+      // A 409 with zero admitted work may carry per-file results; nothing is followed or polled.
+      setRefused((Array.isArray(failure?.results) ? failure.results : []).filter((row) => row?.file && !['queued', 'published'].includes(row.status)))
       setError({ text: failure?.message || 'The updated copy could not be published.', refresh: failure?.code === 'artifact_changed' || failure?.refreshRequired === true })
       if (failure?.code === 'artifact_changed') setConfirmed({})
       else if (failure?.code === 'remaining_issues_confirmation_required' && Array.isArray(failure.files))
@@ -79,6 +91,8 @@ export default function ReleaseCorrectionNotice({ scanId, publication, busy = fa
     {failures.length > 0 && <div role="alert">{failures.map((item) => <p key={item.file}>
       <b>{item.file}:</b> The last attempt to publish version <code>{shortDigest(item.last_attempt_failure.attempted_artifact_digest || item.current_artifact_digest)}</code>{when(item.last_attempt_failure.at) ? ` (${when(item.last_attempt_failure.at)})` : ''} did not complete: {item.last_attempt_failure.explanation || item.last_attempt_failure.failure_category || 'no reason was recorded'}. The earlier published copy is unchanged.{canRepublish ? ' You can try again.' : ''}
     </p>)}</div>}
+    {refused.length > 0 && <div role="alert" aria-label="Copies not published">{refused.map((row) => <p key={row.file}>
+      <b>{row.file}</b> was not published: {row.explanation || row.failure_category || 'no reason was recorded'}. Its earlier published copy is unchanged.</p>)}</div>}
     {!publishing && settledFailed && !failures.length && outOfDate.length > 0 && <p role="alert">The updated copy was not published. The earlier published copy is unchanged; no reason was recorded.</p>}
     {needsConfirmation.map((item) => <label key={confirmationKey(item)} style={{ display: 'block', marginTop: 8 }}>
       <input type="checkbox" checked={confirmed[confirmationKey(item)] === true} disabled={readOnly || publishing}

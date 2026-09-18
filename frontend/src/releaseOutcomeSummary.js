@@ -38,6 +38,13 @@ export function releaseOutcomeSummary({ scanId, authorization, pending = false, 
     && currentReceipt(files.find(file => file.file === name))).length : null
   const confirmed = deliveryAvailable && delivered === batch.delivered
   const complete = confirmed && batch.state === 'succeeded' && delivered === domain.total
+  // A receipt that names an earlier version than the current corrected copy (server verdict
+  // publication_state 'out_of_date') is the reason delivery is not confirmed; say so exactly.
+  const outOfDate = (authorizationScope ? names : files.map(file => file.file)).flatMap(name => {
+    const result = results[name]
+    return result?.publication_state === 'out_of_date' ? [{ file: name, published: result.published_artifact_digest || result.artifact_digest || null,
+      current: result.current_artifact_digest || null }] : []
+  })
   const authorizationBlocked = authorizationScope && (authorization.requires_reconnect === true
     || authorization.needs_attention === true || ['blocked', 'failed', 'stopped'].includes(authorization.status))
   const blocked = authorizationBlocked || (deliveryAvailable
@@ -50,10 +57,12 @@ export function releaseOutcomeSummary({ scanId, authorization, pending = false, 
     && (snapshot.scan_id || snapshot.run_id) === scanId
     && !!snapshot.batch_id && snapshot.batch_id === authorization.run_id
   const findings = findingBound ? findingMath(snapshot) : { exact: false }
-  // Release uses the same equation as Remediate: every assessed finding that is not
-  // resolved with verification remains open. Exclusions and superseded findings stay
-  // named separately below, but must not disappear from the open total.
-  const open = findings.exact ? findings.remaining : null
+  // Every assessed finding without a verified fix remains open, EXCEPT findings replaced by
+  // reassessment: their target no longer exists (e.g. a retired 1.1.1 image), so they are not an
+  // open problem and must not be counted as one. They are shown separately; they are never added
+  // to verified fixes either (3 verified + 1 replaced reads 3 verified, 0 open, 1 replaced).
+  // Exclusions stay in the open total: the problem still exists, the plan chose not to fix it.
+  const open = findings.exact ? findings.remaining - findings.rec.superseded : null
   const deliveryReason = confirmed ? null
     : pending ? 'Automatic publication evidence is still loading.'
       : error ? 'Automatic publication evidence could not be loaded.'
@@ -63,7 +72,7 @@ export function releaseOutcomeSummary({ scanId, authorization, pending = false, 
               : 'Saved delivery totals do not match current corrected-copy receipts.'
   return {
     state: complete ? 'complete' : blocked ? 'attention' : deliveryAvailable && confirmed ? 'processing' : 'unavailable',
-    title: complete ? 'Delivery complete' : blocked ? 'Delivery needs attention'
+    title: complete ? 'Delivery complete' : outOfDate.length ? `Published ${outOfDate.length === 1 ? 'copy is' : 'copies are'} out of date` : blocked ? 'Delivery needs attention'
       : deliveryAvailable && confirmed ? 'Delivery in progress' : 'Checking delivery confirmation',
     total: deliveryAvailable ? domain.total : null,
     delivered: confirmed ? delivered : null,
@@ -74,5 +83,6 @@ export function releaseOutcomeSummary({ scanId, authorization, pending = false, 
     superseded: findings.exact ? findings.rec.superseded : null,
     deliveryReason,
     complete,
+    outOfDate,
   }
 }

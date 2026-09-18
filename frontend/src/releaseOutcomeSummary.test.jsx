@@ -21,8 +21,9 @@ function evidence(delivered = 2, status = 'completed') {
     results:Object.fromEntries(files.slice(0,delivered).map(f => [f.file,{status:'published',artifact_digest:`sha256:${sha}`}])) }
 }
 describe('Release outcome evidence', () => {
+  // open = assessed 10 - verified 4 - superseded 1 (replaced by reassessment is not an open problem); excluded 1 stays open.
   it('summarizes the whole saved authorization with exact findings and current-copy receipts', () => {
-    expect(releaseOutcomeSummary(evidence())).toMatchObject({complete:true,total:2,delivered:2,fixed:4,open:6,excluded:1,superseded:1})
+    expect(releaseOutcomeSummary(evidence())).toMatchObject({complete:true,total:2,delivered:2,fixed:4,open:5,excluded:1,superseded:1})
   })
   it('keeps partial delivery in progress and never borrows a completed one-file request', () => {
     expect(releaseOutcomeSummary({...evidence(1,'publishing'), latestRequest:{status:'completed',total:1}}))
@@ -61,12 +62,12 @@ describe('Release outcome evidence', () => {
     blocked.authorization={...blocked.authorization,status:'blocked',requires_reconnect:true,
       batch_progress:{available:false,scope:'automatic'}}
     expect(releaseOutcomeSummary(blocked)).toMatchObject({state:'attention',title:'Delivery needs attention',
-      delivered:null,fixed:4,open:6,deliveryReason:'Saved delivery evidence is incomplete for this authorization.'})
+      delivered:null,fixed:4,open:5,deliveryReason:'Saved delivery evidence is incomplete for this authorization.'})
   })
   it('keeps findings and delivery as separate evidence during loading and errors', () => {
-    expect(releaseOutcomeSummary({...evidence(),pending:true})).toMatchObject({fixed:4,open:6,delivered:null,
+    expect(releaseOutcomeSummary({...evidence(),pending:true})).toMatchObject({fixed:4,open:5,delivered:null,
       deliveryReason:'Automatic publication evidence is still loading.'})
-    expect(releaseOutcomeSummary({...evidence(),error:'offline'})).toMatchObject({fixed:4,open:6,delivered:null,
+    expect(releaseOutcomeSummary({...evidence(),error:'offline'})).toMatchObject({fixed:4,open:5,delivered:null,
       deliveryReason:'Automatic publication evidence could not be loaded.'})
   })
   it('matches the Remediate finding equation for a blocked 4,771-finding release', () => {

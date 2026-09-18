@@ -82,7 +82,7 @@ describe('ReleaseCorrectionNotice', () => {
     await click(action)
     expect(republish).toHaveBeenCalledExactlyOnceWith('scan1', { expected_artifacts: { 'report.docx': V2 }, allow_remaining_issues: true, remaining_issue_files: ['report.docx'] })
     expect(onRepublished).toHaveBeenCalledTimes(1)
-    expect(c.querySelector('[role="status"]').textContent).toContain('Updated copy publishing started')
+    expect(c.querySelector('[role="status"]').textContent).toContain('Publishing started for report.docx.')
   })
 
   it('never authorizes remaining issues when no confirmation is required', async () => {
@@ -329,7 +329,7 @@ describe('Publish (Release tab) after a post-publication correction', () => {
     expect(button(c, 'Publishing updated copy…')).toBeUndefined()
     expect(button(c, 'Publish updated copy and refresh reports').disabled).toBe(false)
     expect(c.textContent).not.toMatch(/still publishing/i)
-    expect(c.textContent).not.toContain('Updated copy publishing started')
+    expect(c.textContent).not.toContain('Publishing started for report.docx.')
     expect(c.querySelector('.release-correction-notice [role="alert"]').textContent).toContain('did not complete: The authorized corrected artifact changed; confirm again')
     expect(publicationCells(c)).toEqual(['Published copy out of date'])
     expect(onPublish).not.toHaveBeenCalled()
